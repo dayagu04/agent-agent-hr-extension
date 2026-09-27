@@ -82,6 +82,7 @@ function installAssistant() {
   const adapter = getSiteAdapter();
   let state: StoredState | null = null;
   let matches: FieldMatch[] = [];
+  let savedMappings: Record<string, ProfileFieldKey> = {};
   let selectedIds = new Set<string>();
   let hasRenderedOnce = false;
   let lastFill: Array<{ element: FillableElement; value: string }> = [];
@@ -111,7 +112,7 @@ function installAssistant() {
       const checked = selectedIds.has(match.id);
       return `<div class="gugu-row" data-id="${match.id}">
         <input class="gugu-check" type="checkbox" ${checked ? "checked" : ""} aria-label="填写${escapeHtml(match.label)}" />
-        <span class="gugu-field"><span class="gugu-field-label" title="${escapeHtml(match.label)}">${escapeHtml(match.label)} → ${FIELD_LABELS[match.key]}</span><span class="gugu-field-value" title="${escapeHtml(match.value)}">${escapeHtml(match.value)}</span></span>
+        <span class="gugu-field"><span class="gugu-field-label" title="${escapeHtml(match.label)}">${escapeHtml(match.label)}</span><select class="gugu-key-select" data-action="map" aria-label="将${escapeHtml(match.label)}映射为">${fieldOptions(match.key)}</select><span class="gugu-field-value" title="${escapeHtml(match.value)}">${escapeHtml(match.value) || "档案中暂无该字段"}</span></span>
         <span class="gugu-confidence ${match.confidence < 0.78 ? "medium" : ""}">${Math.round(match.confidence * 100)}%</span>
         ${canPolish ? `<button class="gugu-ai" data-action="polish" type="button">AI 润色此项</button>` : ""}
       </div>`;
@@ -123,7 +124,8 @@ function installAssistant() {
     const response = await chrome.runtime.sendMessage({ type: "GET_ASSISTANT_STATE" }) as { ok: boolean; state?: StoredState; error?: string };
     if (!response.ok || !response.state) throw new Error(response.error || "无法读取个人档案");
     state = response.state;
-    matches = scanPage(state.profile, elements, adapter, elementIds);
+    savedMappings = await loadSiteMappings();
+    matches = scanPage(state.profile, elements, adapter, elementIds, savedMappings);
     selectedIds = new Set(matches.filter((match) => hasRenderedOnce ? selectedIds.has(match.id) : match.confidence >= 0.78).map((match) => match.id));
     hasRenderedOnce = true;
     render();
@@ -204,11 +206,24 @@ function installAssistant() {
   });
 
   root.addEventListener("change", (event) => {
-    const input = event.target as HTMLInputElement;
+    const input = event.target as HTMLInputElement | HTMLSelectElement;
     const row = input.closest<HTMLElement>(".gugu-row");
-    if (!row || !input.classList.contains("gugu-check")) return;
+    if (!row) return;
     const id = row.dataset.id;
     if (!id) return;
+    const match = matches.find((item) => item.id === id);
+    if (input instanceof HTMLSelectElement && input.dataset.action === "map" && match && state) {
+      const key = input.value as ProfileFieldKey;
+      match.key = key;
+      match.value = state.profile[key];
+      match.confidence = 0.96;
+      savedMappings[normalizeLabel(match.label)] = key;
+      void saveSiteMapping(savedMappings);
+      render();
+      showNotice(match.value ? "已记住该站点的字段映射。" : "该字段在档案中暂无内容，请先补充个人档案。", !match.value);
+      return;
+    }
+    if (!(input instanceof HTMLInputElement) || !input.classList.contains("gugu-check")) return;
     if (input.checked) selectedIds.add(id);
     else selectedIds.delete(id);
   });
@@ -221,7 +236,7 @@ function installAssistant() {
     if (!panelOpen || records.every((record) => isAssistantMutation(record, host))) return;
     window.clearTimeout(refreshTimer);
     refreshTimer = window.setTimeout(() => {
-      void refresh().then(() => showNotice("页面新增字段，已自动更新识别结果。"));
+      void refresh().then(() => showNotice("页面新增字段，已自动更新识别结果。"), (error) => showNotice(error instanceof Error ? error.message : "动态字段识别失败", true));
     }, 350);
   });
   observer.observe(document.documentElement, { childList: true, subtree: true });
@@ -232,15 +247,15 @@ function isAssistantMutation(record: MutationRecord, host: HTMLElement): boolean
   return Array.from(record.addedNodes).every((node) => node instanceof Node && (node === host || host.contains(node)));
 }
 
-function scanPage(profile: ProfileData, elements: Map<string, FillableElement>, adapter: SiteAdapter, elementIds: WeakMap<FillableElement, string>): FieldMatch[] {
+function scanPage(profile: ProfileData, elements: Map<string, FillableElement>, adapter: SiteAdapter, elementIds: WeakMap<FillableElement, string>, mappings: Record<string, ProfileFieldKey>): FieldMatch[] {
   elements.clear();
   const candidates = Array.from(document.querySelectorAll<FillableElement>("input, textarea, select, [contenteditable=true]"));
   const matches: FieldMatch[] = [];
   for (const element of candidates) {
     if (!isEligible(element) || isIgnoredByAdapter(element, adapter)) continue;
     const label = describeElement(element, adapter);
-    const match = matchField(label, element, profile, adapter);
-    if (!match || !match.value.trim()) continue;
+    const match = matchField(label, element, profile, adapter, mappings);
+    if (!match) continue;
     const id = elementIds.get(element) ?? `field-${nextElementId++}`;
     elementIds.set(element, id);
     elements.set(id, element);
@@ -290,9 +305,11 @@ function describeElement(element: FillableElement, adapter: SiteAdapter): string
   return Array.from(parts).filter(Boolean).join(" | ");
 }
 
-function matchField(label: string, element: FillableElement, profile: ProfileData, adapter: SiteAdapter): { key: ProfileFieldKey; value: string; confidence: number } | null {
+function matchField(label: string, element: FillableElement, profile: ProfileData, adapter: SiteAdapter, mappings: Record<string, ProfileFieldKey>): { key: ProfileFieldKey; value: string; confidence: number } | null {
   const lowered = label.toLowerCase();
   if (/(验证码|密码|确认密码|邀请码|搜索|captcha|verification code|password|search)/i.test(lowered)) return null;
+  const mappedKey = mappings[normalizeLabel(label)];
+  if (mappedKey && profile[mappedKey]) return { key: mappedKey, value: profile[mappedKey], confidence: 0.96 };
   if (element instanceof HTMLInputElement) {
     if (element.type === "email" && profile.email) return { key: "email", value: profile.email, confidence: 0.98 };
     if (element.type === "tel" && profile.phone) return { key: "phone", value: profile.phone, confidence: 0.98 };
@@ -308,6 +325,29 @@ function matchField(label: string, element: FillableElement, profile: ProfileDat
     return { key: rule.key, value: profile[rule.key], confidence: Math.min(0.98, confidence + adapter.confidenceBoost(label, rule.key)) };
   }
   return null;
+}
+
+const MAPPINGS_STORAGE_KEY = "guguSiteMappings";
+
+function normalizeLabel(label: string): string {
+  return label.toLowerCase().replace(/\s+/g, " ").trim().slice(0, 180);
+}
+
+async function loadSiteMappings(): Promise<Record<string, ProfileFieldKey>> {
+  const stored = await chrome.storage.local.get(MAPPINGS_STORAGE_KEY);
+  const allMappings = stored[MAPPINGS_STORAGE_KEY] as Record<string, Record<string, ProfileFieldKey>> | undefined;
+  return { ...(allMappings?.[location.hostname] ?? {}) };
+}
+
+async function saveSiteMapping(mapping: Record<string, ProfileFieldKey>): Promise<void> {
+  const stored = await chrome.storage.local.get(MAPPINGS_STORAGE_KEY);
+  const allMappings = (stored[MAPPINGS_STORAGE_KEY] as Record<string, Record<string, ProfileFieldKey>> | undefined) ?? {};
+  allMappings[location.hostname] = mapping;
+  await chrome.storage.local.set({ [MAPPINGS_STORAGE_KEY]: allMappings });
+}
+
+function fieldOptions(selected: ProfileFieldKey): string {
+  return (Object.keys(FIELD_LABELS) as ProfileFieldKey[]).map((key) => `<option value="${key}" ${key === selected ? "selected" : ""}>${FIELD_LABELS[key]}</option>`).join("");
 }
 
 function deduplicate(matches: FieldMatch[]): FieldMatch[] {

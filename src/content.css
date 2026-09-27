@@ -23,6 +23,7 @@
 .gugu-check { width: 17px; height: 17px; margin-top: 3px; accent-color: #3b63f3; }
 .gugu-field { min-width: 0; }
 .gugu-field-label { display: block; color: #252f43; font-size: 13px; font-weight: 750; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gugu-key-select { max-width: 160px; margin-top: 6px; border: 1px solid #d7deea; border-radius: 7px; padding: 4px 6px; color: #46546c; background: #fff; font-size: 11px; }
 .gugu-field-value { display: block; margin-top: 5px; color: #6e7a90; font-size: 12px; line-height: 1.45; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .gugu-confidence { margin-top: 2px; padding: 3px 6px; border-radius: 7px; color: #187858; background: #e0f6ed; font-size: 10px; font-weight: 800; }
 .gugu-confidence.medium { color: #996514; background: #fff1cc; }
