@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "谷谷网申助手",
+  "short_name": "谷谷网申",
+  "version": "0.1.0",
+  "description": "在用户确认后识别并填写招聘网站表单，个人资料默认只保存在本机浏览器。",
+  "minimum_chrome_version": "114",
+  "permissions": ["activeTab", "scripting", "storage"],
+  "optional_host_permissions": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "action": {
+    "default_title": "打开谷谷网申助手",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png"
+    },
+    "default_popup": "popup.html"
+  },
+  "options_page": "options.html"
+}
