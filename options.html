@@ -52,9 +52,14 @@
           <div class="stacked-fields">
             <label>个人简介<textarea name="summary" rows="4" placeholder="用于自我介绍、个人优势等开放题"></textarea></label>
             <label>技能<textarea name="skills" rows="3" placeholder="Python、FastAPI、数据分析……"></textarea></label>
-            <label>实习 / 工作经历<textarea name="experience" rows="7" placeholder="建议包含单位、岗位、日期、职责和可核实成果"></textarea></label>
-            <label>项目经历<textarea name="projects" rows="7"></textarea></label>
-            <label>获奖经历<textarea name="awards" rows="4"></textarea></label>
+            <div class="structured-heading"><div><h3>结构化经历</h3><p>多条记录会自动合并为网申长文本；请保留真实、可核实的职责和成果。</p></div><span class="inline-state">可增删，暂不自动排序</span></div>
+            <div class="entry-groups">
+              <div class="entry-group"><div class="entry-group-heading"><h3>教育经历</h3><button class="add-entry" data-add-entry="education" type="button">＋新增</button></div><div id="educationEntries" class="entry-list"></div></div>
+              <div class="entry-group"><div class="entry-group-heading"><h3>实习 / 工作</h3><button class="add-entry" data-add-entry="experience" type="button">＋新增</button></div><div id="experienceEntries" class="entry-list"></div></div>
+              <div class="entry-group"><div class="entry-group-heading"><h3>项目经历</h3><button class="add-entry" data-add-entry="project" type="button">＋新增</button></div><div id="projectEntries" class="entry-list"></div></div>
+              <div class="entry-group"><div class="entry-group-heading"><h3>获奖经历</h3><button class="add-entry" data-add-entry="award" type="button">＋新增</button></div><div id="awardEntries" class="entry-list"></div></div>
+            </div>
+            <details class="legacy-fields"><summary>保留的长文本兼容字段</summary><div class="stacked-fields legacy-field-content"><label>实习 / 工作经历<textarea name="experience" rows="5" placeholder="没有结构化记录时，可继续填写长文本"></textarea></label><label>项目经历<textarea name="projects" rows="5"></textarea></label><label>获奖经历<textarea name="awards" rows="4"></textarea></label></div></details>
           </div>
         </section>
 
@@ -80,4 +85,3 @@
     <script type="module" src="/src/options.ts"></script>
   </body>
 </html>
-
