@@ -90,6 +90,8 @@ export interface FieldMatch {
   value: string;
   confidence: number;
   kind: "input" | "textarea" | "select" | "contenteditable";
+  suggestedValue?: string;
+  factWarnings?: string[];
 }
 
 export interface PolishRequest {

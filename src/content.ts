@@ -109,10 +109,14 @@ function installAssistant() {
     }
     list.innerHTML = matches.map((match) => {
       const canPolish = state?.ai.enabled && ["summary", "experience", "projects"].includes(match.key) && match.value.length >= 12;
+      const displayValue = match.suggestedValue ?? match.value;
+      const suggestion = match.suggestedValue
+        ? `<small class="gugu-original">原文：${escapeHtml(match.value)}</small><textarea class="gugu-suggestion" data-action="edit-suggestion" aria-label="编辑 AI 建议">${escapeHtml(displayValue)}</textarea>${(match.factWarnings ?? []).map((warning) => `<small class="gugu-warning">⚠ ${escapeHtml(warning)}</small>`).join("")}`
+        : `<span class="gugu-field-value" title="${escapeHtml(displayValue)}">${escapeHtml(displayValue) || "档案中暂无该字段"}</span>`;
       const checked = selectedIds.has(match.id);
       return `<div class="gugu-row" data-id="${match.id}">
         <input class="gugu-check" type="checkbox" ${checked ? "checked" : ""} aria-label="填写${escapeHtml(match.label)}" />
-        <span class="gugu-field"><span class="gugu-field-label" title="${escapeHtml(match.label)}">${escapeHtml(match.label)}</span><select class="gugu-key-select" data-action="map" aria-label="将${escapeHtml(match.label)}映射为">${fieldOptions(match.key)}</select><span class="gugu-field-value" title="${escapeHtml(match.value)}">${escapeHtml(match.value) || "档案中暂无该字段"}</span></span>
+        <span class="gugu-field"><span class="gugu-field-label" title="${escapeHtml(match.label)}">${escapeHtml(match.label)}</span><select class="gugu-key-select" data-action="map" aria-label="将${escapeHtml(match.label)}映射为">${fieldOptions(match.key)}</select>${suggestion}</span>
         <span class="gugu-confidence ${match.confidence < 0.78 ? "medium" : ""}">${Math.round(match.confidence * 100)}%</span>
         ${canPolish ? `<button class="gugu-ai" data-action="polish" type="button">AI 润色此项</button>` : ""}
       </div>`;
@@ -172,7 +176,7 @@ function installAssistant() {
         const element = match ? elements.get(match.id) : undefined;
         if (match && element) {
           const originalValue = readElementValue(element);
-          if (fillElement(element, match.value)) {
+          if (fillElement(element, match.suggestedValue ?? match.value)) {
             snapshots.push({ element, value: originalValue });
             filled += 1;
           }
@@ -194,9 +198,10 @@ function installAssistant() {
         request: { sourceText: match.value, question: match.label, companyContext: `${document.title} (${location.hostname})` },
       }) as { ok: boolean; text?: string; error?: string };
       if (response.ok && response.text) {
-        match.value = response.text;
+        match.suggestedValue = response.text;
+        match.factWarnings = findFactWarnings(match.value, response.text);
         render();
-        showNotice("AI 建议已生成但尚未写入页面，请先检查内容，再点击填写。 ");
+        showNotice(match.factWarnings.length ? "AI 建议包含原文没有的数字或日期，请核实后再填写。" : "AI 建议已生成但尚未写入页面，请先检查内容，再点击填写。 ", Boolean(match.factWarnings.length));
       } else {
         button.disabled = false;
         button.textContent = "AI 润色此项";
@@ -221,6 +226,11 @@ function installAssistant() {
       void saveSiteMapping(savedMappings);
       render();
       showNotice(match.value ? "已记住该站点的字段映射。" : "该字段在档案中暂无内容，请先补充个人档案。", !match.value);
+      return;
+    }
+    if (input instanceof HTMLTextAreaElement && input.dataset.action === "edit-suggestion" && match) {
+      match.suggestedValue = input.value;
+      match.factWarnings = findFactWarnings(match.value, input.value);
       return;
     }
     if (!(input instanceof HTMLInputElement) || !input.classList.contains("gugu-check")) return;
@@ -348,6 +358,17 @@ async function saveSiteMapping(mapping: Record<string, ProfileFieldKey>): Promis
 
 function fieldOptions(selected: ProfileFieldKey): string {
   return (Object.keys(FIELD_LABELS) as ProfileFieldKey[]).map((key) => `<option value="${key}" ${key === selected ? "selected" : ""}>${FIELD_LABELS[key]}</option>`).join("");
+}
+
+function findFactWarnings(source: string, suggestion: string): string[] {
+  const warnings: string[] = [];
+  const sourceNumbers = new Set(source.match(/\b\d+(?:\.\d+)?%?\b/g) ?? []);
+  const addedNumbers = (suggestion.match(/\b\d+(?:\.\d+)?%?\b/g) ?? []).filter((number) => !sourceNumbers.has(number));
+  if (addedNumbers.length) warnings.push(`新增数字：${Array.from(new Set(addedNumbers)).join("、")}`);
+  const sourceDates = new Set(source.match(/\b(?:19|20)\d{2}(?:[-/.年]\d{1,2})?(?:[-/.月]\d{1,2})?\b/g) ?? []);
+  const addedDates = (suggestion.match(/\b(?:19|20)\d{2}(?:[-/.年]\d{1,2})?(?:[-/.月]\d{1,2})?\b/g) ?? []).filter((date) => !sourceDates.has(date));
+  if (addedDates.length) warnings.push(`新增日期：${Array.from(new Set(addedDates)).join("、")}`);
+  return warnings;
 }
 
 function deduplicate(matches: FieldMatch[]): FieldMatch[] {
