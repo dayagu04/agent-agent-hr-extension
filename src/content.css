@@ -31,7 +31,7 @@
 .gugu-footer { padding: 12px 16px 16px; border-top: 1px solid #e1e6ef; background: #fff; }
 .gugu-notice { min-height: 18px; margin: 0 0 9px; color: #66758c; font-size: 12px; line-height: 1.45; }
 .gugu-notice.error { color: #ac3939; }
-.gugu-actions { display: grid; grid-template-columns: 1fr 2fr; gap: 9px; }
+.gugu-actions { display: grid; grid-template-columns: 1fr 1fr 1.45fr; gap: 9px; }
 .gugu-button { border-radius: 10px; padding: 10px 12px; font-weight: 750; cursor: pointer; }
 .gugu-secondary { border: 1px solid #d5dce8; color: #46546c; background: #fff; }
 .gugu-primary { border: 1px solid #3862f4; color: #fff; background: #3862f4; box-shadow: 0 7px 18px #3862f42b; }
@@ -41,4 +41,3 @@
   .gugu-panel { inset: 0; width: 100vw; border: 0; border-radius: 0; }
   .gugu-bubble { right: 16px; bottom: 16px; }
 }
-

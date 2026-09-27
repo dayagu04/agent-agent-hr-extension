@@ -1,4 +1,5 @@
 import panelCss from "./content.css?inline";
+import { adapterLabelCandidates, getSiteAdapter, isIgnoredByAdapter, type SiteAdapter } from "./site-adapters";
 import type { FieldMatch, ProfileData, ProfileFieldKey, StoredState } from "./types";
 
 declare global {
@@ -39,6 +40,8 @@ const RULES: Array<{ key: ProfileFieldKey; patterns: RegExp[] }> = [
   { key: "summary", patterns: [/自我介绍/i, /个人优势/i, /自我评价/i, /个人总结/i, /补充说明/i, /summary/i, /about (?:you|yourself)/i, /why.*(?:join|apply)/i] },
 ];
 
+let nextElementId = 0;
+
 if (!window.__guguApplicationAssistantInstalled) {
   window.__guguApplicationAssistantInstalled = true;
   installAssistant();
@@ -61,7 +64,7 @@ function installAssistant() {
       </header>
       <section class="gugu-summary"><div class="gugu-progress"><strong data-role="count">正在识别…</strong><span class="gugu-tier" data-role="tier">一档 · 本地填写</span></div><p>只处理空白且可见的字段，不会点击“提交”或同意协议。</p></section>
       <div class="gugu-list" data-role="list"></div>
-      <footer class="gugu-footer"><p class="gugu-notice" data-role="notice"></p><div class="gugu-actions"><button class="gugu-button gugu-secondary" data-action="rescan">重新识别</button><button class="gugu-button gugu-primary" data-action="fill">填写已选字段</button></div></footer>
+      <footer class="gugu-footer"><p class="gugu-notice" data-role="notice"></p><div class="gugu-actions"><button class="gugu-button gugu-secondary" data-action="rescan">重新识别</button><button class="gugu-button gugu-secondary gugu-hidden" data-action="undo">撤销本轮</button><button class="gugu-button gugu-primary" data-action="fill">填写已选字段</button></div></footer>
     </aside>`;
   shadow.append(style, root);
   document.documentElement.append(host);
@@ -73,9 +76,17 @@ function installAssistant() {
   const tier = root.querySelector<HTMLElement>("[data-role=tier]")!;
   const notice = root.querySelector<HTMLElement>("[data-role=notice]")!;
   const fillButton = root.querySelector<HTMLButtonElement>("[data-action=fill]")!;
+  const undoButton = root.querySelector<HTMLButtonElement>("[data-action=undo]")!;
   const elements = new Map<string, FillableElement>();
+  const elementIds = new WeakMap<FillableElement, string>();
+  const adapter = getSiteAdapter();
   let state: StoredState | null = null;
   let matches: FieldMatch[] = [];
+  let selectedIds = new Set<string>();
+  let hasRenderedOnce = false;
+  let lastFill: Array<{ element: FillableElement; value: string }> = [];
+  let panelOpen = false;
+  let refreshTimer: number | undefined;
 
   function showNotice(message: string, error = false) {
     notice.textContent = message;
@@ -87,17 +98,19 @@ function installAssistant() {
   }
 
   function render() {
-    count.textContent = `识别到 ${matches.length} 个可填写字段`;
+    count.textContent = `识别到 ${matches.length} 个字段 · ${adapter.name}`;
     tier.textContent = state?.ai.enabled ? "二档 · AI 可选" : "一档 · 本地填写";
     fillButton.disabled = matches.length === 0;
+    undoButton.classList.toggle("gugu-hidden", lastFill.length === 0);
     if (!matches.length) {
       list.innerHTML = `<p class="gugu-empty">暂未找到能够可靠匹配的空白字段。可滚动页面让动态表单加载后，再重新识别。</p>`;
       return;
     }
     list.innerHTML = matches.map((match) => {
       const canPolish = state?.ai.enabled && ["summary", "experience", "projects"].includes(match.key) && match.value.length >= 12;
+      const checked = selectedIds.has(match.id);
       return `<div class="gugu-row" data-id="${match.id}">
-        <input class="gugu-check" type="checkbox" checked aria-label="填写${escapeHtml(match.label)}" />
+        <input class="gugu-check" type="checkbox" ${checked ? "checked" : ""} aria-label="填写${escapeHtml(match.label)}" />
         <span class="gugu-field"><span class="gugu-field-label" title="${escapeHtml(match.label)}">${escapeHtml(match.label)} → ${FIELD_LABELS[match.key]}</span><span class="gugu-field-value" title="${escapeHtml(match.value)}">${escapeHtml(match.value)}</span></span>
         <span class="gugu-confidence ${match.confidence < 0.78 ? "medium" : ""}">${Math.round(match.confidence * 100)}%</span>
         ${canPolish ? `<button class="gugu-ai" data-action="polish" type="button">AI 润色此项</button>` : ""}
@@ -110,17 +123,21 @@ function installAssistant() {
     const response = await chrome.runtime.sendMessage({ type: "GET_ASSISTANT_STATE" }) as { ok: boolean; state?: StoredState; error?: string };
     if (!response.ok || !response.state) throw new Error(response.error || "无法读取个人档案");
     state = response.state;
-    matches = scanPage(state.profile, elements);
+    matches = scanPage(state.profile, elements, adapter, elementIds);
+    selectedIds = new Set(matches.filter((match) => hasRenderedOnce ? selectedIds.has(match.id) : match.confidence >= 0.78).map((match) => match.id));
+    hasRenderedOnce = true;
     render();
   }
 
   async function open() {
+    panelOpen = true;
     panel.classList.remove("gugu-hidden");
     bubble.classList.add("gugu-hidden");
     try { await refresh(); } catch (error) { showNotice(error instanceof Error ? error.message : "识别失败", true); }
   }
 
   function close() {
+    panelOpen = false;
     panel.classList.add("gugu-hidden");
     bubble.classList.remove("gugu-hidden");
   }
@@ -134,14 +151,33 @@ function installAssistant() {
       try { await refresh(); } catch (error) { showNotice(error instanceof Error ? error.message : "识别失败", true); }
       return;
     }
+    if (action === "undo") {
+      let restored = 0;
+      for (const snapshot of lastFill) {
+        if (restoreElement(snapshot.element, snapshot.value)) restored += 1;
+      }
+      lastFill = [];
+      render();
+      showNotice(`已撤销 ${restored} 项填写。`);
+      return;
+    }
     if (action === "fill") {
       let filled = 0;
+      const snapshots: Array<{ element: FillableElement; value: string }> = [];
       for (const row of list.querySelectorAll<HTMLElement>(".gugu-row")) {
         if (!row.querySelector<HTMLInputElement>(".gugu-check")?.checked) continue;
         const match = matches.find((item) => item.id === row.dataset.id);
         const element = match ? elements.get(match.id) : undefined;
-        if (match && element && fillElement(element, match.value)) filled += 1;
+        if (match && element) {
+          const originalValue = readElementValue(element);
+          if (fillElement(element, match.value)) {
+            snapshots.push({ element, value: originalValue });
+            filled += 1;
+          }
+        }
       }
+      lastFill = snapshots;
+      render();
       showNotice(`已填写 ${filled} 项。请逐项检查，确认无误后由你手动提交。`);
       return;
     }
@@ -167,22 +203,46 @@ function installAssistant() {
     }
   });
 
+  root.addEventListener("change", (event) => {
+    const input = event.target as HTMLInputElement;
+    const row = input.closest<HTMLElement>(".gugu-row");
+    if (!row || !input.classList.contains("gugu-check")) return;
+    const id = row.dataset.id;
+    if (!id) return;
+    if (input.checked) selectedIds.add(id);
+    else selectedIds.delete(id);
+  });
+
   chrome.runtime.onMessage.addListener((message: unknown) => {
     if ((message as { type?: string }).type === "OPEN_ASSISTANT") void open();
   });
+
+  const observer = new MutationObserver((records) => {
+    if (!panelOpen || records.every((record) => isAssistantMutation(record, host))) return;
+    window.clearTimeout(refreshTimer);
+    refreshTimer = window.setTimeout(() => {
+      void refresh().then(() => showNotice("页面新增字段，已自动更新识别结果。"));
+    }, 350);
+  });
+  observer.observe(document.documentElement, { childList: true, subtree: true });
 }
 
-function scanPage(profile: ProfileData, elements: Map<string, FillableElement>): FieldMatch[] {
+function isAssistantMutation(record: MutationRecord, host: HTMLElement): boolean {
+  if (record.target === host || host.contains(record.target)) return true;
+  return Array.from(record.addedNodes).every((node) => node instanceof Node && (node === host || host.contains(node)));
+}
+
+function scanPage(profile: ProfileData, elements: Map<string, FillableElement>, adapter: SiteAdapter, elementIds: WeakMap<FillableElement, string>): FieldMatch[] {
   elements.clear();
   const candidates = Array.from(document.querySelectorAll<FillableElement>("input, textarea, select, [contenteditable=true]"));
   const matches: FieldMatch[] = [];
-  let sequence = 0;
   for (const element of candidates) {
-    if (!isEligible(element)) continue;
-    const label = describeElement(element);
-    const match = matchField(label, element, profile);
+    if (!isEligible(element) || isIgnoredByAdapter(element, adapter)) continue;
+    const label = describeElement(element, adapter);
+    const match = matchField(label, element, profile, adapter);
     if (!match || !match.value.trim()) continue;
-    const id = `field-${sequence++}`;
+    const id = elementIds.get(element) ?? `field-${nextElementId++}`;
+    elementIds.set(element, id);
     elements.set(id, element);
     matches.push({ id, label: label.slice(0, 100) || FIELD_LABELS[match.key], key: match.key, value: match.value, confidence: match.confidence, kind: elementKind(element) });
   }
@@ -208,7 +268,7 @@ function cleanText(value: string | null | undefined): string {
   return (value ?? "").replace(/\s+/g, " ").replace(/[*：:]+$/g, "").trim();
 }
 
-function describeElement(element: FillableElement): string {
+function describeElement(element: FillableElement, adapter: SiteAdapter): string {
   const parts = new Set<string>();
   if (element.id) {
     const label = document.querySelector<HTMLLabelElement>(`label[for="${CSS.escape(element.id)}"]`);
@@ -226,10 +286,11 @@ function describeElement(element: FillableElement): string {
   }
   const previous = element.previousElementSibling as HTMLElement | null;
   if (previous) parts.add(cleanText(previous.innerText).slice(0, 100));
+  for (const candidate of adapterLabelCandidates(element, adapter)) parts.add(cleanText(candidate).slice(0, 120));
   return Array.from(parts).filter(Boolean).join(" | ");
 }
 
-function matchField(label: string, element: FillableElement, profile: ProfileData): { key: ProfileFieldKey; value: string; confidence: number } | null {
+function matchField(label: string, element: FillableElement, profile: ProfileData, adapter: SiteAdapter): { key: ProfileFieldKey; value: string; confidence: number } | null {
   const lowered = label.toLowerCase();
   if (/(验证码|密码|确认密码|邀请码|搜索|captcha|verification code|password|search)/i.test(lowered)) return null;
   if (element instanceof HTMLInputElement) {
@@ -243,7 +304,8 @@ function matchField(label: string, element: FillableElement, profile: ProfileDat
     const matchedPattern = rule.patterns.find((pattern) => pattern.test(label));
     if (!matchedPattern || !profile[rule.key]) continue;
     const exactish = label.length < 36 || matchedPattern.source.startsWith("^");
-    return { key: rule.key, value: profile[rule.key], confidence: exactish ? 0.9 : 0.72 };
+    const confidence = exactish ? 0.9 : 0.72;
+    return { key: rule.key, value: profile[rule.key], confidence: Math.min(0.98, confidence + adapter.confidenceBoost(label, rule.key)) };
   }
   return null;
 }
@@ -293,3 +355,19 @@ function fillElement(element: FillableElement, value: string): boolean {
   }
 }
 
+function readElementValue(element: FillableElement): string {
+  if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement) return element.value;
+  return element.textContent ?? "";
+}
+
+function restoreElement(element: FillableElement, value: string): boolean {
+  if (element instanceof HTMLSelectElement) element.value = value;
+  else if (element instanceof HTMLInputElement) {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(element, value);
+  } else if (element instanceof HTMLTextAreaElement) {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set?.call(element, value);
+  } else element.textContent = value;
+  element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
+  element.dispatchEvent(new Event("change", { bubbles: true }));
+  return true;
+}
