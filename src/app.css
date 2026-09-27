@@ -47,6 +47,27 @@ button { cursor: pointer; }
 .form-grid input, .stacked-fields textarea, .form-grid textarea, .raw-card textarea { width: 100%; border: 1px solid #d7deea; border-radius: 9px; padding: 11px 12px; color: #172033; background: #fff; font-weight: 400; line-height: 1.5; outline: none; }
 .form-grid input:focus, textarea:focus { border-color: #3867ff; box-shadow: 0 0 0 3px #3867ff16; }
 .stacked-fields { display: grid; gap: 18px; }
+.structured-heading { display: flex; justify-content: space-between; align-items: end; gap: 16px; padding-top: 8px; border-top: 1px solid #edf0f5; }
+.structured-heading h3 { margin: 18px 0 4px; font-size: 16px; }
+.structured-heading p { margin: 0; font-size: 13px; }
+.entry-groups { display: grid; gap: 14px; }
+.entry-group { padding: 15px; border: 1px solid #e4e8f0; border-radius: 13px; background: #fbfcfe; }
+.entry-group-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.entry-group-heading h3 { margin: 0; color: #344057; font-size: 15px; }
+.add-entry { border: 1px solid #cbd7ff; border-radius: 8px; padding: 6px 10px; color: #3158d8; background: #f3f6ff; font-size: 12px; font-weight: 700; }
+.entry-list { display: grid; gap: 10px; margin-top: 11px; }
+.entry-empty { margin: 4px 0 0; color: #8994a8; font-size: 12px; }
+.entry-card { position: relative; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 11px; padding: 13px; border: 1px solid #dfe5ef; border-radius: 11px; background: #fff; }
+.entry-controls { position: absolute; top: 7px; right: 8px; display: flex; align-items: center; gap: 3px; }
+.entry-controls button { border: 0; color: #65738b; background: transparent; font-size: 12px; cursor: pointer; }
+.entry-controls button:disabled { opacity: .35; cursor: not-allowed; }
+.entry-card label { display: flex; flex-direction: column; gap: 6px; color: #536078; font-size: 12px; font-weight: 650; }
+.entry-card input, .entry-card textarea { width: 100%; border: 1px solid #d7deea; border-radius: 7px; padding: 8px 9px; color: #172033; background: #fff; font-size: 13px; font-weight: 400; line-height: 1.45; outline: none; }
+.entry-card input:focus, .entry-card textarea:focus { border-color: #3867ff; box-shadow: 0 0 0 3px #3867ff16; }
+.entry-card .entry-wide { grid-column: 1 / -1; }
+.entry-controls .remove-entry { margin-left: 4px; color: #a53d3d; }
+.legacy-fields { padding-top: 5px; color: #536078; font-size: 13px; }
+.legacy-field-content { margin-top: 14px; }
 textarea { resize: vertical; }
 .section-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; }
 .section-heading h2 { margin-bottom: 5px; }
@@ -67,9 +88,10 @@ textarea { resize: vertical; }
   .options-header, .section-heading { display: block; }
   .save-state { display: inline-block; margin-top: 14px; }
   .form-grid { grid-template-columns: 1fr; }
+  .entry-card { grid-template-columns: 1fr; }
+  .entry-card .entry-wide { grid-column: auto; }
   .wide { grid-column: auto; }
   .import-card { grid-template-columns: 1fr; }
   .actions { flex-direction: column; }
   .actions .save, .danger { width: 100%; }
 }
-
