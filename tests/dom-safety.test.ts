@@ -3,9 +3,11 @@ import test from "node:test";
 
 import {
   collectCandidates,
+  collectNonFillableSemanticInventory,
   collectScanDocuments,
   deduplicateManualFields,
   describeField,
+  describeSemanticField,
   duplicateSemanticCandidateIds,
   fillTarget,
   isEligible,
@@ -19,7 +21,7 @@ import {
   validateCachedFillTarget,
   type RepeatGroupIdentity,
 } from "../src/dom-safety.ts";
-import { matchDescriptor, type FieldDecision, type FieldDescriptor } from "../src/field-matcher.ts";
+import { matchDescriptor, semanticProfileKey, type FieldDecision, type FieldDescriptor } from "../src/field-matcher.ts";
 import { getSiteAdapter, isIgnoredByAdapter } from "../src/site-adapters.ts";
 import { EMPTY_PROFILE, type ProfileData } from "../src/types.ts";
 
@@ -115,6 +117,7 @@ class FakeElement {
   children: FakeElement[] = [];
   childControls: FakeElement[] = [];
   proxy: FakeElement | null = null;
+  valueReadCount = 0;
   private currentValue = "";
 
   constructor(tagName: string, ownerDocument: FakeDocument) {
@@ -123,6 +126,7 @@ class FakeElement {
   }
 
   get value(): string {
+    this.valueReadCount += 1;
     return this.currentValue;
   }
 
@@ -615,6 +619,126 @@ test("effective fieldset and ARIA disabled or readonly state fail closed", () =>
   ariaReadonlyInput.parentElement = readonlyContainer;
   assert.equal(isEligible(asElement(ariaReadonlyInput), adapter), false);
   assert.equal(describeField(asElement(ariaReadonlyInput), adapter).readOnly, true);
+});
+
+test("semantic inventory makes a filled missed-repeat row a sentinel for an empty scalar twin", () => {
+  const document = new FakeDocument("https://careers.example.test/apply");
+  const adapter = getSiteAdapter(document.location.href);
+  const filled = new FakeElement("input", document);
+  const empty = new FakeElement("input", document);
+  filled.setAttribute("aria-label", "学校名称");
+  empty.setAttribute("aria-label", "毕业院校");
+  filled.value = "不应进入描述符的示例值";
+
+  assert.equal(isEligible(asElement(filled), adapter), false);
+  assert.equal(isEligible(asElement(empty), adapter), true);
+  filled.valueReadCount = 0;
+  const semanticOnlyDescriptor = describeSemanticField(asElement(filled), adapter);
+  assert.ok(semanticOnlyDescriptor);
+  assert.equal(filled.valueReadCount, 0, "semantic inventory must not read the current value");
+  const inventory = collectNonFillableSemanticInventory([asElement(filled), asElement(empty)], adapter);
+  assert.deepEqual(inventory.map(({ element }) => element), [filled]);
+  const sentinelDescriptor = inventory[0].descriptor;
+  assert.equal(JSON.stringify(sentinelDescriptor).includes("不应进入描述符的示例值"), false);
+
+  const fillDescriptor = describeField(asElement(empty), adapter);
+  const fillDecision = matchDescriptor(fillDescriptor, { ...EMPTY_PROFILE, school: "示例大学" } as ProfileData);
+  const sentinelKey = semanticProfileKey(sentinelDescriptor);
+  assert.equal(fillDecision.action, "fill");
+  assert.equal(sentinelKey, "school");
+  if (!fillDecision.profileKey || !sentinelKey) throw new Error("missing school semantic");
+
+  const unsafe = duplicateSemanticCandidateIds([
+    { identity: "filled-missed-row", ownerDocument: asDocument(document), profileKey: sentinelKey, repeated: false },
+    { identity: "empty-missed-row", ownerDocument: asDocument(document), profileKey: fillDecision.profileKey, repeated: false },
+  ]);
+  const automaticFills = fillDecision.action === "fill" && !unsafe.has("empty-missed-row") ? 1 : 0;
+  assert.deepEqual([...unsafe].sort(), ["empty-missed-row", "filled-missed-row"]);
+  assert.equal(automaticFills, 0);
+});
+
+test("a filled recognized repeat sentinel blocks an empty missed scalar fallback", () => {
+  const document = new FakeDocument("https://careers.example.test/apply");
+  const adapter = getSiteAdapter(document.location.href);
+  const filledRepeat = new FakeElement("input", document);
+  const emptyScalar = new FakeElement("input", document);
+  filledRepeat.setAttribute("aria-label", "学校名称");
+  emptyScalar.setAttribute("aria-label", "毕业院校");
+  filledRepeat.value = "已存在的脱敏学校";
+
+  const inventory = collectNonFillableSemanticInventory([asElement(filledRepeat), asElement(emptyScalar)], adapter);
+  assert.deepEqual(inventory.map(({ element }) => element), [filledRepeat]);
+  const repeatDescriptor = inventory[0].descriptor;
+  repeatDescriptor.repeated = {
+    groupKey: "education-row-1",
+    groupLabel: "教育经历第 1 行",
+    kind: "education",
+    field: "school",
+    targetEntryId: "education-1",
+  };
+  const repeatKey = semanticProfileKey(repeatDescriptor);
+  const scalarDescriptor = describeField(asElement(emptyScalar), adapter);
+  const scalarDecision = matchDescriptor(scalarDescriptor, { ...EMPTY_PROFILE, school: "示例大学" } as ProfileData);
+  assert.equal(isEligible(asElement(filledRepeat), adapter), false);
+  assert.equal(repeatKey, "school");
+  assert.equal(scalarDecision.action, "fill");
+  if (!repeatKey || !scalarDecision.profileKey) throw new Error("missing school semantic");
+
+  const unsafe = duplicateSemanticCandidateIds([
+    { identity: "filled-recognized-repeat", ownerDocument: asDocument(document), profileKey: repeatKey, repeated: true },
+    { identity: "empty-scalar-fallback", ownerDocument: asDocument(document), profileKey: scalarDecision.profileKey, repeated: false },
+  ]);
+  assert.deepEqual([...unsafe].sort(), ["empty-scalar-fallback", "filled-recognized-repeat"]);
+  assert.equal(scalarDecision.action === "fill" && !unsafe.has("empty-scalar-fallback"), false);
+});
+
+test("disabled and readonly semantic sentinels each block an empty scalar twin", () => {
+  for (const state of ["disabled", "readonly"] as const) {
+    const document = new FakeDocument(`https://careers.example.test/apply?state=${state}`);
+    const adapter = getSiteAdapter(document.location.href);
+    const sentinel = new FakeElement("input", document);
+    const empty = new FakeElement("input", document);
+    sentinel.setAttribute("aria-label", "联系邮箱");
+    empty.setAttribute("aria-label", "电子邮箱");
+    if (state === "disabled") sentinel.disabled = true;
+    else sentinel.readOnly = true;
+
+    assert.equal(isEligible(asElement(sentinel), adapter), false, state);
+    assert.equal(isEligible(asElement(empty), adapter), true, state);
+    const inventory = collectNonFillableSemanticInventory([asElement(sentinel), asElement(empty)], adapter);
+    assert.deepEqual(inventory.map(({ element }) => element), [sentinel], state);
+    const sentinelDescriptor = inventory[0].descriptor;
+    const sentinelKey = semanticProfileKey(sentinelDescriptor);
+    const fillDecision = matchDescriptor(
+      describeField(asElement(empty), adapter),
+      { ...EMPTY_PROFILE, email: "masked@example.test" } as ProfileData,
+    );
+    assert.equal(sentinelKey, "email", state);
+    assert.equal(fillDecision.action, "fill", state);
+    if (!sentinelKey || !fillDecision.profileKey) throw new Error(`missing email semantic for ${state}`);
+
+    const unsafe = duplicateSemanticCandidateIds([
+      { identity: `${state}-sentinel`, ownerDocument: asDocument(document), profileKey: sentinelKey, repeated: false },
+      { identity: `${state}-empty`, ownerDocument: asDocument(document), profileKey: fillDecision.profileKey, repeated: false },
+    ]);
+    assert.deepEqual([...unsafe].sort(), [`${state}-empty`, `${state}-sentinel`].sort());
+    assert.equal(fillDecision.action === "fill" && !unsafe.has(`${state}-empty`), false, state);
+  }
+});
+
+test("semantic inventory rejects sensitive, hidden, and undescribed controls", () => {
+  const document = new FakeDocument("https://careers.example.test/apply");
+  const adapter = getSiteAdapter(document.location.href);
+  for (const type of ["password", "hidden", "file"] as const) {
+    const control = new FakeElement("input", document);
+    control.type = type;
+    control.setAttribute("aria-label", type === "password" ? "密码" : "附件");
+    assert.equal(describeSemanticField(asElement(control), adapter), null, type);
+    assert.deepEqual(collectNonFillableSemanticInventory([asElement(control)], adapter), [], type);
+  }
+  const undescribed = new FakeElement("input", document);
+  assert.equal(describeSemanticField(asElement(undescribed), adapter), null);
+  assert.deepEqual(collectNonFillableSemanticInventory([asElement(undescribed)], adapter), []);
 });
 
 test("duplicate scalar school and experience semantics without repeat roots produce zero automatic fills", () => {

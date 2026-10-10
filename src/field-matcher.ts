@@ -166,6 +166,17 @@ export function classifyDescriptor(descriptor: FieldDescriptor): Omit<FieldDecis
   return { profileKey: bestKey, confidence: bestScore, reason: "matched" };
 }
 
+/**
+ * Resolves only the semantic owner of a field.  Eligibility state (including
+ * an existing value, disabled, or readonly state) is intentionally ignored so
+ * non-fillable controls can still guard against an unsafe scalar duplicate.
+ */
+export function semanticProfileKey(descriptor: FieldDescriptor, explicitKey?: ProfileFieldKey): ProfileFieldKey | null {
+  if (descriptor.repeated) return repeatedProfileKey(descriptor.repeated);
+  if (explicitKey) return explicitKey;
+  return classifyDescriptor(descriptor).profileKey;
+}
+
 const CHOICE_SYNONYMS = [
   ["男", "male", "m", "man"],
   ["女", "female", "f", "woman"],

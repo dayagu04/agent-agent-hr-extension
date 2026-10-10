@@ -1,9 +1,11 @@
 import panelCss from "./content.css?inline";
 import {
   collectCandidates,
+  collectNonFillableSemanticInventory,
   collectScanDocuments,
   deduplicateManualFields,
   describeField,
+  describeSemanticField,
   duplicateSemanticCandidateIds,
   fillTarget,
   isEligible,
@@ -26,7 +28,7 @@ import {
   type ManualField,
   type RepeatGroupIdentity,
 } from "./dom-safety";
-import { isAiPolishAllowed, matchDescriptor, type FieldDescriptor } from "./field-matcher";
+import { isAiPolishAllowed, matchDescriptor, semanticProfileKey, type FieldDescriptor } from "./field-matcher";
 import { inferStructuredEntryField, inferStructuredEntryKind, structuredEntryOptions, type StructuredEntryOption } from "./repeat-context.ts";
 import { getSiteAdapter, isIgnoredByAdapter, type SiteAdapter } from "./site-adapters";
 import type { FieldMatch, ProfileData, ProfileFieldKey, RepeatedFieldContext, StoredState, StructuredEntryKind } from "./types";
@@ -589,28 +591,62 @@ function scanPage(
     required: boolean;
   }> = [];
 
-  const addMatch = (target: FillTarget, anchor: FillableElement, descriptor: FieldDescriptor) => {
+  const candidateIdentity = (anchor: FillableElement, descriptor: FieldDescriptor) => {
     const baseElementId = elementIds.get(anchor) ?? `field-${nextElementId++}`;
     elementIds.set(anchor, baseElementId);
+    return {
+      baseElementId,
+      manualIdentity: [
+        `document-${documentIndexes.get(anchor.ownerDocument) ?? 0}`,
+        descriptor.repeated?.groupKey ?? "single",
+        baseElementId,
+      ].join(":"),
+      matchId: repeatedMatchIdentity(baseElementId, descriptor.repeated?.groupKey, repeatBindings.epoch),
+    };
+  };
+
+  const recordSemanticCandidate = (
+    anchor: FillableElement,
+    descriptor: FieldDescriptor,
+    profileKey: ProfileFieldKey,
+    identity: string,
+    matchId?: string,
+  ) => {
+    semanticCandidates.push({
+      identity,
+      ownerDocument: anchor.ownerDocument,
+      profileKey,
+      repeated: Boolean(descriptor.repeated),
+      ...(matchId ? { matchId } : {}),
+      label: (descriptor.label ?? "").slice(0, 100),
+      required: Boolean(descriptor.required),
+    });
+  };
+
+  const addSemanticSentinel = (anchor: FillableElement, identityOverride?: string, semanticDescriptor?: FieldDescriptor) => {
+    const descriptor = semanticDescriptor ?? describeSemanticField(anchor, adapter);
+    if (!descriptor) return;
+    descriptor.repeated = describeRepeatedContext(anchor, descriptor, adapter, repeatBindings, repeatGroupIds, repeatStructureNodeIds);
+    const explicitKey = descriptor.repeated ? undefined : mappings[descriptorMappingKey(descriptor)];
+    const profileKey = semanticProfileKey(descriptor, explicitKey);
+    if (!profileKey) return;
+    const { manualIdentity } = candidateIdentity(anchor, descriptor);
+    recordSemanticCandidate(anchor, descriptor, profileKey, identityOverride ?? manualIdentity);
+  };
+
+  const addMatch = (target: FillTarget, anchor: FillableElement, descriptor: FieldDescriptor) => {
     const label = descriptor.label ?? "";
     const explicitKey = descriptor.repeated ? undefined : mappings[descriptorMappingKey(descriptor)];
     const decision = matchDescriptor(descriptor, profile, explicitKey);
-    const manualIdentity = [
-      `document-${documentIndexes.get(anchor.ownerDocument) ?? 0}`,
-      descriptor.repeated?.groupKey ?? "single",
-      baseElementId,
-    ].join(":");
-    const matchId = repeatedMatchIdentity(baseElementId, descriptor.repeated?.groupKey, repeatBindings.epoch);
+    const { manualIdentity, matchId } = candidateIdentity(anchor, descriptor);
     if (decision.profileKey) {
-      semanticCandidates.push({
-        identity: manualIdentity,
-        ownerDocument: anchor.ownerDocument,
-        profileKey: decision.profileKey,
-        repeated: Boolean(descriptor.repeated),
-        ...(decision.action === "fill" ? { matchId } : {}),
-        label: label.slice(0, 100),
-        required: Boolean(descriptor.required),
-      });
+      recordSemanticCandidate(
+        anchor,
+        descriptor,
+        decision.profileKey,
+        manualIdentity,
+        decision.action === "fill" ? matchId : undefined,
+      );
     }
     if (decision.action !== "fill" || !decision.profileKey || decision.value === null) {
       if (decision.action === "manual") {
@@ -642,6 +678,15 @@ function scanPage(
     });
   };
 
+  // Inventory non-fillable controls before the fill pass.  Their current
+  // values are never copied into a descriptor; only stable labels and control
+  // metadata are retained as duplicate sentinels.  Named choice groups are
+  // inventoried in the group branch below so one option cannot masquerade as
+  // multiple fields.
+  for (const { element, descriptor } of collectNonFillableSemanticInventory(candidates, adapter)) {
+    addSemanticSentinel(element, undefined, descriptor);
+  }
+
   for (const element of candidates) {
     if (isInputElement(element) && ["radio", "checkbox"].includes(element.type) && element.name) {
       if (processedChoices.has(element)) continue;
@@ -654,6 +699,8 @@ function scanPage(
       ));
       const fillableChoices = sameNamedChoices.filter((candidate) => isEligible(candidate, adapter) && !isIgnoredByAdapter(candidate, adapter));
       if (!fillableChoices.length) {
+        const sentinelAnchor = sameNamedChoices.find((candidate) => Boolean(describeSemanticField(candidate, adapter)));
+        if (sentinelAnchor) addSemanticSentinel(sentinelAnchor);
         for (const candidate of sameNamedChoices) processedChoices.add(candidate);
         continue;
       }
@@ -677,6 +724,7 @@ function scanPage(
           reason: scoped.reason ?? "ambiguous_choice_group_scope",
           required: scoped.elements.some((candidate) => candidate.hasAttribute("required") || candidate.getAttribute("aria-required") === "true"),
         };
+        addSemanticSentinel(anchor, item.identity);
         if (item.required) manualRequired.push(item);
         else manualAttention.push(item);
         continue;

@@ -73,6 +73,11 @@ export interface SemanticScanCandidate {
   repeated: boolean;
 }
 
+export interface SemanticInventoryEntry {
+  element: FillableElement;
+  descriptor: FieldDescriptor;
+}
+
 export interface CachedTargetValidation {
   valid: boolean;
   reason?: "target_replaced" | "target_disconnected" | "target_ineligible" | "target_ignored" | "choice_already_selected" | "semantics_changed";
@@ -266,6 +271,24 @@ export function isDynamicChoiceElement(element: FillableElement, adapter: SiteAd
   });
 }
 
+/**
+ * Returns whether a control may participate in the read-only semantic
+ * inventory.  Unlike `isEligible`, this intentionally keeps controls that are
+ * already filled, disabled, or readonly: they are useful duplicate sentinels
+ * even though they must never become fill targets.
+ *
+ * Sensitive and action-only controls are excluded before their descriptors
+ * are built.  In particular, this path never needs to inspect a password,
+ * attachment, or hidden value.
+ */
+export function isSemanticInventoryCandidate(element: FillableElement, adapter: SiteAdapter): boolean {
+  if (!isElementVisible(element) || isIgnoredByAdapter(element, adapter)) return false;
+  if (isInputElement(element) && ["hidden", "password", "file", "submit", "button", "reset", "image"].includes(element.type)) {
+    return false;
+  }
+  return true;
+}
+
 export function isEligible(element: FillableElement, adapter: SiteAdapter): boolean {
   if (isInputElement(element) && element.type === "file") {
     return !isEffectivelyDisabled(element) && !isEffectivelyReadOnly(element) && fileControlHasVisibleProxy(element);
@@ -305,6 +328,48 @@ function describeFieldSemantics(element: FillableElement, adapter: SiteAdapter):
     placeholder: cleanText(element.getAttribute("placeholder") ?? element.getAttribute("data-placeholder")),
     name: cleanText(element.getAttribute("name") ?? element.id),
   };
+}
+
+/**
+ * Describes only stable field semantics.  It deliberately does not read the
+ * current value, selected option values, or arbitrary row text, so the result
+ * can be used as a duplicate sentinel without retaining or hashing PII.
+ */
+export function describeSemanticField(element: FillableElement, adapter: SiteAdapter): FieldDescriptor | null {
+  if (!isSemanticInventoryCandidate(element, adapter)) return null;
+  const semantics = describeFieldSemantics(element, adapter);
+  const autocomplete = isInputElement(element) ? cleanText(element.autocomplete) : "";
+  if (![semantics.label, semantics.ariaLabel, semantics.placeholder, semantics.name, autocomplete].some((value) => Boolean(cleanText(value)))) {
+    return null;
+  }
+  return {
+    ...semantics,
+    autocomplete,
+    controlType: elementControl(element, adapter),
+    required: element.hasAttribute("required")
+      || element.getAttribute("aria-required") === "true"
+      || Boolean(element.closest("[class*='required' i], .ant-form-item-required, .semi-form-field-label-required")),
+    multiple: isSelectElement(element) && element.multiple,
+  };
+}
+
+/**
+ * First phase of a page scan: retain semantics for ordinary controls that the
+ * write pass will reject.  Named choices are handled once per scoped group by
+ * the caller, rather than once per option.
+ */
+export function collectNonFillableSemanticInventory(
+  candidates: FillableElement[],
+  adapter: SiteAdapter,
+): SemanticInventoryEntry[] {
+  const inventory: SemanticInventoryEntry[] = [];
+  for (const element of candidates) {
+    if (isInputElement(element) && ["radio", "checkbox"].includes(element.type) && element.name) continue;
+    if (isEligible(element, adapter)) continue;
+    const descriptor = describeSemanticField(element, adapter);
+    if (descriptor) inventory.push({ element, descriptor });
+  }
+  return inventory;
 }
 
 export function describeField(element: FillableElement, adapter: SiteAdapter): FieldDescriptor {
