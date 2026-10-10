@@ -4,10 +4,14 @@ import test from "node:test";
 import {
   collectCandidates,
   collectScanDocuments,
+  deduplicateManualFields,
   describeField,
   fillTarget,
   isEligible,
+  repeatedMatchIdentity,
+  repeatGroupStructureSignature,
   resolveRepeatGroupIdentity,
+  type RepeatGroupIdentity,
 } from "../src/dom-safety.ts";
 import { matchDescriptor } from "../src/field-matcher.ts";
 import { getSiteAdapter } from "../src/site-adapters.ts";
@@ -79,7 +83,10 @@ class FakeElement {
   width = 180;
   height = 36;
   previousElementSibling: FakeElement | null = null;
+  nextElementSibling: FakeElement | null = null;
   parentElement: FakeElement | null = null;
+  children: FakeElement[] = [];
+  childControls: FakeElement[] = [];
   proxy: FakeElement | null = null;
   private currentValue = "";
 
@@ -125,8 +132,10 @@ class FakeElement {
     return null;
   }
 
-  querySelectorAll(): FakeElement[] {
-    return [];
+  querySelectorAll(selector: string): FakeElement[] {
+    return selector === "input, textarea, select, [contenteditable=true], [role=combobox]"
+      ? this.childControls
+      : [];
   }
 
   scrollIntoView(): void {}
@@ -207,6 +216,7 @@ test("a cross-origin application iframe is not traversed and is reported manual"
   const frameScan = collectScanDocuments(asDocument(root));
   assert.deepEqual(frameScan.documents, [root]);
   assert.deepEqual(frameScan.manualFrames, [{
+    identity: "frame:0.0",
     label: "Application form",
     reason: "cross_origin_iframe",
     required: false,
@@ -214,7 +224,7 @@ test("a cross-origin application iframe is not traversed and is reported manual"
   assert.equal(frame.contentDocumentReads, 1);
 });
 
-test("a hidden file input without a visible proxy is ignored, while a visible proxy stays manual", () => {
+test("a hidden file input without a visible proxy is ignored, while a visible sibling upload button stays manual", () => {
   const document = new FakeDocument("https://app.mokahr.com/apply");
   const adapter = getSiteAdapter(document.location.href);
   const hiddenFile = new FakeElement("input", document);
@@ -225,10 +235,18 @@ test("a hidden file input without a visible proxy is ignored, while a visible pr
   hiddenFile.setAttribute("aria-label", "上传简历");
   assert.equal(isEligible(asElement(hiddenFile), adapter), false);
 
-  const visibleUploadButton = new FakeElement("label", document);
-  hiddenFile.proxy = visibleUploadButton;
+  const wrapper = new FakeElement("div", document);
+  const visibleUploadButton = new FakeElement("button", document);
+  visibleUploadButton.textContent = "上传简历附件";
+  wrapper.children = [hiddenFile, visibleUploadButton];
+  hiddenFile.parentElement = wrapper;
+  hiddenFile.nextElementSibling = visibleUploadButton;
+  visibleUploadButton.parentElement = wrapper;
+  visibleUploadButton.previousElementSibling = hiddenFile;
   assert.equal(isEligible(asElement(hiddenFile), adapter), true);
-  const decision = matchDescriptor(describeField(asElement(hiddenFile), adapter), EMPTY_PROFILE);
+  const descriptor = describeField(asElement(hiddenFile), adapter);
+  assert.equal(descriptor.required, true);
+  const decision = matchDescriptor(descriptor, EMPTY_PROFILE);
   assert.deepEqual(decision, {
     action: "manual",
     profileKey: null,
@@ -238,32 +256,66 @@ test("a hidden file input without a visible proxy is ignored, while a visible pr
   });
 });
 
-test("repeat bindings follow node identity and require rebind after row replacement or insertion", () => {
-  const rowA = {} as Element;
-  const rowB = {} as Element;
-  const rows = [rowA, rowB];
-  const groupIds = new WeakMap<Element, string>();
+test("a reused repeat row invalidates binding and selection when its non-value structure changes", () => {
+  const document = new FakeDocument("https://app.mokahr.com/apply");
+  const row = new FakeElement("div", document);
+  row.setAttribute("data-row-key", "row-a");
+  const company = new FakeElement("input", document);
+  company.setAttribute("name", "experiences[0].company");
+  company.setAttribute("aria-label", "公司名称");
+  const role = new FakeElement("input", document);
+  role.setAttribute("name", "experiences[0].role");
+  role.setAttribute("aria-label", "职位名称");
+  row.childControls = [company, role];
+
+  const groupIds = new WeakMap<Element, RepeatGroupIdentity>();
+  const structureNodeIds = new WeakMap<Element, string>();
   const bindings = new Map<string, string>();
   let sequence = 0;
   const allocate = () => `repeat-group-${++sequence}`;
+  let nodeSequence = 0;
+  const allocateNode = () => `node-${++nodeSequence}`;
+  const adapter = getSiteAdapter(document.location.href);
 
-  const first = resolveRepeatGroupIdentity(rowA, groupIds, bindings, allocate);
+  const firstSignature = repeatGroupStructureSignature(asElement(row), "experience", 1, adapter, structureNodeIds, allocateNode);
+  assert.match(firstSignature, /^structure-v1-[0-9a-f]{16}$/);
+  assert.equal(firstSignature.includes("row-a"), false);
+  const first = resolveRepeatGroupIdentity(asElement(row), firstSignature, groupIds, bindings, allocate);
   bindings.set(first.groupKey, "experience-entry-2");
-  rows.reverse();
-  const afterMove = resolveRepeatGroupIdentity(rowA, groupIds, bindings, allocate);
-  assert.deepEqual(afterMove, { groupKey: first.groupKey, targetEntryId: "experience-entry-2" });
+  const firstMatchId = repeatedMatchIdentity("field-1", first.groupKey);
+  const selectedIds = new Set([firstMatchId]);
 
-  const inserted = {} as Element;
-  rows.unshift(inserted);
-  assert.deepEqual(resolveRepeatGroupIdentity(inserted, groupIds, bindings, allocate), {
+  company.value = "不参与签名的用户值";
+  assert.equal(
+    repeatGroupStructureSignature(asElement(row), "experience", 1, adapter, structureNodeIds, allocateNode),
+    firstSignature,
+    "input values must not be read into the structure signature",
+  );
+
+  row.setAttribute("data-row-key", "row-b");
+  const reusedSignature = repeatGroupStructureSignature(asElement(row), "experience", 1, adapter, structureNodeIds, allocateNode);
+  assert.notEqual(reusedSignature, firstSignature);
+  const reused = resolveRepeatGroupIdentity(asElement(row), reusedSignature, groupIds, bindings, allocate);
+  assert.deepEqual(reused, {
     groupKey: "repeat-group-2",
     targetEntryId: undefined,
+    invalidatedGroupKey: first.groupKey,
   });
+  assert.equal(bindings.has(first.groupKey), false);
+  assert.equal(selectedIds.has(repeatedMatchIdentity("field-1", reused.groupKey)), false);
 
-  const replacement = {} as Element;
-  rows[rows.indexOf(rowA)] = replacement;
-  assert.deepEqual(resolveRepeatGroupIdentity(replacement, groupIds, bindings, allocate), {
-    groupKey: "repeat-group-3",
-    targetEntryId: undefined,
-  });
+  const movedSignature = repeatGroupStructureSignature(asElement(row), "experience", 2, adapter, structureNodeIds, allocateNode);
+  const moved = resolveRepeatGroupIdentity(asElement(row), movedSignature, groupIds, bindings, allocate);
+  assert.equal(moved.targetEntryId, undefined);
+  assert.equal(moved.invalidatedGroupKey, reused.groupKey);
+});
+
+test("manual items with the same label stay distinct across document, group, and element identities", () => {
+  const items = deduplicateManualFields([
+    { identity: "document-0:repeat-1:field-1", label: "公司名称", reason: "repeated_group_unbound", required: true },
+    { identity: "document-0:repeat-2:field-2", label: "公司名称", reason: "repeated_group_unbound", required: true },
+    { identity: "document-1:repeat-1:field-1", label: "公司名称", reason: "repeated_group_unbound", required: true },
+    { identity: "document-0:repeat-1:field-1", label: "公司名称", reason: "repeated_group_unbound", required: true },
+  ]);
+  assert.equal(items.length, 3);
 });

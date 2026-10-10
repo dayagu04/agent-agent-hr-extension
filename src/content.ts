@@ -2,6 +2,7 @@ import panelCss from "./content.css?inline";
 import {
   collectCandidates,
   collectScanDocuments,
+  deduplicateManualFields,
   describeField,
   fillTarget,
   isEligible,
@@ -9,6 +10,8 @@ import {
   isSelectElement,
   isTextareaElement,
   optionLabel,
+  repeatedMatchIdentity,
+  repeatGroupStructureSignature,
   resolveRepeatGroupIdentity,
   restoreElement,
   snapshotTarget,
@@ -16,8 +19,9 @@ import {
   type FillableElement,
   type FillTarget,
   type ManualField,
+  type RepeatGroupIdentity,
 } from "./dom-safety";
-import { matchDescriptor, type FieldDescriptor } from "./field-matcher";
+import { isAiPolishAllowed, matchDescriptor, type FieldDescriptor } from "./field-matcher";
 import { inferStructuredEntryField, inferStructuredEntryKind, structuredEntryOptions, type StructuredEntryOption } from "./repeat-context.ts";
 import { getSiteAdapter, isIgnoredByAdapter, type SiteAdapter } from "./site-adapters";
 import type { FieldMatch, ProfileData, ProfileFieldKey, RepeatedFieldContext, StoredState, StructuredEntryKind } from "./types";
@@ -82,7 +86,8 @@ function installAssistant() {
   const elements = new Map<string, FillTarget>();
   const descriptors = new Map<string, FieldDescriptor>();
   const elementIds = new WeakMap<FillableElement, string>();
-  const repeatGroupIds = new WeakMap<Element, string>();
+  const repeatGroupIds = new WeakMap<Element, RepeatGroupIdentity>();
+  const repeatStructureNodeIds = new WeakMap<Element, string>();
   const adapter = getSiteAdapter();
   let state: StoredState | null = null;
   let matches: FieldMatch[] = [];
@@ -124,7 +129,7 @@ function installAssistant() {
       return;
     }
     list.innerHTML = matches.map((match) => {
-      const canPolish = state?.ai.enabled && ["summary", "experience", "projects"].includes(match.key) && match.value.length >= 12;
+      const canPolish = state?.ai.enabled && match.aiPolishable && match.value.length >= 12;
       const displayValue = match.suggestedValue ?? match.value;
       const suggestion = match.suggestedValue
         ? `<small class="gugu-original">原文：${escapeHtml(match.value)}</small><textarea class="gugu-suggestion" data-action="edit-suggestion" aria-label="编辑 AI 建议">${escapeHtml(displayValue)}</textarea>${(match.factWarnings ?? []).map((warning) => `<small class="gugu-warning">⚠ ${escapeHtml(warning)}</small>`).join("")}`
@@ -148,7 +153,17 @@ function installAssistant() {
     if (!response.ok || !response.state) throw new Error(response.error || "无法读取个人档案");
     state = response.state;
     savedMappings = await loadSiteMappings();
-    const scan = scanPage(state.profile, elements, descriptors, adapter, elementIds, savedMappings, repeatBindings, repeatGroupIds);
+    const scan = scanPage(
+      state.profile,
+      elements,
+      descriptors,
+      adapter,
+      elementIds,
+      savedMappings,
+      repeatBindings,
+      repeatGroupIds,
+      repeatStructureNodeIds,
+    );
     matches = scan.matches;
     manualRequired = scan.manualRequired;
     manualAttention = scan.manualAttention;
@@ -221,7 +236,10 @@ function installAssistant() {
     if (action === "polish" && button) {
       const row = button.closest<HTMLElement>(".gugu-row")!;
       const match = matches.find((item) => item.id === row.dataset.id);
-      if (!match) return;
+      if (!match?.aiPolishable) {
+        showNotice("事实字段不允许 AI 润色，请直接核对档案原值。", true);
+        return;
+      }
       button.disabled = true;
       button.textContent = "正在润色…";
       const response = await chrome.runtime.sendMessage({
@@ -269,6 +287,9 @@ function installAssistant() {
       match.value = state.profile[decision.profileKey];
       match.resolvedValue = decision.value;
       match.confidence = decision.confidence;
+      match.aiPolishable = isAiPolishAllowed(descriptor, key);
+      match.suggestedValue = undefined;
+      match.factWarnings = undefined;
       savedMappings[descriptorMappingKey(descriptor)] = key;
       void saveSiteMapping(savedMappings);
       render();
@@ -304,7 +325,16 @@ function installAssistant() {
         if (records.every((record) => scanDocument === document && isAssistantMutation(record, assistantHost))) return;
         onMutation();
       });
-      observer.observe(scanDocument.documentElement, { childList: true, subtree: true });
+      observer.observe(scanDocument.documentElement, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+        attributes: true,
+        attributeFilter: [
+          "id", "name", "type", "role", "aria-label", "placeholder",
+          "data-field", "data-index", "data-row-key", "data-key", "data-section", "data-type", "data-gugu-repeat-kind",
+        ],
+      });
       return observer;
     });
   }
@@ -374,7 +404,8 @@ function describeRepeatedContext(
   descriptor: FieldDescriptor,
   adapter: SiteAdapter,
   bindings: Map<string, string>,
-  groupIds: WeakMap<Element, string>,
+  groupIds: WeakMap<Element, RepeatGroupIdentity>,
+  structureNodeIds: WeakMap<Element, string>,
 ): RepeatedFieldContext | undefined {
   const found = findRepeatedRoot(element, adapter);
   if (!found) return undefined;
@@ -385,18 +416,27 @@ function describeRepeatedContext(
     descriptor.name,
   ].filter(Boolean).join(" | "));
   if (!field) return undefined;
-  const { groupKey, targetEntryId } = resolveRepeatGroupIdentity(
-    found.root,
-    groupIds,
-    bindings,
-    () => `repeat-group-${nextElementId++}`,
-  );
   const siblings = found.root.parentElement
     ? Array.from(found.root.parentElement.children).filter((candidate) => (
       repeatedControlCount(candidate) >= 2 && inferStructuredEntryKind(repeatSignal(candidate)) === found.kind
     ))
     : [found.root];
   const position = Math.max(0, siblings.indexOf(found.root)) + 1;
+  const signature = repeatGroupStructureSignature(
+    found.root,
+    found.kind,
+    position,
+    adapter,
+    structureNodeIds,
+    () => `repeat-node-${nextElementId++}`,
+  );
+  const { groupKey, targetEntryId } = resolveRepeatGroupIdentity(
+    found.root,
+    signature,
+    groupIds,
+    bindings,
+    () => `repeat-group-${nextElementId++}`,
+  );
   const labels: Record<StructuredEntryKind, string> = { education: "教育经历", experience: "工作 / 实习经历", project: "项目经历", award: "获奖经历" };
   return {
     groupKey,
@@ -415,7 +455,8 @@ function scanPage(
   elementIds: WeakMap<FillableElement, string>,
   mappings: Record<string, ProfileFieldKey>,
   repeatBindings: Map<string, string>,
-  repeatGroupIds: WeakMap<Element, string>,
+  repeatGroupIds: WeakMap<Element, RepeatGroupIdentity>,
+  repeatStructureNodeIds: WeakMap<Element, string>,
 ): { matches: FieldMatch[]; manualRequired: ManualField[]; manualAttention: ManualField[]; repeatGroups: RepeatGroupPrompt[]; documents: Document[] } {
   elements.clear();
   descriptors.clear();
@@ -429,19 +470,29 @@ function scanPage(
   const documentIndexes = new Map(frameScan.documents.map((scanDocument, index) => [scanDocument, index]));
 
   const addMatch = (target: FillTarget, anchor: FillableElement, descriptor: FieldDescriptor) => {
+    const baseElementId = elementIds.get(anchor) ?? `field-${nextElementId++}`;
+    elementIds.set(anchor, baseElementId);
     const label = descriptor.label ?? "";
     const explicitKey = descriptor.repeated ? undefined : mappings[descriptorMappingKey(descriptor)];
     const decision = matchDescriptor(descriptor, profile, explicitKey);
     if (decision.action !== "fill" || !decision.profileKey || decision.value === null) {
       if (decision.action === "manual") {
-        const item = { label: label.slice(0, 100), reason: decision.reason, required: Boolean(descriptor.required) };
+        const item = {
+          identity: [
+            `document-${documentIndexes.get(anchor.ownerDocument) ?? 0}`,
+            descriptor.repeated?.groupKey ?? "single",
+            baseElementId,
+          ].join(":"),
+          label: label.slice(0, 100),
+          reason: decision.reason,
+          required: Boolean(descriptor.required),
+        };
         if (descriptor.required) manualRequired.push(item);
         else if (isAttentionReason(decision.reason)) manualAttention.push(item);
       }
       return;
     }
-    const id = elementIds.get(anchor) ?? `field-${nextElementId++}`;
-    elementIds.set(anchor, id);
+    const id = repeatedMatchIdentity(baseElementId, descriptor.repeated?.groupKey);
     elements.set(id, target);
     descriptors.set(id, descriptor);
     matches.push({
@@ -454,6 +505,7 @@ function scanPage(
       kind: elementKind(anchor),
       mappingLocked: Boolean(descriptor.repeated),
       recordLabel: descriptor.repeated?.groupLabel,
+      aiPolishable: isAiPolishAllowed(descriptor, decision.profileKey),
     });
   };
 
@@ -473,7 +525,7 @@ function scanPage(
       ));
       if (!group.length || group.some((candidate) => candidate.checked)) continue;
       const descriptor = describeField(group[0], adapter);
-      descriptor.repeated = describeRepeatedContext(group[0], descriptor, adapter, repeatBindings, repeatGroupIds);
+      descriptor.repeated = describeRepeatedContext(group[0], descriptor, adapter, repeatBindings, repeatGroupIds, repeatStructureNodeIds);
       registerRepeatGroup(descriptor.repeated, profile, repeatGroupMap);
       descriptor.controlType = element.type as "radio" | "checkbox";
       descriptor.multiple = element.type === "checkbox";
@@ -486,14 +538,18 @@ function scanPage(
       continue;
     }
     const descriptor = describeField(element, adapter);
-    descriptor.repeated = describeRepeatedContext(element, descriptor, adapter, repeatBindings, repeatGroupIds);
+    descriptor.repeated = describeRepeatedContext(element, descriptor, adapter, repeatBindings, repeatGroupIds, repeatStructureNodeIds);
     registerRepeatGroup(descriptor.repeated, profile, repeatGroupMap);
     addMatch(element, element, descriptor);
   }
+  const activeRepeatGroups = new Set(repeatGroupMap.keys());
+  for (const groupKey of repeatBindings.keys()) {
+    if (!activeRepeatGroups.has(groupKey)) repeatBindings.delete(groupKey);
+  }
   return {
     matches: deduplicate(matches),
-    manualRequired: deduplicateManual(manualRequired),
-    manualAttention: deduplicateManual(manualAttention),
+    manualRequired: deduplicateManualFields(manualRequired),
+    manualAttention: deduplicateManualFields(manualAttention),
     repeatGroups: [...repeatGroupMap.values()],
     documents: frameScan.documents,
   };
@@ -521,19 +577,10 @@ function isAttentionReason(reason: string): boolean {
     "repeated_group_unbound",
     "repeated_group_target_missing",
     "unsupported_repeated_field",
+    "date_precision_insufficient",
     "cross_origin_iframe",
     "iframe_not_ready",
   ].includes(reason);
-}
-
-function deduplicateManual(items: ManualField[]): ManualField[] {
-  const seen = new Set<string>();
-  return items.filter((item) => {
-    const identity = `${item.required}:${item.reason}:${item.label}`;
-    if (seen.has(identity)) return false;
-    seen.add(identity);
-    return true;
-  });
 }
 
 function manualReason(reason: string): string {
@@ -547,6 +594,7 @@ function manualReason(reason: string): string {
     ambiguous_choice: "存在重复或歧义选项",
     partial_multi_choice: "多选项只能部分匹配",
     invalid_date: "日期格式无效",
+    date_precision_insufficient: "档案只有年月，页面要求完整日期，请人工确认具体日期",
     attachment_user_required: "附件必须由你核对后手动选择",
     dynamic_choice_requires_user_action: "动态下拉未验证选项与事件链，保持人工选择",
     repeated_group_unbound: "重复经历行尚未绑定结构化档案记录",

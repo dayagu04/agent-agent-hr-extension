@@ -121,6 +121,7 @@ export interface FieldMatch {
   factWarnings?: string[];
   mappingLocked?: boolean;
   recordLabel?: string;
+  aiPolishable?: boolean;
 }
 
 export interface PolishRequest {

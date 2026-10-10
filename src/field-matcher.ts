@@ -196,29 +196,35 @@ function splitMulti(value: string): string[] {
   return value.split(/[,，、;；\n]/).map((item) => item.trim()).filter(Boolean);
 }
 
-function normalizeDate(value: string, control: FieldControl): string | null {
+function normalizeDate(value: string, control: FieldControl): { value: string | null; reason: string } {
   const parts = normalizeText(value)
     .replace(/日$/u, "")
     .replace(/[年月/.]/gu, "-")
     .replace(/-+$/u, "")
     .split("-")
     .map((part) => part.trim());
-  if (parts.length < 2 || parts.length > 3 || parts.some((part) => !/^\d+$/.test(part))) return null;
+  if (parts.length < 2 || parts.length > 3 || parts.some((part) => !/^\d+$/.test(part))) {
+    return { value: null, reason: "invalid_date" };
+  }
+  if (control === "date" && parts.length !== 3) {
+    return { value: null, reason: "date_precision_insufficient" };
+  }
   const year = Number(parts[0]);
   const month = Number(parts[1]);
   const day = Number(parts[2] ?? 1);
   const date = new Date(Date.UTC(year, month - 1, day));
-  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return null;
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) {
+    return { value: null, reason: "invalid_date" };
+  }
   const monthText = String(month).padStart(2, "0");
-  if (control === "month") return `${year}-${monthText}`;
-  return `${year}-${monthText}-${String(day).padStart(2, "0")}`;
+  if (control === "month") return { value: `${year}-${monthText}`, reason: "date_normalized" };
+  return { value: `${year}-${monthText}-${String(day).padStart(2, "0")}`, reason: "date_normalized" };
 }
 
 function prepareValue(spec: FieldSpec, value: string, descriptor: FieldDescriptor): { value: string | string[] | null; reason: string } {
   if (!spec.controls.has(descriptor.controlType)) return { value: null, reason: "unsupported_control" };
   if (["date", "month"].includes(descriptor.controlType)) {
-    const normalized = normalizeDate(value, descriptor.controlType);
-    return normalized ? { value: normalized, reason: "date_normalized" } : { value: null, reason: "invalid_date" };
+    return normalizeDate(value, descriptor.controlType);
   }
   const options = descriptor.options ?? [];
   if (descriptor.controlType === "select" || descriptor.controlType === "radio") {
@@ -243,6 +249,11 @@ function prepareValue(spec: FieldSpec, value: string, descriptor: FieldDescripto
     return selected.length ? { value: selected, reason: "choices_matched" } : { value: null, reason: "choice_not_found" };
   }
   return value.trim() ? { value: value.trim(), reason: "value_ready" } : { value: null, reason: "missing_profile_value" };
+}
+
+export function isAiPolishAllowed(descriptor: FieldDescriptor, profileKey: ProfileFieldKey): boolean {
+  if (descriptor.repeated) return descriptor.repeated.field === "description";
+  return ["summary", "experience", "projects"].includes(profileKey);
 }
 
 const REPEATED_FIELD_CONTROLS: Record<StructuredEntryField, Set<FieldControl>> = {

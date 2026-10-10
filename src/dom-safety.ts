@@ -11,9 +11,15 @@ export interface ElementSnapshot {
 }
 
 export interface ManualField {
+  identity: string;
   label: string;
   reason: string;
   required: boolean;
+}
+
+export interface RepeatGroupIdentity {
+  groupKey: string;
+  signature: string;
 }
 
 export interface FrameScan {
@@ -54,8 +60,27 @@ export function fileControlHasVisibleProxy(element: HTMLInputElement): boolean {
   const ownerDocument = element.ownerDocument;
   const escapedId = element.id ? cssEscape(element.id, ownerDocument) : "";
   const associated = escapedId ? ownerDocument.querySelector(`label[for="${escapedId}"]`) : null;
-  const proxy = associated ?? element.closest("label, [class*='upload' i], [class*='attachment' i]");
-  return Boolean(proxy && isElementVisible(proxy));
+  const enclosing = element.closest("label, [class*='upload' i], [class*='attachment' i]");
+  if ((associated && isElementVisible(associated)) || (enclosing && isElementVisible(enclosing))) return true;
+  const siblings = element.parentElement
+    ? Array.from(element.parentElement.children).filter((candidate) => candidate !== element)
+    : [element.previousElementSibling, element.nextElementSibling].filter((candidate): candidate is Element => Boolean(candidate));
+  return siblings.some((candidate) => isVisibleUploadProxy(candidate));
+}
+
+function isVisibleUploadProxy(element: Element): boolean {
+  if (!isElementVisible(element)) return false;
+  const signal = [
+    element.tagName,
+    element.className,
+    element.getAttribute("role"),
+    element.getAttribute("aria-label"),
+    element.getAttribute("title"),
+    element.textContent,
+  ].filter(Boolean).join(" ");
+  const interactive = ["BUTTON", "LABEL"].includes(element.tagName) || element.getAttribute("role") === "button";
+  return (interactive || /(upload|attachment|resume|file|上传|附件|简历|文件)/i.test(signal))
+    && /(upload|attachment|resume|choose\s*file|browse|上传|附件|简历|选择文件)/i.test(signal);
 }
 
 export function collectCandidates(scanDocument: Document, adapter: SiteAdapter): FillableElement[] {
@@ -101,18 +126,20 @@ export function collectScanDocuments(root: Document): FrameScan {
   const documents: Document[] = [];
   const manualFrames: ManualField[] = [];
   const visited = new Set<Document>();
-  const visit = (scanDocument: Document) => {
+  const visit = (scanDocument: Document, documentPath: string) => {
     if (visited.has(scanDocument)) return;
     visited.add(scanDocument);
     documents.push(scanDocument);
-    for (const frame of scanDocument.querySelectorAll<HTMLIFrameElement>("iframe")) {
+    const frames = Array.from(scanDocument.querySelectorAll<HTMLIFrameElement>("iframe"));
+    for (const [frameIndex, frame] of frames.entries()) {
       if (!isPotentialFormFrame(frame)) continue;
       let child: Document | null = null;
       try { child = frame.contentDocument; } catch { child = null; }
       if (child?.documentElement) {
-        visit(child);
+        visit(child, `${documentPath}.${frameIndex}`);
       } else {
         manualFrames.push({
+          identity: `frame:${documentPath}.${frameIndex}`,
           label: safeFrameLabel(frame),
           reason: frame.getAttribute("src") ? "cross_origin_iframe" : "iframe_not_ready",
           required: false,
@@ -120,7 +147,7 @@ export function collectScanDocuments(root: Document): FrameScan {
       }
     }
   };
-  visit(root);
+  visit(root, "0");
   return { documents, manualFrames };
 }
 
@@ -146,7 +173,7 @@ export function isEligible(element: FillableElement, adapter: SiteAdapter): bool
   return true;
 }
 
-export function describeField(element: FillableElement, adapter: SiteAdapter): FieldDescriptor {
+function describeFieldSemantics(element: FillableElement, adapter: SiteAdapter): Pick<FieldDescriptor, "label" | "ariaLabel" | "placeholder" | "name"> {
   const parts = new Set<string>();
   const ownerDocument = element.ownerDocument;
   if (element.id) {
@@ -168,6 +195,13 @@ export function describeField(element: FillableElement, adapter: SiteAdapter): F
     ariaLabel: cleanText(element.getAttribute("aria-label")),
     placeholder: cleanText(element.getAttribute("placeholder") ?? element.getAttribute("data-placeholder")),
     name: cleanText(element.getAttribute("name") ?? element.id),
+  };
+}
+
+export function describeField(element: FillableElement, adapter: SiteAdapter): FieldDescriptor {
+  const semantics = describeFieldSemantics(element, adapter);
+  return {
+    ...semantics,
     autocomplete: isInputElement(element) ? element.autocomplete : "",
     controlType: elementControl(element, adapter),
     required: element.hasAttribute("required") || element.getAttribute("aria-required") === "true" || Boolean(element.closest("[class*='required' i], .ant-form-item-required, .semi-form-field-label-required")),
@@ -208,16 +242,92 @@ function elementControl(element: FillableElement, adapter: SiteAdapter): FieldCo
 
 export function resolveRepeatGroupIdentity(
   root: Element,
-  groupIds: WeakMap<Element, string>,
-  bindings: ReadonlyMap<string, string>,
+  signature: string,
+  groupIds: WeakMap<Element, RepeatGroupIdentity>,
+  bindings: Map<string, string>,
   allocateKey: () => string,
-): { groupKey: string; targetEntryId?: string } {
-  let groupKey = groupIds.get(root);
-  if (!groupKey) {
-    groupKey = allocateKey();
-    groupIds.set(root, groupKey);
+): { groupKey: string; targetEntryId?: string; invalidatedGroupKey?: string } {
+  const previous = groupIds.get(root);
+  if (!previous || previous.signature !== signature) {
+    if (previous) bindings.delete(previous.groupKey);
+    const next = { groupKey: allocateKey(), signature };
+    groupIds.set(root, next);
+    return {
+      groupKey: next.groupKey,
+      targetEntryId: bindings.get(next.groupKey),
+      ...(previous ? { invalidatedGroupKey: previous.groupKey } : {}),
+    };
   }
-  return { groupKey, targetEntryId: bindings.get(groupKey) };
+  return { groupKey: previous.groupKey, targetEntryId: bindings.get(previous.groupKey) };
+}
+
+function structuralToken(value: string | null | undefined): string {
+  return cleanText(value).normalize("NFKC").toLowerCase().slice(0, 160);
+}
+
+function stableStructureHash(value: string): string {
+  let hash = 0xcbf29ce484222325n;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= BigInt(value.charCodeAt(index));
+    hash = BigInt.asUintN(64, hash * 0x100000001b3n);
+  }
+  return `structure-v1-${hash.toString(16).padStart(16, "0")}`;
+}
+
+/**
+ * Builds a session-only hash from form structure and field semantics. It
+ * intentionally never reads input values or arbitrary row text, and the raw
+ * structural tokens are not retained in the binding store.
+ */
+export function repeatGroupStructureSignature(
+  root: Element,
+  kind: string,
+  position: number,
+  adapter: SiteAdapter,
+  nodeIds: WeakMap<Element, string>,
+  allocateNodeId: () => string,
+): string {
+  const nodeId = (element: Element) => {
+    let id = nodeIds.get(element);
+    if (!id) {
+      id = allocateNodeId();
+      nodeIds.set(element, id);
+    }
+    return id;
+  };
+  const attributes = (element: Element, names: string[]) => names.map((name) => structuralToken(element.getAttribute(name)));
+  const rootShape = [
+    structuralToken(root.tagName),
+    ...attributes(root, ["id", "data-index", "data-row-key", "data-key", "data-section", "data-type", "data-gugu-repeat-kind", "aria-label"]),
+  ];
+  const controls = Array.from(root.querySelectorAll("input, textarea, select, [contenteditable=true], [role=combobox]"))
+    .map((control) => {
+      const semantics = describeFieldSemantics(control as FillableElement, adapter);
+      return [
+        nodeId(control),
+        structuralToken(control.tagName),
+        ...attributes(control, ["type", "id", "name", "role", "aria-label", "placeholder", "data-field", "data-index", "data-row-key"]),
+        structuralToken(semantics.label),
+        structuralToken(semantics.ariaLabel),
+        structuralToken(semantics.placeholder),
+        structuralToken(semantics.name),
+      ].join(":");
+    });
+  return stableStructureHash([structuralToken(kind), String(position), ...rootShape, ...controls].join("|"));
+}
+
+export function repeatedMatchIdentity(baseElementId: string, groupKey?: string): string {
+  return groupKey ? `${baseElementId}@${groupKey}` : baseElementId;
+}
+
+export function deduplicateManualFields(items: ManualField[]): ManualField[] {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    const identity = `${item.identity}:${item.required}:${item.reason}`;
+    if (seen.has(identity)) return false;
+    seen.add(identity);
+    return true;
+  });
 }
 
 export function snapshotTarget(target: FillTarget): ElementSnapshot[] {
