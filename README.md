@@ -68,7 +68,7 @@ AI 的职责是调整结构、措辞和岗位侧重点，而不是制造事实�
 
 `src/field-matcher.ts` 是唯一字段语义与控件匹配入口。它按 label、ARIA label、placeholder、name 的确定性证据计算结果；`type=email/tel` 只是低置信度提示，不能覆盖相冲突的 label。下拉、radio 和 checkbox 不使用 substring 猜选项，多选部分命中会整体转人工。
 
-`tests/fixtures/field-matcher.json` 使用 45 条脱敏案例覆盖中英文基础字段、城市/地址、教育字段、工作重复组的人工边界、单选/多选、日期、URL、高风险字段和各种跳过状态。该 fixture 是协议回归，不是任何真实 ATS 的准确率结论。
+`tests/fixtures/field-matcher.json` 使用 46 条脱敏案例覆盖中英文基础字段、城市/地址、教育字段、工作重复组的人工边界、单选/多选、日期、URL、高风险字段和各种跳过状态。该 fixture 是协议回归，不是任何真实 ATS 的准确率结论。
 
 ## CI 与发布
 

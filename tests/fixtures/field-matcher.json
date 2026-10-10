@@ -43,5 +43,6 @@
   {"id":"already-filled-skip","profile":{"fullName":"测试用户"},"field":{"label":"姓名","controlType":"text","hasValue":true},"expected":{"action":"skip","profileKey":null,"reason":"already_filled"}},
   {"id":"type-only-email-low-confidence","profile":{"email":"candidate@example.com"},"field":{"label":"","controlType":"email"},"expected":{"action":"manual","profileKey":null,"reason":"low_confidence"}},
   {"id":"invalid-date-manual","profile":{"birthDate":"2024-02-31"},"field":{"label":"出生日期","controlType":"date"},"expected":{"action":"manual","profileKey":"birthDate","reason":"invalid_date"}},
-  {"id":"address-select-unsupported","profile":{"address":"脱敏路 1 号"},"field":{"label":"详细地址","controlType":"select","options":[{"label":"脱敏路 1 号","value":"1"}]},"expected":{"action":"manual","profileKey":"address","reason":"unsupported_control"}}
+  {"id":"address-select-unsupported","profile":{"address":"脱敏路 1 号"},"field":{"label":"详细地址","controlType":"select","options":[{"label":"脱敏路 1 号","value":"1"}]},"expected":{"action":"manual","profileKey":"address","reason":"unsupported_control"}},
+  {"id":"company-address-manual","profile":{"address":"脱敏路 1 号"},"field":{"label":"Company Address","controlType":"text"},"expected":{"action":"manual","profileKey":null,"reason":"unknown_semantics"}}
 ]

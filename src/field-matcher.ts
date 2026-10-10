@@ -111,7 +111,7 @@ function unsafeContext(value: string, key: ProfileFieldKey): boolean {
   if (["fullName", "phone", "email", "address"].includes(key) && /(紧急联系人|推荐人|证明人|监护人|emergencycontact|reference|referrer|guardian)/i.test(normalized)) return true;
   if (key === "fullName" && /(公司|企业|雇主|用户名|company|employer|username)/i.test(normalized)) return true;
   if (["phone", "email"].includes(key) && /(工作邮箱|公司邮箱|工作电话|workemail|businessemail|officephone)/i.test(normalized)) return true;
-  if (key === "address" && /(邮箱|电子邮件|email)/i.test(normalized)) return true;
+  if (key === "address" && /(邮箱|电子邮件|email|公司地址|单位地址|企业地址|办公地址|工作地址|公司所在地|单位所在地|companyaddress|employeraddress|businessaddress|officeaddress|workaddress)/i.test(normalized)) return true;
   return false;
 }
 
