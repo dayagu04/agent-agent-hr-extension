@@ -1,12 +1,11 @@
 import panelCss from "./content.css?inline";
 import {
   collectCandidates,
-  collectNonFillableSemanticInventory,
+  collectSemanticInventory,
   collectScanDocuments,
   deduplicateManualFields,
   describeField,
   describeSemanticField,
-  duplicateSemanticCandidateIds,
   fillTarget,
   isEligible,
   isInputElement,
@@ -18,6 +17,7 @@ import {
   repeatedMatchIdentity,
   repeatGroupStructureSignature,
   resolveRepeatGroupIdentity,
+  resolveDuplicateSemanticCandidates,
   restoreElement,
   scopeNamedChoiceGroup,
   snapshotTarget,
@@ -30,7 +30,7 @@ import {
 } from "./dom-safety";
 import { isAiPolishAllowed, matchDescriptor, semanticProfileKey, type FieldDescriptor } from "./field-matcher";
 import { inferStructuredEntryField, inferStructuredEntryKind, structuredEntryOptions, type StructuredEntryOption } from "./repeat-context.ts";
-import { getSiteAdapter, isIgnoredByAdapter, type SiteAdapter } from "./site-adapters";
+import { getSiteAdapter, isIgnoredByAdapter, staticLabelTextOutsideControls, type SiteAdapter } from "./site-adapters";
 import type { FieldMatch, ProfileData, ProfileFieldKey, RepeatedFieldContext, StoredState, StructuredEntryKind } from "./types";
 
 declare global {
@@ -458,7 +458,7 @@ function isAssistantMutation(record: MutationRecord, host: HTMLElement): boolean
   return addedNodes.length > 0 && addedNodes.every((node) => node === host || host.contains(node));
 }
 
-function repeatSignal(element: Element): string {
+function repeatSignal(element: Element, adapter: SiteAdapter): string {
   const values: string[] = [];
   let current: Element | null = element;
   for (let depth = 0; current && depth < 4; depth += 1, current = current.parentElement) {
@@ -471,10 +471,10 @@ function repeatSignal(element: Element): string {
       current.getAttribute("aria-label") ?? "",
     );
     const heading = current.querySelector<HTMLElement>(":scope > legend, :scope > h2, :scope > h3, :scope > h4, :scope > [class*='section-title' i], :scope > [class*='group-title' i]");
-    if (heading) values.push(cleanText(heading.innerText || heading.textContent).slice(0, 100));
+    if (heading) values.push(cleanText(staticLabelTextOutsideControls(heading, undefined, adapter.dynamicChoiceSelectors)).slice(0, 100));
     const previous = current.previousElementSibling;
     if (previous?.matches("legend, h2, h3, h4, [class*='section-title' i], [class*='group-title' i]")) {
-      values.push(cleanText((previous as HTMLElement).innerText || previous.textContent).slice(0, 100));
+      values.push(cleanText(staticLabelTextOutsideControls(previous as HTMLElement, undefined, adapter.dynamicChoiceSelectors)).slice(0, 100));
     }
   }
   return values.filter(Boolean).join(" ");
@@ -496,17 +496,17 @@ function hasRepeatedSiblingShape(element: Element): boolean {
 function findRepeatedRoot(element: FillableElement, adapter: SiteAdapter): { root: Element; kind: StructuredEntryKind } | null {
   const explicit = element.closest<HTMLElement>("[data-gugu-repeat-kind]");
   if (explicit) {
-    const kind = inferStructuredEntryKind(explicit.dataset.guguRepeatKind ?? repeatSignal(explicit));
+    const kind = inferStructuredEntryKind(explicit.dataset.guguRepeatKind ?? repeatSignal(explicit, adapter));
     if (kind) return { root: explicit, kind };
   }
   const selectors = adapter.repeatedGroupSelectors.join(",");
   let current: Element | null = element.parentElement;
   for (let depth = 0; current && depth < 7; depth += 1, current = current.parentElement) {
     if (repeatedControlCount(current) < 2) continue;
-    const kind = inferStructuredEntryKind(repeatSignal(current));
+    const kind = inferStructuredEntryKind(repeatSignal(current, adapter));
     if (!kind) continue;
     const selectorMatch = selectors ? current.matches(selectors) : false;
-    const semanticClass = /(experience|education|project|award|employment|internship|经历|教育|项目|奖项)/i.test(repeatSignal(current));
+    const semanticClass = /(experience|education|project|award|employment|internship|经历|教育|项目|奖项)/i.test(repeatSignal(current, adapter));
     if (selectorMatch || semanticClass || hasRepeatedSiblingShape(current)) return { root: current, kind };
   }
   return null;
@@ -531,7 +531,7 @@ function describeRepeatedContext(
   if (!field) return undefined;
   const siblings = found.root.parentElement
     ? Array.from(found.root.parentElement.children).filter((candidate) => (
-      repeatedControlCount(candidate) >= 2 && inferStructuredEntryKind(repeatSignal(candidate)) === found.kind
+      repeatedControlCount(candidate) >= 2 && inferStructuredEntryKind(repeatSignal(candidate, adapter)) === found.kind
     ))
     : [found.root];
   const position = Math.max(0, siblings.indexOf(found.root)) + 1;
@@ -589,7 +589,9 @@ function scanPage(
     matchId?: string;
     label: string;
     required: boolean;
+    actionable: boolean;
   }> = [];
+  const semanticCandidatesByIdentity = new Map<string, (typeof semanticCandidates)[number]>();
 
   const candidateIdentity = (anchor: FillableElement, descriptor: FieldDescriptor) => {
     const baseElementId = elementIds.get(anchor) ?? `field-${nextElementId++}`;
@@ -611,8 +613,19 @@ function scanPage(
     profileKey: ProfileFieldKey,
     identity: string,
     matchId?: string,
+    actionable = false,
   ) => {
-    semanticCandidates.push({
+    const existing = semanticCandidatesByIdentity.get(identity);
+    if (existing) {
+      existing.profileKey = profileKey;
+      existing.repeated = Boolean(descriptor.repeated);
+      existing.label ||= (descriptor.label ?? "").slice(0, 100);
+      existing.required ||= Boolean(descriptor.required);
+      existing.actionable ||= actionable;
+      if (matchId) existing.matchId = matchId;
+      return;
+    }
+    const candidate = {
       identity,
       ownerDocument: anchor.ownerDocument,
       profileKey,
@@ -620,38 +633,49 @@ function scanPage(
       ...(matchId ? { matchId } : {}),
       label: (descriptor.label ?? "").slice(0, 100),
       required: Boolean(descriptor.required),
-    });
+      actionable,
+    };
+    semanticCandidates.push(candidate);
+    semanticCandidatesByIdentity.set(identity, candidate);
   };
 
-  const addSemanticSentinel = (anchor: FillableElement, identityOverride?: string, semanticDescriptor?: FieldDescriptor) => {
+  const addSemanticSentinel = (
+    anchor: FillableElement,
+    identityOverride?: string,
+    semanticDescriptor?: FieldDescriptor,
+  ): string | undefined => {
     const descriptor = semanticDescriptor ?? describeSemanticField(anchor, adapter);
-    if (!descriptor) return;
+    if (!descriptor) return undefined;
     descriptor.repeated = describeRepeatedContext(anchor, descriptor, adapter, repeatBindings, repeatGroupIds, repeatStructureNodeIds);
     const explicitKey = descriptor.repeated ? undefined : mappings[descriptorMappingKey(descriptor)];
     const profileKey = semanticProfileKey(descriptor, explicitKey);
-    if (!profileKey) return;
+    if (!profileKey) return undefined;
     const { manualIdentity } = candidateIdentity(anchor, descriptor);
-    recordSemanticCandidate(anchor, descriptor, profileKey, identityOverride ?? manualIdentity);
+    const identity = identityOverride ?? manualIdentity;
+    recordSemanticCandidate(anchor, descriptor, profileKey, identity);
+    return identity;
   };
 
-  const addMatch = (target: FillTarget, anchor: FillableElement, descriptor: FieldDescriptor) => {
+  const addMatch = (target: FillTarget, anchor: FillableElement, descriptor: FieldDescriptor, identityOverride?: string) => {
     const label = descriptor.label ?? "";
     const explicitKey = descriptor.repeated ? undefined : mappings[descriptorMappingKey(descriptor)];
     const decision = matchDescriptor(descriptor, profile, explicitKey);
     const { manualIdentity, matchId } = candidateIdentity(anchor, descriptor);
+    const semanticIdentity = identityOverride ?? manualIdentity;
     if (decision.profileKey) {
       recordSemanticCandidate(
         anchor,
         descriptor,
         decision.profileKey,
-        manualIdentity,
+        semanticIdentity,
         decision.action === "fill" ? matchId : undefined,
+        true,
       );
     }
     if (decision.action !== "fill" || !decision.profileKey || decision.value === null) {
       if (decision.action === "manual") {
         const item = {
-          identity: manualIdentity,
+          identity: semanticIdentity,
           label: label.slice(0, 100),
           reason: decision.reason,
           required: Boolean(descriptor.required),
@@ -678,12 +702,11 @@ function scanPage(
     });
   };
 
-  // Inventory non-fillable controls before the fill pass.  Their current
-  // values are never copied into a descriptor; only stable labels and control
-  // metadata are retained as duplicate sentinels.  Named choice groups are
-  // inventoried in the group branch below so one option cannot masquerade as
-  // multiple fields.
-  for (const { element, descriptor } of collectNonFillableSemanticInventory(candidates, adapter)) {
+  // Inventory every safe ordinary control before the fill pass. This phase
+  // never reads value/selection/body state. The later write pass merges by
+  // identity, so an eligible field does not appear twice. Named choices are
+  // inventoried once per safe scope in their group branch below.
+  for (const { element, descriptor } of collectSemanticInventory(candidates, adapter)) {
     addSemanticSentinel(element, undefined, descriptor);
   }
 
@@ -697,17 +720,46 @@ function scanPage(
         && candidate.name === element.name
         && candidate.form === element.form
       ));
-      const fillableChoices = sameNamedChoices.filter((candidate) => isEligible(candidate, adapter) && !isIgnoredByAdapter(candidate, adapter));
+      const safeChoiceInventory = sameNamedChoices.flatMap((candidate) => {
+        const descriptor = describeSemanticField(candidate, adapter);
+        return descriptor ? [{ element: candidate, descriptor }] : [];
+      });
+      const semanticSeed = safeChoiceInventory.find(({ element: candidate }) => candidate === element)?.element
+        ?? safeChoiceInventory[0]?.element;
+      const elementRepeatRoot = semanticSeed ? findRepeatedRoot(semanticSeed, adapter)?.root ?? null : null;
+      const semanticScope = safeChoiceInventory.filter(({ element: candidate }) => (
+        elementRepeatRoot
+          ? findRepeatedRoot(candidate, adapter)?.root === elementRepeatRoot
+          : !findRepeatedRoot(candidate, adapter)
+      ));
+      const semanticEntry = semanticScope[0];
+      const semanticAnchor = semanticEntry?.element;
+      const choiceSemanticIdentity = semanticAnchor
+        ? addSemanticSentinel(semanticAnchor, undefined, semanticEntry.descriptor)
+        : undefined;
+      const safeNamedChoices = safeChoiceInventory.map(({ element: candidate }) => candidate);
+      const fillableChoices = safeNamedChoices.filter((candidate) => isEligible(candidate, adapter));
       if (!fillableChoices.length) {
-        const sentinelAnchor = sameNamedChoices.find((candidate) => Boolean(describeSemanticField(candidate, adapter)));
-        if (sentinelAnchor) addSemanticSentinel(sentinelAnchor);
         for (const candidate of sameNamedChoices) processedChoices.add(candidate);
         continue;
       }
       const anchor = fillableChoices[0];
+      if (safeNamedChoices.length !== sameNamedChoices.length) {
+        for (const candidate of sameNamedChoices) processedChoices.add(candidate);
+        const descriptor = describeSemanticField(anchor, adapter);
+        const item: ManualField = {
+          identity: choiceSemanticIdentity ?? `document-${documentIndexes.get(element.ownerDocument) ?? 0}:ignored-choice`,
+          label: (descriptor?.label ?? "").slice(0, 100),
+          reason: "ambiguous_choice_group_scope",
+          required: sameNamedChoices.some((candidate) => candidate.hasAttribute("required") || candidate.getAttribute("aria-required") === "true"),
+        };
+        if (item.required) manualRequired.push(item);
+        else manualAttention.push(item);
+        continue;
+      }
       const scoped = scopeNamedChoiceGroup(
         anchor,
-        sameNamedChoices,
+        safeNamedChoices,
         (candidate) => findRepeatedRoot(candidate, adapter)?.root ?? null,
       );
       for (const candidate of scoped.elements) processedChoices.add(candidate);
@@ -724,12 +776,11 @@ function scanPage(
           reason: scoped.reason ?? "ambiguous_choice_group_scope",
           required: scoped.elements.some((candidate) => candidate.hasAttribute("required") || candidate.getAttribute("aria-required") === "true"),
         };
-        addSemanticSentinel(anchor, item.identity);
         if (item.required) manualRequired.push(item);
         else manualAttention.push(item);
         continue;
       }
-      const group = scoped.elements.filter((candidate) => isEligible(candidate, adapter) && !isIgnoredByAdapter(candidate, adapter));
+      const group = scoped.elements.filter((candidate) => !isIgnoredByAdapter(candidate, adapter) && isEligible(candidate, adapter));
       if (!group.length) continue;
       const descriptor = describeField(group[0], adapter);
       descriptor.repeated = describeRepeatedContext(group[0], descriptor, adapter, repeatBindings, repeatGroupIds, repeatStructureNodeIds);
@@ -737,20 +788,23 @@ function scanPage(
       descriptor.controlType = element.type as "radio" | "checkbox";
       descriptor.multiple = element.type === "checkbox";
       descriptor.options = group.map((candidate) => ({
-        label: optionLabel(candidate),
+        label: optionLabel(candidate, adapter),
         value: candidate.value,
         disabled: candidate.disabled,
       }));
-      addMatch(group, group[0], descriptor);
+      addMatch(group, group[0], descriptor, choiceSemanticIdentity);
       continue;
     }
-    if (!isEligible(element, adapter) || isIgnoredByAdapter(element, adapter)) continue;
+    if (isIgnoredByAdapter(element, adapter) || !isEligible(element, adapter)) continue;
     const descriptor = describeField(element, adapter);
     descriptor.repeated = describeRepeatedContext(element, descriptor, adapter, repeatBindings, repeatGroupIds, repeatStructureNodeIds);
     registerRepeatGroup(descriptor.repeated, profile, repeatGroupMap);
     addMatch(element, element, descriptor);
   }
-  const duplicateSemanticIdentities = duplicateSemanticCandidateIds(semanticCandidates);
+  const {
+    blockedIds: duplicateSemanticIdentities,
+    reportIds: duplicateSemanticReportIdentities,
+  } = resolveDuplicateSemanticCandidates(semanticCandidates);
   const duplicateMatchIds = new Set<string>();
   const removeManualIdentity = (items: ManualField[], identity: string) => {
     for (let index = items.length - 1; index >= 0; index -= 1) {
@@ -759,13 +813,14 @@ function scanPage(
   };
   for (const candidate of semanticCandidates) {
     if (!duplicateSemanticIdentities.has(candidate.identity)) continue;
-    removeManualIdentity(manualRequired, candidate.identity);
-    removeManualIdentity(manualAttention, candidate.identity);
     if (candidate.matchId) {
       duplicateMatchIds.add(candidate.matchId);
       elements.delete(candidate.matchId);
       descriptors.delete(candidate.matchId);
     }
+    if (!duplicateSemanticReportIdentities.has(candidate.identity)) continue;
+    removeManualIdentity(manualRequired, candidate.identity);
+    removeManualIdentity(manualAttention, candidate.identity);
     const item: ManualField = {
       identity: candidate.identity,
       label: candidate.label,

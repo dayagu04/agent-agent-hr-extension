@@ -85,14 +85,76 @@ export function getSiteAdapter(url = window.location.href): SiteAdapter {
   return SITE_ADAPTERS.find((adapter) => adapter.hostPattern.test(hostname)) ?? GENERIC_ADAPTER;
 }
 
+function containsElement(container: HTMLElement, descendant: HTMLElement): boolean {
+  if (container === descendant) return true;
+  if (typeof container.contains === "function") return container.contains(descendant);
+  let current = descendant.parentElement;
+  while (current) {
+    if (current === container) return true;
+    current = current.parentElement;
+  }
+  return false;
+}
+
+const VALUE_BEARING_SELECTORS = [
+  "input",
+  "textarea",
+  "select",
+  "[contenteditable]:not([contenteditable='false'])",
+  "[role='combobox']",
+  "[role='textbox']",
+];
+
+/**
+ * Reads label text without ever reading the text/value subtree of a form
+ * control. For an ordinary static label we retain native `innerText`; when a
+ * label/container wraps any control, only standalone text nodes outside those
+ * control subtrees are traversed.
+ */
+export function staticLabelTextOutsideControls(
+  candidate: HTMLElement,
+  field?: HTMLElement,
+  extraControlSelectors: string[] = [],
+): string {
+  if (candidate === field) return "";
+  const controlSelector = [...VALUE_BEARING_SELECTORS, ...extraControlSelectors].filter(Boolean).join(",");
+  let candidateIsControl = candidate.isContentEditable;
+  try { candidateIsControl ||= candidate.matches(controlSelector); } catch { candidateIsControl = true; }
+  if (candidateIsControl) return "";
+  const wrapsField = Boolean(field && containsElement(candidate, field));
+  let containsControl = wrapsField;
+  try { containsControl ||= Boolean(candidate.querySelector(controlSelector)); } catch { containsControl = true; }
+  if (!containsControl) return candidate.innerText || candidate.textContent || "";
+
+  const fragments: string[] = [];
+  const visit = (node: Node) => {
+    const childNodes = (node as Node & { childNodes?: NodeListOf<ChildNode> }).childNodes;
+    if (!childNodes) return;
+    for (const child of Array.from(childNodes)) {
+      if (child.nodeType === 3) {
+        fragments.push(child.textContent ?? "");
+        continue;
+      }
+      if (child.nodeType !== 1) continue;
+      const childElement = child as HTMLElement;
+      if (childElement === field) continue;
+      let isControl = childElement.isContentEditable;
+      try { isControl ||= childElement.matches(controlSelector); } catch { isControl = true; }
+      if (!isControl) visit(childElement);
+    }
+  };
+  visit(candidate);
+  return fragments.join(" ");
+}
+
 export function adapterLabelCandidates(element: HTMLElement, adapter: SiteAdapter): string[] {
   const labels: string[] = [];
   for (const selector of adapter.labelSelectors) {
     const closest = element.closest<HTMLElement>(selector);
-    if (closest && closest !== element) labels.push(closest.innerText || closest.textContent || "");
+    if (closest && closest !== element) labels.push(staticLabelTextOutsideControls(closest, element, adapter.dynamicChoiceSelectors));
     const parent = element.closest<HTMLElement>("[class*='form-item' i], [class*='field' i], [class*='question' i], [data-field]");
     const child = parent?.querySelector<HTMLElement>(selector);
-    if (child && child !== element) labels.push(child.innerText || child.textContent || "");
+    if (child && child !== element) labels.push(staticLabelTextOutsideControls(child, element, adapter.dynamicChoiceSelectors));
   }
   return labels;
 }

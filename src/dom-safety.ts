@@ -1,5 +1,5 @@
 import type { FieldControl, FieldDescriptor } from "./field-matcher.ts";
-import { adapterLabelCandidates, isIgnoredByAdapter, type SiteAdapter } from "./site-adapters.ts";
+import { adapterLabelCandidates, isIgnoredByAdapter, staticLabelTextOutsideControls, type SiteAdapter } from "./site-adapters.ts";
 import type { ProfileFieldKey } from "./types.ts";
 
 export type FillableElement = HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | HTMLElement;
@@ -71,6 +71,12 @@ export interface SemanticScanCandidate {
   ownerDocument: Document;
   profileKey: ProfileFieldKey;
   repeated: boolean;
+  actionable?: boolean;
+}
+
+export interface DuplicateSemanticResolution {
+  blockedIds: Set<string>;
+  reportIds: Set<string>;
 }
 
 export interface SemanticInventoryEntry {
@@ -282,11 +288,13 @@ export function isDynamicChoiceElement(element: FillableElement, adapter: SiteAd
  * attachment, or hidden value.
  */
 export function isSemanticInventoryCandidate(element: FillableElement, adapter: SiteAdapter): boolean {
-  if (!isElementVisible(element) || isIgnoredByAdapter(element, adapter)) return false;
+  // Filter sensitive/action controls before any code is allowed to inspect
+  // their value-like state or descendant text.
+  if (isIgnoredByAdapter(element, adapter)) return false;
   if (isInputElement(element) && ["hidden", "password", "file", "submit", "button", "reset", "image"].includes(element.type)) {
     return false;
   }
-  return true;
+  return isElementVisible(element);
 }
 
 export function isEligible(element: FillableElement, adapter: SiteAdapter): boolean {
@@ -310,17 +318,17 @@ function describeFieldSemantics(element: FillableElement, adapter: SiteAdapter):
   const ownerDocument = element.ownerDocument;
   if (element.id) {
     const label = ownerDocument.querySelector<HTMLLabelElement>(`label[for="${cssEscape(element.id, ownerDocument)}"]`);
-    if (label) parts.add(cleanText(label.innerText));
+    if (label) parts.add(cleanText(staticLabelTextOutsideControls(label, element, adapter.dynamicChoiceSelectors)));
   }
   const wrappingLabel = element.closest("label");
-  if (wrappingLabel) parts.add(cleanText(wrappingLabel.textContent));
+  if (wrappingLabel) parts.add(cleanText(staticLabelTextOutsideControls(wrappingLabel as HTMLElement, element, adapter.dynamicChoiceSelectors)));
   const container = element.closest("[class*='form-item'], [class*='field'], [class*='question'], .ant-form-item, .el-form-item");
   if (container) {
     const explicit = container.querySelector<HTMLElement>("label, [class*='label'], [class*='title']");
-    if (explicit && explicit !== element) parts.add(cleanText(explicit.innerText).slice(0, 120));
+    if (explicit && explicit !== element) parts.add(cleanText(staticLabelTextOutsideControls(explicit, element, adapter.dynamicChoiceSelectors)).slice(0, 120));
   }
   const previous = element.previousElementSibling as HTMLElement | null;
-  if (previous) parts.add(cleanText(previous.innerText).slice(0, 100));
+  if (previous) parts.add(cleanText(staticLabelTextOutsideControls(previous, element, adapter.dynamicChoiceSelectors)).slice(0, 100));
   for (const candidate of adapterLabelCandidates(element, adapter)) parts.add(cleanText(candidate).slice(0, 120));
   return {
     label: Array.from(parts).filter(Boolean).join(" | "),
@@ -354,18 +362,17 @@ export function describeSemanticField(element: FillableElement, adapter: SiteAda
 }
 
 /**
- * First phase of a page scan: retain semantics for ordinary controls that the
- * write pass will reject.  Named choices are handled once per scoped group by
- * the caller, rather than once per option.
+ * First phase of a page scan: inventory every safe ordinary control without
+ * reading its value-like state. Named choices are handled once per scoped
+ * group by the caller, rather than once per option.
  */
-export function collectNonFillableSemanticInventory(
+export function collectSemanticInventory(
   candidates: FillableElement[],
   adapter: SiteAdapter,
 ): SemanticInventoryEntry[] {
   const inventory: SemanticInventoryEntry[] = [];
   for (const element of candidates) {
     if (isInputElement(element) && ["radio", "checkbox"].includes(element.type) && element.name) continue;
-    if (isEligible(element, adapter)) continue;
     const descriptor = describeSemanticField(element, adapter);
     if (descriptor) inventory.push({ element, descriptor });
   }
@@ -393,14 +400,14 @@ export function describeField(element: FillableElement, adapter: SiteAdapter): F
   };
 }
 
-export function optionLabel(element: HTMLInputElement): string {
+export function optionLabel(element: HTMLInputElement, adapter: SiteAdapter): string {
   const ownerDocument = element.ownerDocument;
   if (element.id) {
     const label = ownerDocument.querySelector<HTMLLabelElement>(`label[for="${cssEscape(element.id, ownerDocument)}"]`);
-    if (label) return cleanText(label.innerText || label.textContent);
+    if (label) return cleanText(staticLabelTextOutsideControls(label, element, adapter.dynamicChoiceSelectors));
   }
   const wrapping = element.closest("label");
-  return cleanText((wrapping as HTMLElement | null)?.innerText || wrapping?.textContent || element.value);
+  return wrapping ? cleanText(staticLabelTextOutsideControls(wrapping as HTMLElement, element, adapter.dynamicChoiceSelectors)) : "";
 }
 
 function defaultChoiceContainer(element: HTMLInputElement): Element | null {
@@ -482,6 +489,21 @@ export function duplicateSemanticCandidateIds(candidates: SemanticScanCandidate[
   return unsafe;
 }
 
+/**
+ * Separates write blocking from UI reporting. Read-only sentinels participate
+ * in duplicate detection, but only an actionable field may become a new
+ * manual item or increase required-field counts.
+ */
+export function resolveDuplicateSemanticCandidates(candidates: SemanticScanCandidate[]): DuplicateSemanticResolution {
+  const blockedIds = duplicateSemanticCandidateIds(candidates);
+  return {
+    blockedIds,
+    reportIds: new Set(candidates
+      .filter((candidate) => candidate.actionable && blockedIds.has(candidate.identity))
+      .map((candidate) => candidate.identity)),
+  };
+}
+
 function elementControl(element: FillableElement, adapter: SiteAdapter): FieldControl {
   if (isDynamicChoiceElement(element, adapter)) return "combobox";
   if (isTextareaElement(element)) return "textarea";
@@ -554,17 +576,20 @@ export function repeatGroupStructureSignature(
     ...attributes(root, ["id", "data-index", "data-row-key", "data-key", "data-section", "data-type", "data-gugu-repeat-kind", "aria-label"]),
   ];
   const controls = Array.from(root.querySelectorAll("input, textarea, select, [contenteditable=true], [role=combobox]"))
-    .map((control) => {
-      const semantics = describeFieldSemantics(control as FillableElement, adapter);
+    .flatMap((control) => {
+      const descriptor = describeSemanticField(control as FillableElement, adapter);
+      if (!descriptor) return [];
       return [
-        nodeId(control),
-        structuralToken(control.tagName),
-        ...attributes(control, ["type", "id", "name", "role", "aria-label", "placeholder", "data-field", "data-index", "data-row-key"]),
-        structuralToken(semantics.label),
-        structuralToken(semantics.ariaLabel),
-        structuralToken(semantics.placeholder),
-        structuralToken(semantics.name),
-      ].join(":");
+        [
+          nodeId(control),
+          structuralToken(control.tagName),
+          ...attributes(control, ["type", "id", "name", "role", "aria-label", "placeholder", "data-field", "data-index", "data-row-key"]),
+          structuralToken(descriptor.label),
+          structuralToken(descriptor.ariaLabel),
+          structuralToken(descriptor.placeholder),
+          structuralToken(descriptor.name),
+        ].join(":"),
+      ];
     });
   return stableStructureHash([structuralToken(kind), String(position), ...rootShape, ...controls].join("|"));
 }
@@ -640,8 +665,8 @@ export function validateCachedFillTarget(
   if (!sameTargetIdentity(cachedTarget, currentTarget)) return { valid: false, reason: "target_replaced" };
   const elements = Array.isArray(currentTarget) ? currentTarget : [currentTarget];
   if (elements.some((element) => !element.isConnected)) return { valid: false, reason: "target_disconnected" };
-  if (elements.some((element) => !isEligible(element, adapter))) return { valid: false, reason: "target_ineligible" };
   if (elements.some((element) => isIgnoredByAdapter(element, adapter))) return { valid: false, reason: "target_ignored" };
+  if (elements.some((element) => !isEligible(element, adapter))) return { valid: false, reason: "target_ineligible" };
   if (elements.some((element) => isInputElement(element) && ["radio", "checkbox"].includes(element.type) && element.checked)) {
     return { valid: false, reason: "choice_already_selected" };
   }

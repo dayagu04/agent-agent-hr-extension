@@ -3,7 +3,7 @@ import test from "node:test";
 
 import {
   collectCandidates,
-  collectNonFillableSemanticInventory,
+  collectSemanticInventory,
   collectScanDocuments,
   deduplicateManualFields,
   describeField,
@@ -15,6 +15,7 @@ import {
   registerFrameLoadListeners,
   repeatedMatchIdentity,
   repeatGroupStructureSignature,
+  resolveDuplicateSemanticCandidates,
   resolveRepeatGroupIdentity,
   scopeNamedChoiceGroup,
   selectHasCurrentValue,
@@ -84,7 +85,17 @@ class FakeDocument {
   }
 }
 
+class FakeTextNode {
+  readonly nodeType = 3;
+  readonly textContent: string;
+
+  constructor(textContent: string) {
+    this.textContent = textContent;
+  }
+}
+
 class FakeElement {
+  readonly nodeType = 1;
   readonly tagName: string;
   readonly ownerDocument: FakeDocument;
   readonly events: string[] = [];
@@ -100,8 +111,6 @@ class FakeElement {
   multiple = false;
   selectedIndex = 0;
   options: Array<{ text: string; value: string; disabled: boolean; selected: boolean }> = [];
-  textContent = "";
-  innerText = "";
   isContentEditable = false;
   isConnected = true;
   effectiveDisabled = false;
@@ -116,9 +125,17 @@ class FakeElement {
   parentElement: FakeElement | null = null;
   children: FakeElement[] = [];
   childControls: FakeElement[] = [];
+  childNodes: Array<FakeElement | FakeTextNode> = [];
   proxy: FakeElement | null = null;
   valueReadCount = 0;
+  textContentReadCount = 0;
+  innerTextReadCount = 0;
+  throwOnValueRead = false;
+  throwOnTextContentRead = false;
+  throwOnInnerTextRead = false;
   private currentValue = "";
+  private currentTextContent = "";
+  private currentInnerText = "";
 
   constructor(tagName: string, ownerDocument: FakeDocument) {
     this.tagName = tagName.toUpperCase();
@@ -127,11 +144,32 @@ class FakeElement {
 
   get value(): string {
     this.valueReadCount += 1;
+    if (this.throwOnValueRead) throw new Error("value getter must not be read");
     return this.currentValue;
   }
 
   set value(value: string) {
     this.currentValue = value;
+  }
+
+  get textContent(): string {
+    this.textContentReadCount += 1;
+    if (this.throwOnTextContentRead) throw new Error("textContent getter must not be read");
+    return this.currentTextContent;
+  }
+
+  set textContent(value: string) {
+    this.currentTextContent = value;
+  }
+
+  get innerText(): string {
+    this.innerTextReadCount += 1;
+    if (this.throwOnInnerTextRead) throw new Error("innerText getter must not be read");
+    return this.currentInnerText;
+  }
+
+  set innerText(value: string) {
+    this.currentInnerText = value;
   }
 
   setAttribute(name: string, value: string): void {
@@ -165,7 +203,17 @@ class FakeElement {
         current = current.parentElement;
       }
     }
-    return false;
+    return selector.split(",").some((part) => {
+      const simple = part.trim();
+      if (simple === "input") return this.tagName === "INPUT";
+      if (simple === "textarea") return this.tagName === "TEXTAREA";
+      if (simple === "select") return this.tagName === "SELECT";
+      if (simple.startsWith("[contenteditable]")) return this.isContentEditable;
+      if (/^\[role=['\"]?combobox/i.test(simple)) return this.getAttribute("role") === "combobox";
+      if (/^\[role=['\"]?textbox/i.test(simple)) return this.getAttribute("role") === "textbox";
+      if (simple.startsWith(".")) return this.className.split(/\s+/).includes(simple.slice(1));
+      return false;
+    });
   }
 
   querySelector(): FakeElement | null {
@@ -545,6 +593,20 @@ test("cached targets are rejected after user value, disable, removal, or semanti
   );
 });
 
+test("cached ignored targets are rejected before their value getter is read", () => {
+  const document = new FakeDocument("https://app.mokahr.com/apply");
+  const adapter = getSiteAdapter(document.location.href);
+  const ignored = new FakeElement("input", document);
+  ignored.ignoredByAdapter = true;
+  ignored.throwOnValueRead = true;
+  const descriptor: FieldDescriptor = { label: "短信验证码", controlType: "text" };
+  assert.deepEqual(
+    validateCachedFillTarget(asElement(ignored), asElement(ignored), descriptor, descriptor, adapter),
+    { valid: false, reason: "target_ignored" },
+  );
+  assert.equal(ignored.valueReadCount, 0);
+});
+
 test("cached radio groups are rejected when the page already selected an option", () => {
   const document = new FakeDocument("https://app.mokahr.com/apply");
   const adapter = getSiteAdapter(document.location.href);
@@ -636,9 +698,11 @@ test("semantic inventory makes a filled missed-repeat row a sentinel for an empt
   const semanticOnlyDescriptor = describeSemanticField(asElement(filled), adapter);
   assert.ok(semanticOnlyDescriptor);
   assert.equal(filled.valueReadCount, 0, "semantic inventory must not read the current value");
-  const inventory = collectNonFillableSemanticInventory([asElement(filled), asElement(empty)], adapter);
-  assert.deepEqual(inventory.map(({ element }) => element), [filled]);
-  const sentinelDescriptor = inventory[0].descriptor;
+  const inventory = collectSemanticInventory([asElement(filled), asElement(empty)], adapter);
+  assert.deepEqual(inventory.map(({ element }) => element), [filled, empty]);
+  assert.equal(filled.valueReadCount, 0, "full inventory must not use eligibility value reads");
+  const sentinelDescriptor = inventory.find(({ element }) => element === asElement(filled))?.descriptor;
+  assert.ok(sentinelDescriptor);
   assert.equal(JSON.stringify(sentinelDescriptor).includes("不应进入描述符的示例值"), false);
 
   const fillDescriptor = describeField(asElement(empty), adapter);
@@ -666,9 +730,10 @@ test("a filled recognized repeat sentinel blocks an empty missed scalar fallback
   emptyScalar.setAttribute("aria-label", "毕业院校");
   filledRepeat.value = "已存在的脱敏学校";
 
-  const inventory = collectNonFillableSemanticInventory([asElement(filledRepeat), asElement(emptyScalar)], adapter);
-  assert.deepEqual(inventory.map(({ element }) => element), [filledRepeat]);
-  const repeatDescriptor = inventory[0].descriptor;
+  const inventory = collectSemanticInventory([asElement(filledRepeat), asElement(emptyScalar)], adapter);
+  assert.deepEqual(inventory.map(({ element }) => element), [filledRepeat, emptyScalar]);
+  const repeatDescriptor = inventory.find(({ element }) => element === asElement(filledRepeat))?.descriptor;
+  assert.ok(repeatDescriptor);
   repeatDescriptor.repeated = {
     groupKey: "education-row-1",
     groupLabel: "教育经历第 1 行",
@@ -705,9 +770,10 @@ test("disabled and readonly semantic sentinels each block an empty scalar twin",
 
     assert.equal(isEligible(asElement(sentinel), adapter), false, state);
     assert.equal(isEligible(asElement(empty), adapter), true, state);
-    const inventory = collectNonFillableSemanticInventory([asElement(sentinel), asElement(empty)], adapter);
-    assert.deepEqual(inventory.map(({ element }) => element), [sentinel], state);
-    const sentinelDescriptor = inventory[0].descriptor;
+    const inventory = collectSemanticInventory([asElement(sentinel), asElement(empty)], adapter);
+    assert.deepEqual(inventory.map(({ element }) => element), [sentinel, empty], state);
+    const sentinelDescriptor = inventory.find(({ element }) => element === asElement(sentinel))?.descriptor;
+    assert.ok(sentinelDescriptor, state);
     const sentinelKey = semanticProfileKey(sentinelDescriptor);
     const fillDecision = matchDescriptor(
       describeField(asElement(empty), adapter),
@@ -729,16 +795,157 @@ test("disabled and readonly semantic sentinels each block an empty scalar twin",
 test("semantic inventory rejects sensitive, hidden, and undescribed controls", () => {
   const document = new FakeDocument("https://careers.example.test/apply");
   const adapter = getSiteAdapter(document.location.href);
-  for (const type of ["password", "hidden", "file"] as const) {
+  for (const type of ["password", "hidden", "file", "submit", "button", "reset", "image"] as const) {
     const control = new FakeElement("input", document);
     control.type = type;
     control.setAttribute("aria-label", type === "password" ? "密码" : "附件");
+    control.throwOnValueRead = true;
     assert.equal(describeSemanticField(asElement(control), adapter), null, type);
-    assert.deepEqual(collectNonFillableSemanticInventory([asElement(control)], adapter), [], type);
+    assert.deepEqual(collectSemanticInventory([asElement(control)], adapter), [], type);
+    assert.equal(control.valueReadCount, 0, type);
   }
   const undescribed = new FakeElement("input", document);
   assert.equal(describeSemanticField(asElement(undescribed), adapter), null);
-  assert.deepEqual(collectNonFillableSemanticInventory([asElement(undescribed)], adapter), []);
+  assert.deepEqual(collectSemanticInventory([asElement(undescribed)], adapter), []);
+});
+
+test("semantic inventory reads zero input, textarea, select, or contenteditable values", () => {
+  const document = new FakeDocument("https://app.mokahr.com/apply");
+  const adapter = getSiteAdapter(document.location.href);
+  const input = new FakeElement("input", document);
+  input.setAttribute("aria-label", "姓名");
+  input.throwOnValueRead = true;
+  const inheritedEditable = new FakeElement("div", document);
+  inheritedEditable.isContentEditable = true;
+  inheritedEditable.textContent = "不得进入语义的继承编辑正文";
+  inheritedEditable.innerText = "不得进入语义的继承编辑正文";
+  inheritedEditable.throwOnTextContentRead = true;
+  inheritedEditable.throwOnInnerTextRead = true;
+  input.previousElementSibling = inheritedEditable;
+  const textarea = new FakeElement("textarea", document);
+  textarea.setAttribute("aria-label", "个人简介");
+  textarea.throwOnValueRead = true;
+  textarea.textContent = "不得进入语义的服务端 textarea 正文";
+  textarea.innerText = "不得进入语义的服务端 textarea 正文";
+  textarea.throwOnTextContentRead = true;
+  textarea.throwOnInnerTextRead = true;
+  const textareaWrappingLabel = new FakeElement("label", document);
+  textareaWrappingLabel.textContent = "个人简介 不得进入语义的服务端 textarea 正文";
+  textareaWrappingLabel.innerText = "个人简介 不得进入语义的服务端 textarea 正文";
+  textareaWrappingLabel.throwOnTextContentRead = true;
+  textareaWrappingLabel.throwOnInnerTextRead = true;
+  textarea.proxy = textareaWrappingLabel;
+  textarea.parentElement = textareaWrappingLabel;
+  const nestedDynamicChoice = new FakeElement("div", document);
+  nestedDynamicChoice.className = "ant-select";
+  nestedDynamicChoice.textContent = "不得进入语义的动态选择正文";
+  nestedDynamicChoice.innerText = "不得进入语义的动态选择正文";
+  nestedDynamicChoice.throwOnTextContentRead = true;
+  nestedDynamicChoice.throwOnInnerTextRead = true;
+  nestedDynamicChoice.parentElement = textareaWrappingLabel;
+  nestedDynamicChoice.childNodes = [new FakeTextNode("不得进入语义的动态选择正文")];
+  textareaWrappingLabel.childNodes = [new FakeTextNode("个人简介"), textarea, nestedDynamicChoice];
+  const select = new FakeElement("select", document);
+  select.setAttribute("aria-label", "学历");
+  select.throwOnValueRead = true;
+  let selectedReadCount = 0;
+  select.options = [{
+    text: "本科",
+    value: "bachelor",
+    disabled: false,
+    get selected(): boolean {
+      selectedReadCount += 1;
+      throw new Error("selected getter must not be read");
+    },
+  }];
+  const wrappingLabel = new FakeElement("label", document);
+  wrappingLabel.textContent = "个人简介 不得进入语义的用户正文";
+  wrappingLabel.innerText = "个人简介 不得进入语义的用户正文";
+  wrappingLabel.throwOnTextContentRead = true;
+  wrappingLabel.throwOnInnerTextRead = true;
+  const editable = new FakeElement("div", document);
+  editable.isContentEditable = true;
+  editable.setAttribute("aria-label", "个人简介");
+  editable.textContent = "不得进入语义或哈希的用户正文";
+  editable.innerText = "不得进入语义或哈希的用户正文";
+  editable.throwOnTextContentRead = true;
+  editable.throwOnInnerTextRead = true;
+  editable.proxy = wrappingLabel;
+  editable.parentElement = wrappingLabel;
+  editable.childNodes = [new FakeTextNode("不得进入语义或哈希的用户正文")];
+  wrappingLabel.childNodes = [new FakeTextNode("个人简介"), editable];
+
+  const inventory = collectSemanticInventory(
+    [input, textarea, select, editable].map(asElement),
+    adapter,
+  );
+  assert.deepEqual(inventory.map(({ element }) => element), [input, textarea, select, editable]);
+  assert.equal(input.valueReadCount, 0);
+  assert.equal(inheritedEditable.textContentReadCount, 0);
+  assert.equal(inheritedEditable.innerTextReadCount, 0);
+  assert.equal(textarea.valueReadCount, 0);
+  assert.equal(textarea.textContentReadCount, 0);
+  assert.equal(textarea.innerTextReadCount, 0);
+  assert.equal(select.valueReadCount, 0);
+  assert.equal(selectedReadCount, 0);
+  assert.equal(editable.textContentReadCount, 0);
+  assert.equal(editable.innerTextReadCount, 0);
+  assert.equal(wrappingLabel.textContentReadCount, 0);
+  assert.equal(wrappingLabel.innerTextReadCount, 0);
+  assert.equal(textareaWrappingLabel.textContentReadCount, 0);
+  assert.equal(textareaWrappingLabel.innerTextReadCount, 0);
+  assert.equal(nestedDynamicChoice.textContentReadCount, 0);
+  assert.equal(nestedDynamicChoice.innerTextReadCount, 0);
+  assert.equal(JSON.stringify(inventory.map(({ descriptor }) => descriptor)).includes("不得进入语义"), false);
+
+  const repeatRoot = new FakeElement("div", document);
+  repeatRoot.childControls = [textarea, editable];
+  repeatGroupStructureSignature(
+    asElement(repeatRoot),
+    "project",
+    1,
+    adapter,
+    new WeakMap<Element, string>(),
+    () => "node-1",
+  );
+  assert.equal(editable.textContentReadCount, 0);
+  assert.equal(editable.innerTextReadCount, 0);
+  assert.equal(wrappingLabel.textContentReadCount, 0);
+  assert.equal(wrappingLabel.innerTextReadCount, 0);
+  assert.equal(textareaWrappingLabel.textContentReadCount, 0);
+  assert.equal(textareaWrappingLabel.innerTextReadCount, 0);
+  assert.equal(textarea.textContentReadCount, 0);
+  assert.equal(textarea.innerTextReadCount, 0);
+  assert.equal(nestedDynamicChoice.textContentReadCount, 0);
+  assert.equal(nestedDynamicChoice.innerTextReadCount, 0);
+});
+
+test("ignored OTP text controls are rejected before any value or text read", () => {
+  const document = new FakeDocument("https://app.mokahr.com/apply");
+  const adapter = getSiteAdapter(document.location.href);
+  const otp = new FakeElement("input", document);
+  otp.setAttribute("aria-label", "短信验证码");
+  otp.ignoredByAdapter = true;
+  otp.throwOnValueRead = true;
+  otp.throwOnTextContentRead = true;
+  otp.throwOnInnerTextRead = true;
+
+  assert.deepEqual(collectSemanticInventory([asElement(otp)], adapter), []);
+  assert.equal(otp.valueReadCount, 0);
+  assert.equal(otp.textContentReadCount, 0);
+  assert.equal(otp.innerTextReadCount, 0);
+});
+
+test("required read-only sentinels block fills without becoming manual-count items", () => {
+  const document = new FakeDocument("https://careers.example.test/apply");
+  const candidates = [
+    { identity: "required-sentinel", ownerDocument: asDocument(document), profileKey: "school" as const, repeated: false, actionable: false, required: true },
+    { identity: "required-fill", ownerDocument: asDocument(document), profileKey: "school" as const, repeated: false, actionable: true, required: true },
+  ];
+  const resolution = resolveDuplicateSemanticCandidates(candidates);
+  assert.deepEqual([...resolution.blockedIds].sort(), ["required-fill", "required-sentinel"]);
+  assert.deepEqual([...resolution.reportIds], ["required-fill"]);
+  assert.equal(candidates.filter((candidate) => candidate.required && resolution.reportIds.has(candidate.identity)).length, 1);
 });
 
 test("duplicate scalar school and experience semantics without repeat roots produce zero automatic fills", () => {
