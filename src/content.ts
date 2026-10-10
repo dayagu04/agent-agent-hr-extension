@@ -1,4 +1,5 @@
 import panelCss from "./content.css?inline";
+import { matchDescriptor, type FieldControl, type FieldDescriptor } from "./field-matcher";
 import { adapterLabelCandidates, getSiteAdapter, isIgnoredByAdapter, type SiteAdapter } from "./site-adapters";
 import type { FieldMatch, ProfileData, ProfileFieldKey, StoredState } from "./types";
 
@@ -7,38 +8,26 @@ declare global {
 }
 
 type FillableElement = HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | HTMLElement;
+type FillTarget = FillableElement | HTMLInputElement[];
+
+interface ElementSnapshot {
+  element: FillableElement;
+  value: string;
+  checked?: boolean;
+}
+
+interface ManualField {
+  label: string;
+  reason: string;
+}
 
 const FIELD_LABELS: Record<ProfileFieldKey, string> = {
   fullName: "姓名", preferredName: "常用称呼", phone: "手机号", email: "邮箱", gender: "性别",
-  birthDate: "出生日期", location: "现居地", preferredLocation: "期望城市", website: "个人网站",
+  birthDate: "出生日期", location: "现居城市", address: "详细地址", preferredLocation: "期望城市", website: "个人网站",
   github: "GitHub", school: "学校", major: "专业", degree: "学历", gpa: "GPA",
   educationStart: "入学时间", educationEnd: "毕业时间", summary: "个人简介", skills: "技能",
   experience: "实习 / 工作经历", projects: "项目经历", awards: "获奖经历",
 };
-
-const RULES: Array<{ key: ProfileFieldKey; patterns: RegExp[] }> = [
-  { key: "email", patterns: [/电子?邮[箱件]/i, /e-?mail/i, /mail address/i] },
-  { key: "phone", patterns: [/手机(号码)?/i, /联系电话/i, /电话号码/i, /mobile/i, /phone/i, /tel(?:ephone)?/i] },
-  { key: "preferredName", patterns: [/常用称呼/i, /昵称/i, /preferred name/i] },
-  { key: "fullName", patterns: [/^姓名/i, /真实姓名/i, /中文名/i, /full name/i, /candidate name/i] },
-  { key: "gender", patterns: [/^性别/i, /^gender/i, /^sex$/i] },
-  { key: "birthDate", patterns: [/出生日期/i, /出生年月/i, /birthday/i, /date of birth/i] },
-  { key: "preferredLocation", patterns: [/期望.*(?:城市|地点|工作地)/i, /意向.*(?:城市|地点)/i, /preferred location/i] },
-  { key: "location", patterns: [/现居/i, /居住地/i, /所在城市/i, /current location/i, /address/i] },
-  { key: "github", patterns: [/github/i, /代码仓库/i] },
-  { key: "website", patterns: [/个人网站/i, /主页链接/i, /作品链接/i, /portfolio/i, /personal website/i, /homepage/i] },
-  { key: "school", patterns: [/学校名称/i, /毕业院校/i, /^学校/i, /university/i, /college/i, /school/i] },
-  { key: "major", patterns: [/所学专业/i, /^专业/i, /major/i, /field of study/i] },
-  { key: "degree", patterns: [/最高学历/i, /^学历/i, /学位/i, /degree/i, /education level/i] },
-  { key: "gpa", patterns: [/gpa/i, /绩点/i, /成绩排名/i] },
-  { key: "educationStart", patterns: [/入学时间/i, /教育.*开始/i, /start.*(?:school|education)/i] },
-  { key: "educationEnd", patterns: [/毕业时间/i, /预计毕业/i, /教育.*结束/i, /graduation/i] },
-  { key: "projects", patterns: [/项目(?:经历|描述|介绍|经验)/i, /project experience/i, /projects?/i] },
-  { key: "awards", patterns: [/获奖/i, /奖项/i, /荣誉/i, /awards?/i, /honors?/i] },
-  { key: "experience", patterns: [/实习(?:经历|描述)/i, /工作(?:经历|描述)/i, /职责描述/i, /experience/i, /employment/i] },
-  { key: "skills", patterns: [/专业技能/i, /^技能/i, /技术栈/i, /skills?/i] },
-  { key: "summary", patterns: [/自我介绍/i, /个人优势/i, /自我评价/i, /个人总结/i, /补充说明/i, /summary/i, /about (?:you|yourself)/i, /why.*(?:join|apply)/i] },
-];
 
 let nextElementId = 0;
 
@@ -77,15 +66,17 @@ function installAssistant() {
   const notice = root.querySelector<HTMLElement>("[data-role=notice]")!;
   const fillButton = root.querySelector<HTMLButtonElement>("[data-action=fill]")!;
   const undoButton = root.querySelector<HTMLButtonElement>("[data-action=undo]")!;
-  const elements = new Map<string, FillableElement>();
+  const elements = new Map<string, FillTarget>();
+  const descriptors = new Map<string, FieldDescriptor>();
   const elementIds = new WeakMap<FillableElement, string>();
   const adapter = getSiteAdapter();
   let state: StoredState | null = null;
   let matches: FieldMatch[] = [];
+  let manualRequired: ManualField[] = [];
   let savedMappings: Record<string, ProfileFieldKey> = {};
   let selectedIds = new Set<string>();
   let hasRenderedOnce = false;
-  let lastFill: Array<{ element: FillableElement; value: string }> = [];
+  let lastFill: ElementSnapshot[] = [];
   let panelOpen = false;
   let refreshTimer: number | undefined;
 
@@ -99,12 +90,15 @@ function installAssistant() {
   }
 
   function render() {
-    count.textContent = `识别到 ${matches.length} 个字段 · ${adapter.name}`;
+    count.textContent = `可填写 ${matches.length} 个 · 必填需人工 ${manualRequired.length} 个 · ${adapter.name}`;
     tier.textContent = state?.ai.enabled ? "二档 · AI 可选" : "一档 · 本地填写";
     fillButton.disabled = matches.length === 0;
     undoButton.classList.toggle("gugu-hidden", lastFill.length === 0);
+    const manualSummary = manualRequired.length
+      ? `<div class="gugu-manual"><strong>以下可见必填项不会自动填写</strong>${manualRequired.map((item) => `<p>${escapeHtml(item.label || "未命名字段")} · ${escapeHtml(manualReason(item.reason))}</p>`).join("")}</div>`
+      : "";
     if (!matches.length) {
-      list.innerHTML = `<p class="gugu-empty">暂未找到能够可靠匹配的空白字段。可滚动页面让动态表单加载后，再重新识别。</p>`;
+      list.innerHTML = `<p class="gugu-empty">暂未找到能够可靠匹配的空白字段。可滚动页面让动态表单加载后，再重新识别。</p>${manualSummary}`;
       return;
     }
     list.innerHTML = matches.map((match) => {
@@ -120,7 +114,7 @@ function installAssistant() {
         <span class="gugu-confidence ${match.confidence < 0.78 ? "medium" : ""}">${Math.round(match.confidence * 100)}%</span>
         ${canPolish ? `<button class="gugu-ai" data-action="polish" type="button">AI 润色此项</button>` : ""}
       </div>`;
-    }).join("");
+    }).join("") + manualSummary;
   }
 
   async function refresh() {
@@ -129,7 +123,9 @@ function installAssistant() {
     if (!response.ok || !response.state) throw new Error(response.error || "无法读取个人档案");
     state = response.state;
     savedMappings = await loadSiteMappings();
-    matches = scanPage(state.profile, elements, adapter, elementIds, savedMappings);
+    const scan = scanPage(state.profile, elements, descriptors, adapter, elementIds, savedMappings);
+    matches = scan.matches;
+    manualRequired = scan.manualRequired;
     selectedIds = new Set(matches.filter((match) => hasRenderedOnce ? selectedIds.has(match.id) : match.confidence >= 0.78).map((match) => match.id));
     hasRenderedOnce = true;
     render();
@@ -160,7 +156,7 @@ function installAssistant() {
     if (action === "undo") {
       let restored = 0;
       for (const snapshot of lastFill) {
-        if (restoreElement(snapshot.element, snapshot.value)) restored += 1;
+        if (restoreElement(snapshot)) restored += 1;
       }
       lastFill = [];
       render();
@@ -169,15 +165,16 @@ function installAssistant() {
     }
     if (action === "fill") {
       let filled = 0;
-      const snapshots: Array<{ element: FillableElement; value: string }> = [];
+      const snapshots: ElementSnapshot[] = [];
       for (const row of list.querySelectorAll<HTMLElement>(".gugu-row")) {
         if (!row.querySelector<HTMLInputElement>(".gugu-check")?.checked) continue;
         const match = matches.find((item) => item.id === row.dataset.id);
-        const element = match ? elements.get(match.id) : undefined;
-        if (match && element) {
-          const originalValue = readElementValue(element);
-          if (fillElement(element, match.suggestedValue ?? match.value)) {
-            snapshots.push({ element, value: originalValue });
+        const target = match ? elements.get(match.id) : undefined;
+        if (match && target) {
+          const before = snapshotTarget(target);
+          const fillValue = match.suggestedValue ?? match.resolvedValue;
+          if (fillTarget(target, fillValue)) {
+            snapshots.push(...before);
             filled += 1;
           }
         }
@@ -219,10 +216,18 @@ function installAssistant() {
     const match = matches.find((item) => item.id === id);
     if (input instanceof HTMLSelectElement && input.dataset.action === "map" && match && state) {
       const key = input.value as ProfileFieldKey;
-      match.key = key;
-      match.value = state.profile[key];
-      match.confidence = 0.96;
-      savedMappings[normalizeLabel(match.label)] = key;
+      const descriptor = descriptors.get(id);
+      if (!descriptor) return;
+      const decision = matchDescriptor(descriptor, state.profile, key);
+      if (decision.action !== "fill" || !decision.profileKey || decision.value === null) {
+        showNotice("该字段与所选档案项的控件或选项不兼容，已保持人工处理。", true);
+        return;
+      }
+      match.key = decision.profileKey;
+      match.value = state.profile[decision.profileKey];
+      match.resolvedValue = decision.value;
+      match.confidence = decision.confidence;
+      savedMappings[descriptorMappingKey(descriptor)] = key;
       void saveSiteMapping(savedMappings);
       render();
       showNotice(match.value ? "已记住该站点的字段映射。" : "该字段在档案中暂无内容，请先补充个人档案。", !match.value);
@@ -257,21 +262,89 @@ function isAssistantMutation(record: MutationRecord, host: HTMLElement): boolean
   return Array.from(record.addedNodes).every((node) => node instanceof Node && (node === host || host.contains(node)));
 }
 
-function scanPage(profile: ProfileData, elements: Map<string, FillableElement>, adapter: SiteAdapter, elementIds: WeakMap<FillableElement, string>, mappings: Record<string, ProfileFieldKey>): FieldMatch[] {
+function scanPage(
+  profile: ProfileData,
+  elements: Map<string, FillTarget>,
+  descriptors: Map<string, FieldDescriptor>,
+  adapter: SiteAdapter,
+  elementIds: WeakMap<FillableElement, string>,
+  mappings: Record<string, ProfileFieldKey>,
+): { matches: FieldMatch[]; manualRequired: ManualField[] } {
   elements.clear();
+  descriptors.clear();
   const candidates = Array.from(document.querySelectorAll<FillableElement>("input, textarea, select, [contenteditable=true]"));
   const matches: FieldMatch[] = [];
+  const manualRequired: ManualField[] = [];
+  const processedGroups = new Set<string>();
+
+  const addMatch = (target: FillTarget, anchor: FillableElement, descriptor: FieldDescriptor) => {
+    const label = descriptor.label ?? "";
+    const explicitKey = mappings[descriptorMappingKey(descriptor)];
+    const decision = matchDescriptor(descriptor, profile, explicitKey);
+    if (decision.action !== "fill" || !decision.profileKey || decision.value === null) {
+      if (descriptor.required && decision.action === "manual") {
+        manualRequired.push({ label: label.slice(0, 100), reason: decision.reason });
+      }
+      return;
+    }
+    const id = elementIds.get(anchor) ?? `field-${nextElementId++}`;
+    elementIds.set(anchor, id);
+    elements.set(id, target);
+    descriptors.set(id, descriptor);
+    matches.push({
+      id,
+      label: label.slice(0, 100) || FIELD_LABELS[decision.profileKey],
+      key: decision.profileKey,
+      value: profile[decision.profileKey],
+      resolvedValue: decision.value,
+      confidence: decision.confidence,
+      kind: elementKind(anchor),
+    });
+  };
+
   for (const element of candidates) {
     if (!isEligible(element) || isIgnoredByAdapter(element, adapter)) continue;
-    const label = describeElement(element, adapter);
-    const match = matchField(label, element, profile, adapter, mappings);
-    if (!match) continue;
-    const id = elementIds.get(element) ?? `field-${nextElementId++}`;
-    elementIds.set(element, id);
-    elements.set(id, element);
-    matches.push({ id, label: label.slice(0, 100) || FIELD_LABELS[match.key], key: match.key, value: match.value, confidence: match.confidence, kind: elementKind(element) });
+    if (element instanceof HTMLInputElement && ["radio", "checkbox"].includes(element.type) && element.name) {
+      const groupKey = `${element.type}:${element.name}`;
+      if (processedGroups.has(groupKey)) continue;
+      processedGroups.add(groupKey);
+      const group = candidates.filter((candidate): candidate is HTMLInputElement => (
+        candidate instanceof HTMLInputElement
+        && candidate.type === element.type
+        && candidate.name === element.name
+        && isEligible(candidate)
+        && !isIgnoredByAdapter(candidate, adapter)
+      ));
+      if (!group.length || group.some((candidate) => candidate.checked)) continue;
+      const descriptor = describeField(group[0], adapter);
+      descriptor.controlType = element.type as "radio" | "checkbox";
+      descriptor.multiple = element.type === "checkbox";
+      descriptor.options = group.map((candidate) => ({
+        label: optionLabel(candidate),
+        value: candidate.value,
+        disabled: candidate.disabled,
+      }));
+      addMatch(group, group[0], descriptor);
+      continue;
+    }
+    addMatch(element, element, describeField(element, adapter));
   }
-  return deduplicate(matches);
+  return { matches: deduplicate(matches), manualRequired };
+}
+
+function manualReason(reason: string): string {
+  const messages: Record<string, string> = {
+    unknown_semantics: "字段语义未知",
+    low_confidence: "识别置信度不足",
+    ambiguous_semantics: "多个字段语义冲突",
+    missing_profile_value: "个人档案缺少对应值",
+    unsupported_control: "控件类型暂不支持",
+    choice_not_found: "没有精确匹配的选项",
+    ambiguous_choice: "存在重复或歧义选项",
+    partial_multi_choice: "多选项只能部分匹配",
+    invalid_date: "日期格式无效",
+  };
+  return messages[reason] ?? "需要人工确认";
 }
 
 function isEligible(element: FillableElement): boolean {
@@ -279,8 +352,9 @@ function isEligible(element: FillableElement): boolean {
   const style = getComputedStyle(element);
   if (rect.width < 4 || rect.height < 4 || style.display === "none" || style.visibility === "hidden") return false;
   if (element instanceof HTMLInputElement) {
-    if (["hidden", "password", "file", "checkbox", "radio", "submit", "button", "reset", "image"].includes(element.type)) return false;
-    if (element.disabled || element.readOnly || element.value.trim()) return false;
+    if (["hidden", "password", "file", "submit", "button", "reset", "image"].includes(element.type)) return false;
+    if (element.disabled || element.readOnly) return false;
+    if (!["checkbox", "radio"].includes(element.type) && element.value.trim()) return false;
   } else if (element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement) {
     if (element.disabled || ("readOnly" in element && element.readOnly)) return false;
     if (element instanceof HTMLTextAreaElement && element.value.trim()) return false;
@@ -293,7 +367,7 @@ function cleanText(value: string | null | undefined): string {
   return (value ?? "").replace(/\s+/g, " ").replace(/[*：:]+$/g, "").trim();
 }
 
-function describeElement(element: FillableElement, adapter: SiteAdapter): string {
+function describeField(element: FillableElement, adapter: SiteAdapter): FieldDescriptor {
   const parts = new Set<string>();
   if (element.id) {
     const label = document.querySelector<HTMLLabelElement>(`label[for="${CSS.escape(element.id)}"]`);
@@ -301,9 +375,6 @@ function describeElement(element: FillableElement, adapter: SiteAdapter): string
   }
   const wrappingLabel = element.closest("label");
   if (wrappingLabel) parts.add(cleanText(wrappingLabel.textContent));
-  for (const attribute of ["aria-label", "placeholder", "name", "id", "title", "data-placeholder"]) {
-    parts.add(cleanText(element.getAttribute(attribute)));
-  }
   const container = element.closest("[class*='form-item'], [class*='field'], [class*='question'], .ant-form-item, .el-form-item");
   if (container) {
     const explicit = container.querySelector<HTMLElement>("label, [class*='label'], [class*='title']");
@@ -312,35 +383,66 @@ function describeElement(element: FillableElement, adapter: SiteAdapter): string
   const previous = element.previousElementSibling as HTMLElement | null;
   if (previous) parts.add(cleanText(previous.innerText).slice(0, 100));
   for (const candidate of adapterLabelCandidates(element, adapter)) parts.add(cleanText(candidate).slice(0, 120));
-  return Array.from(parts).filter(Boolean).join(" | ");
+  return {
+    label: Array.from(parts).filter(Boolean).join(" | "),
+    ariaLabel: cleanText(element.getAttribute("aria-label")),
+    placeholder: cleanText(element.getAttribute("placeholder") ?? element.getAttribute("data-placeholder")),
+    name: cleanText(element.getAttribute("name") ?? element.id),
+    autocomplete: element instanceof HTMLInputElement ? element.autocomplete : "",
+    controlType: elementControl(element),
+    required: element.hasAttribute("required") || element.getAttribute("aria-required") === "true",
+    disabled: "disabled" in element && Boolean(element.disabled),
+    readOnly: "readOnly" in element && Boolean(element.readOnly),
+    hasValue: element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement
+      ? Boolean(element.value.trim())
+      : element instanceof HTMLSelectElement
+        ? Boolean(element.value && element.selectedIndex > 0)
+        : Boolean(element.textContent?.trim()),
+    multiple: element instanceof HTMLSelectElement && element.multiple,
+    options: element instanceof HTMLSelectElement
+      ? Array.from(element.options).map((option) => ({ label: cleanText(option.text), value: option.value, disabled: option.disabled }))
+      : [],
+  };
 }
 
-function matchField(label: string, element: FillableElement, profile: ProfileData, adapter: SiteAdapter, mappings: Record<string, ProfileFieldKey>): { key: ProfileFieldKey; value: string; confidence: number } | null {
-  const lowered = label.toLowerCase();
-  if (/(验证码|密码|确认密码|邀请码|搜索|captcha|verification code|password|search)/i.test(lowered)) return null;
-  const mappedKey = mappings[normalizeLabel(label)];
-  if (mappedKey && profile[mappedKey]) return { key: mappedKey, value: profile[mappedKey], confidence: 0.96 };
+function optionLabel(element: HTMLInputElement): string {
+  if (element.id) {
+    const label = document.querySelector<HTMLLabelElement>(`label[for="${CSS.escape(element.id)}"]`);
+    if (label) return cleanText(label.innerText || label.textContent);
+  }
+  const wrapping = element.closest("label");
+  return cleanText(wrapping?.innerText || wrapping?.textContent || element.value);
+}
+
+function elementControl(element: FillableElement): FieldControl {
+  if (element instanceof HTMLTextAreaElement) return "textarea";
+  if (element instanceof HTMLSelectElement) return "select";
   if (element instanceof HTMLInputElement) {
-    if (element.type === "email" && profile.email) return { key: "email", value: profile.email, confidence: 0.98 };
-    if (element.type === "tel" && profile.phone) return { key: "phone", value: profile.phone, confidence: 0.98 };
-    if (element.autocomplete === "name" && profile.fullName) return { key: "fullName", value: profile.fullName, confidence: 0.95 };
-    if (element.autocomplete === "email" && profile.email) return { key: "email", value: profile.email, confidence: 0.95 };
-    if (element.autocomplete === "tel" && profile.phone) return { key: "phone", value: profile.phone, confidence: 0.95 };
+    const supported = new Set<FieldControl>(["text", "email", "tel", "url", "date", "month", "number", "radio", "checkbox", "hidden"]);
+    return supported.has(element.type as FieldControl) ? element.type as FieldControl : "text";
   }
-  for (const rule of RULES) {
-    const matchedPattern = rule.patterns.find((pattern) => pattern.test(label));
-    if (!matchedPattern || !profile[rule.key]) continue;
-    const exactish = label.length < 36 || matchedPattern.source.startsWith("^");
-    const confidence = exactish ? 0.9 : 0.72;
-    return { key: rule.key, value: profile[rule.key], confidence: Math.min(0.98, confidence + adapter.confidenceBoost(label, rule.key)) };
-  }
-  return null;
+  return element.isContentEditable ? "contenteditable" : "unknown";
 }
 
 const MAPPINGS_STORAGE_KEY = "guguSiteMappings";
 
 function normalizeLabel(label: string): string {
   return label.toLowerCase().replace(/\s+/g, " ").trim().slice(0, 180);
+}
+
+function descriptorMappingKey(descriptor: FieldDescriptor): string {
+  // A label by itself is not stable enough: repeated education/work groups
+  // often reuse labels such as "开始时间".  Bind a learned correction to the
+  // control shape and its independent semantic evidence so it cannot leak to
+  // another field on the same host merely because the visible text matches.
+  return [
+    descriptor.controlType,
+    descriptor.multiple ? "multiple" : "single",
+    descriptor.label,
+    descriptor.ariaLabel,
+    descriptor.placeholder,
+    descriptor.name,
+  ].map((part) => normalizeLabel(String(part ?? ""))).join("|").slice(0, 720);
 }
 
 async function loadSiteMappings(): Promise<Record<string, ProfileFieldKey>> {
@@ -384,30 +486,64 @@ function deduplicate(matches: FieldMatch[]): FieldMatch[] {
 function elementKind(element: FillableElement): FieldMatch["kind"] {
   if (element instanceof HTMLTextAreaElement) return "textarea";
   if (element instanceof HTMLSelectElement) return "select";
+  if (element instanceof HTMLInputElement && element.type === "radio") return "radio";
+  if (element instanceof HTMLInputElement && element.type === "checkbox") return "checkbox";
   if (element instanceof HTMLInputElement) return "input";
   return "contenteditable";
 }
 
-function fillElement(element: FillableElement, value: string): boolean {
+function snapshotTarget(target: FillTarget): ElementSnapshot[] {
+  const items = Array.isArray(target) ? target : [target];
+  return items.map((element) => ({
+    element,
+    value: element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement
+      ? element.value
+      : element.textContent ?? "",
+    checked: element instanceof HTMLInputElement && ["radio", "checkbox"].includes(element.type) ? element.checked : undefined,
+  }));
+}
+
+function fillTarget(target: FillTarget, value: string | string[]): boolean {
   try {
+    const elements = Array.isArray(target) ? target : [target];
+    const element = elements[0];
     element.scrollIntoView({ block: "center", behavior: "smooth" });
+    if (Array.isArray(target)) {
+      const requested = new Set(Array.isArray(value) ? value : [value]);
+      if (!requested.size || [...requested].some((item) => !target.some((input) => input.value === item))) return false;
+      if (target[0]?.type === "radio" && requested.size !== 1) return false;
+      for (const input of target) {
+        const checked = requested.has(input.value);
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "checked")?.set?.call(input, checked);
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+      return true;
+    }
     if (element instanceof HTMLSelectElement) {
-      const normalized = value.toLowerCase();
-      const option = Array.from(element.options).find((item) => item.value.toLowerCase() === normalized || item.text.toLowerCase() === normalized)
-        ?? Array.from(element.options).find((item) => item.text.toLowerCase().includes(normalized) || normalized.includes(item.text.toLowerCase()));
-      if (!option) return false;
-      element.value = option.value;
+      const requested = Array.isArray(value) ? value : [value];
+      if (!requested.length || requested.some((item) => !Array.from(element.options).some((option) => !option.disabled && option.value === item))) return false;
+      if (element.multiple) {
+        for (const option of element.options) option.selected = requested.includes(option.value);
+      } else {
+        if (requested.length !== 1) return false;
+        element.value = requested[0];
+      }
     } else if (element instanceof HTMLInputElement) {
+      if (Array.isArray(value)) return false;
       const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
       setter?.call(element, value);
     } else if (element instanceof HTMLTextAreaElement) {
+      if (Array.isArray(value)) return false;
       const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
       setter?.call(element, value);
     } else {
+      if (Array.isArray(value)) return false;
       element.textContent = value;
     }
+    const eventValue = Array.isArray(value) ? value.join(",") : value;
     element.focus();
-    element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
+    element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: eventValue }));
     element.dispatchEvent(new Event("change", { bubbles: true }));
     element.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
     return true;
@@ -416,13 +552,11 @@ function fillElement(element: FillableElement, value: string): boolean {
   }
 }
 
-function readElementValue(element: FillableElement): string {
-  if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement) return element.value;
-  return element.textContent ?? "";
-}
-
-function restoreElement(element: FillableElement, value: string): boolean {
-  if (element instanceof HTMLSelectElement) element.value = value;
+function restoreElement(snapshot: ElementSnapshot): boolean {
+  const { element, value, checked } = snapshot;
+  if (element instanceof HTMLInputElement && checked !== undefined) {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "checked")?.set?.call(element, checked);
+  } else if (element instanceof HTMLSelectElement) element.value = value;
   else if (element instanceof HTMLInputElement) {
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(element, value);
   } else if (element instanceof HTMLTextAreaElement) {

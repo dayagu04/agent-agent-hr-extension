@@ -25,6 +25,9 @@
 .gugu-field-label { display: block; color: #252f43; font-size: 13px; font-weight: 750; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .gugu-key-select { max-width: 160px; margin-top: 6px; border: 1px solid #d7deea; border-radius: 7px; padding: 4px 6px; color: #46546c; background: #fff; font-size: 11px; }
 .gugu-field-value { display: block; margin-top: 5px; color: #6e7a90; font-size: 12px; line-height: 1.45; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gugu-manual { margin: 10px 0 2px; padding: 12px; border: 1px solid #f2c777; border-radius: 10px; background: #fff9ed; color: #734d09; font-size: 12px; line-height: 1.45; }
+.gugu-manual strong { display: block; margin-bottom: 6px; }
+.gugu-manual p { margin: 3px 0; }
 .gugu-original { display: block; max-height: 36px; margin-top: 6px; color: #8a95a8; font-size: 11px; line-height: 1.4; overflow: hidden; }
 .gugu-suggestion { display: block; width: 100%; min-height: 58px; margin-top: 6px; border: 1px solid #bbc9f5; border-radius: 7px; padding: 7px; color: #26386b; background: #f7f9ff; font-size: 12px; line-height: 1.45; resize: vertical; }
 .gugu-warning { display: block; margin-top: 5px; color: #a66214; font-size: 11px; line-height: 1.4; }

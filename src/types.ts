@@ -6,6 +6,7 @@ export type ProfileFieldKey =
   | "gender"
   | "birthDate"
   | "location"
+  | "address"
   | "preferredLocation"
   | "website"
   | "github"
@@ -88,8 +89,9 @@ export interface FieldMatch {
   key: ProfileFieldKey;
   label: string;
   value: string;
+  resolvedValue: string | string[];
   confidence: number;
-  kind: "input" | "textarea" | "select" | "contenteditable";
+  kind: "input" | "textarea" | "select" | "radio" | "checkbox" | "contenteditable";
   suggestedValue?: string;
   factWarnings?: string[];
 }
@@ -102,7 +104,7 @@ export interface PolishRequest {
 
 export const PROFILE_FIELD_KEYS: ProfileFieldKey[] = [
   "fullName", "preferredName", "phone", "email", "gender", "birthDate", "location",
-  "preferredLocation", "website", "github", "school", "major", "degree", "gpa",
+  "address", "preferredLocation", "website", "github", "school", "major", "degree", "gpa",
   "educationStart", "educationEnd", "summary", "skills", "experience", "projects", "awards",
 ];
 
