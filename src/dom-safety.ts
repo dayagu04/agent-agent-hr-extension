@@ -141,6 +141,15 @@ export function selectHasCurrentValue(element: HTMLSelectElement): boolean {
   return element.multiple && Array.from(element.options).some((option) => option.selected && option.value !== "");
 }
 
+function isOptionEffectivelyDisabled(option: HTMLOptionElement): boolean {
+  let selectorDisabled = false;
+  try { selectorDisabled = option.matches(":disabled"); } catch { selectorDisabled = false; }
+  const parent = option.parentElement as HTMLOptGroupElement | null;
+  return option.disabled
+    || selectorDisabled
+    || Boolean(parent?.tagName === "OPTGROUP" && parent.disabled);
+}
+
 function cleanText(value: string | null | undefined): string {
   return (value ?? "").replace(/\s+/g, " ").replace(/[*：:]+$/g, "").trim();
 }
@@ -388,14 +397,22 @@ export function describeField(element: FillableElement, adapter: SiteAdapter): F
     required: element.hasAttribute("required") || element.getAttribute("aria-required") === "true" || Boolean(element.closest("[class*='required' i], .ant-form-item-required, .semi-form-field-label-required")),
     disabled: isEffectivelyDisabled(element),
     readOnly: isEffectivelyReadOnly(element),
-    hasValue: isInputElement(element) || isTextareaElement(element)
-      ? Boolean(element.value.trim())
+    hasValue: isInputElement(element)
+      ? ["radio", "checkbox"].includes(element.type)
+        ? element.checked
+        : Boolean(element.value.trim())
+      : isTextareaElement(element)
+        ? Boolean(element.value.trim())
       : isSelectElement(element)
         ? selectHasCurrentValue(element)
         : false,
     multiple: isSelectElement(element) && element.multiple,
     options: isSelectElement(element)
-      ? Array.from(element.options).map((option) => ({ label: cleanText(option.text), value: option.value, disabled: option.disabled }))
+      ? Array.from(element.options).map((option) => ({
+          label: cleanText(option.text),
+          value: option.value,
+          disabled: isOptionEffectivelyDisabled(option),
+        }))
       : [],
   };
 }
@@ -705,21 +722,23 @@ export function fillTarget(target: FillTarget, value: string | string[]): boolea
   try {
     const elements = Array.isArray(target) ? target : [target];
     const element = elements[0];
-    element.scrollIntoView({ block: "center", behavior: "smooth" });
     if (Array.isArray(target)) {
-      const requested = new Set(Array.isArray(value) ? value : [value]);
-      if (!requested.size || [...requested].some((item) => !target.some((input) => input.value === item))) return false;
-      if (target[0]?.type === "radio" && requested.size !== 1) return false;
-      if (target[0]?.type === "radio") {
-        const selected = target.find((input) => requested.has(input.value));
-        if (!selected) return false;
-        setNativeProperty(selected, "checked", true);
-        selected.dispatchEvent(basicEventFor(selected, "input"));
-        selected.dispatchEvent(basicEventFor(selected, "change"));
-        return true;
+      const requested = Array.isArray(value) ? value : [value];
+      const choiceType = target[0]?.type;
+      if (!requested.length || new Set(requested).size !== requested.length) return false;
+      if (!choiceType || !["radio", "checkbox"].includes(choiceType) || target.some((input) => input.type !== choiceType)) return false;
+      if (choiceType === "radio" && requested.length !== 1) return false;
+      if (target.some((input) => input.checked)) return false;
+      const writable = target.filter((input) => !isEffectivelyDisabled(input) && !isEffectivelyReadOnly(input));
+      const planned: HTMLInputElement[] = [];
+      for (const item of requested) {
+        const matches = writable.filter((input) => input.value === item);
+        if (matches.length !== 1) return false;
+        planned.push(matches[0]);
       }
-      for (const input of target) {
-        if (!requested.has(input.value)) continue;
+      if (new Set(planned).size !== planned.length) return false;
+      planned[0].scrollIntoView({ block: "center", behavior: "smooth" });
+      for (const input of planned) {
         setNativeProperty(input, "checked", true);
         input.dispatchEvent(basicEventFor(input, "input"));
         input.dispatchEvent(basicEventFor(input, "change"));
@@ -728,21 +747,30 @@ export function fillTarget(target: FillTarget, value: string | string[]): boolea
     }
     if (isSelectElement(element)) {
       const requested = Array.isArray(value) ? value : [value];
-      if (!requested.length || requested.some((item) => !Array.from(element.options).some((option) => !option.disabled && option.value === item))) return false;
-      if (element.multiple) {
-        for (const option of element.options) option.selected = requested.includes(option.value);
-      } else {
-        if (requested.length !== 1) return false;
-        element.value = requested[0];
+      if (!requested.length || new Set(requested).size !== requested.length) return false;
+      if (!element.multiple && requested.length !== 1) return false;
+      const writable = Array.from(element.options).filter((option) => !isOptionEffectivelyDisabled(option));
+      const planned: HTMLOptionElement[] = [];
+      for (const item of requested) {
+        const matches = writable.filter((option) => option.value === item);
+        if (matches.length !== 1) return false;
+        planned.push(matches[0]);
       }
+      if (new Set(planned).size !== planned.length || selectHasCurrentValue(element)) return false;
+      element.scrollIntoView({ block: "center", behavior: "smooth" });
+      const selected = new Set(planned);
+      for (const option of writable) option.selected = selected.has(option);
     } else if (isInputElement(element)) {
       if (Array.isArray(value)) return false;
+      element.scrollIntoView({ block: "center", behavior: "smooth" });
       setNativeProperty(element, "value", value);
     } else if (isTextareaElement(element)) {
       if (Array.isArray(value)) return false;
+      element.scrollIntoView({ block: "center", behavior: "smooth" });
       setNativeProperty(element, "value", value);
     } else {
       if (Array.isArray(value)) return false;
+      element.scrollIntoView({ block: "center", behavior: "smooth" });
       element.textContent = value;
     }
     const eventValue = Array.isArray(value) ? value.join(",") : value;

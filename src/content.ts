@@ -724,32 +724,18 @@ function scanPage(
         const descriptor = describeSemanticField(candidate, adapter);
         return descriptor ? [{ element: candidate, descriptor }] : [];
       });
-      const semanticSeed = safeChoiceInventory.find(({ element: candidate }) => candidate === element)?.element
-        ?? safeChoiceInventory[0]?.element;
-      const elementRepeatRoot = semanticSeed ? findRepeatedRoot(semanticSeed, adapter)?.root ?? null : null;
-      const semanticScope = safeChoiceInventory.filter(({ element: candidate }) => (
-        elementRepeatRoot
-          ? findRepeatedRoot(candidate, adapter)?.root === elementRepeatRoot
-          : !findRepeatedRoot(candidate, adapter)
-      ));
-      const semanticEntry = semanticScope[0];
-      const semanticAnchor = semanticEntry?.element;
-      const choiceSemanticIdentity = semanticAnchor
-        ? addSemanticSentinel(semanticAnchor, undefined, semanticEntry.descriptor)
-        : undefined;
-      const safeNamedChoices = safeChoiceInventory.map(({ element: candidate }) => candidate);
-      const fillableChoices = safeNamedChoices.filter((candidate) => isEligible(candidate, adapter));
-      if (!fillableChoices.length) {
-        for (const candidate of sameNamedChoices) processedChoices.add(candidate);
+      const semanticEntry = safeChoiceInventory.find(({ element: candidate }) => candidate === element);
+      if (!semanticEntry) {
+        processedChoices.add(element);
         continue;
       }
-      const anchor = fillableChoices[0];
+      const choiceSemanticIdentity = addSemanticSentinel(element, undefined, semanticEntry.descriptor);
+      const safeNamedChoices = safeChoiceInventory.map(({ element: candidate }) => candidate);
       if (safeNamedChoices.length !== sameNamedChoices.length) {
         for (const candidate of sameNamedChoices) processedChoices.add(candidate);
-        const descriptor = describeSemanticField(anchor, adapter);
         const item: ManualField = {
           identity: choiceSemanticIdentity ?? `document-${documentIndexes.get(element.ownerDocument) ?? 0}:ignored-choice`,
-          label: (descriptor?.label ?? "").slice(0, 100),
+          label: (semanticEntry.descriptor.label ?? "").slice(0, 100),
           reason: "ambiguous_choice_group_scope",
           required: sameNamedChoices.some((candidate) => candidate.hasAttribute("required") || candidate.getAttribute("aria-required") === "true"),
         };
@@ -758,13 +744,13 @@ function scanPage(
         continue;
       }
       const scoped = scopeNamedChoiceGroup(
-        anchor,
+        element,
         safeNamedChoices,
         (candidate) => findRepeatedRoot(candidate, adapter)?.root ?? null,
       );
       for (const candidate of scoped.elements) processedChoices.add(candidate);
       if (scoped.ambiguous) {
-        const ambiguousDescriptor = describeField(anchor, adapter);
+        const ambiguousDescriptor = describeField(element, adapter);
         const identityParts = scoped.elements.map((candidate) => {
           const id = elementIds.get(candidate) ?? `field-${nextElementId++}`;
           elementIds.set(candidate, id);
@@ -780,6 +766,9 @@ function scanPage(
         else manualAttention.push(item);
         continue;
       }
+      // Scope by repeat/container identity before considering eligibility. A
+      // disabled row must never borrow a writable option from its sibling and
+      // then reuse the disabled row's semantic identity.
       const group = scoped.elements.filter((candidate) => !isIgnoredByAdapter(candidate, adapter) && isEligible(candidate, adapter));
       if (!group.length) continue;
       const descriptor = describeField(group[0], adapter);

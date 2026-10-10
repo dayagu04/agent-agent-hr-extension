@@ -107,7 +107,6 @@ class FakeElement {
   autocomplete = "";
   disabled = false;
   readOnly = false;
-  checked = false;
   multiple = false;
   selectedIndex = 0;
   options: Array<{ text: string; value: string; disabled: boolean; selected: boolean }> = [];
@@ -128,12 +127,14 @@ class FakeElement {
   childNodes: Array<FakeElement | FakeTextNode> = [];
   proxy: FakeElement | null = null;
   valueReadCount = 0;
+  checkedWriteCount = 0;
   textContentReadCount = 0;
   innerTextReadCount = 0;
   throwOnValueRead = false;
   throwOnTextContentRead = false;
   throwOnInnerTextRead = false;
   private currentValue = "";
+  private currentChecked = false;
   private currentTextContent = "";
   private currentInnerText = "";
 
@@ -150,6 +151,15 @@ class FakeElement {
 
   set value(value: string) {
     this.currentValue = value;
+  }
+
+  get checked(): boolean {
+    return this.currentChecked;
+  }
+
+  set checked(value: boolean) {
+    this.checkedWriteCount += 1;
+    this.currentChecked = value;
   }
 
   get textContent(): string {
@@ -480,6 +490,176 @@ test("same-name checkboxes are scoped to one repeat row and filling a bound row 
   assert.equal(rowTwoYes.checked, false);
   assert.equal(rowTwoNo.checked, false);
   assert.notEqual(first.groupKey, second.groupKey);
+});
+
+test("choice eligibility is evaluated only after the current repeat scope is fixed", () => {
+  const document = new FakeDocument("https://app.mokahr.com/apply");
+  const adapter = getSiteAdapter(document.location.href);
+  const disabledRow = new FakeElement("div", document);
+  const writableRow = new FakeElement("div", document);
+  const makeChoice = (row: FakeElement, disabled: boolean, value: string) => {
+    const input = new FakeElement("input", document);
+    input.type = "checkbox";
+    input.name = "same-choice-name";
+    input.value = value;
+    input.disabled = disabled;
+    input.parentElement = row;
+    return input;
+  };
+  const disabledChoices = [
+    makeChoice(disabledRow, true, "disabled-a"),
+    makeChoice(disabledRow, true, "disabled-b"),
+  ];
+  const writableChoices = [
+    makeChoice(writableRow, false, "writable-a"),
+    makeChoice(writableRow, false, "writable-b"),
+  ];
+  const all = [...disabledChoices, ...writableChoices].map(asInput);
+  const repeatRootFor = (candidate: HTMLInputElement) => candidate.parentElement;
+
+  const firstScope = scopeNamedChoiceGroup(asInput(disabledChoices[0]), all, repeatRootFor);
+  assert.deepEqual(firstScope.elements, disabledChoices);
+  assert.deepEqual(firstScope.elements.filter((candidate) => isEligible(candidate, adapter)), []);
+
+  const secondScope = scopeNamedChoiceGroup(asInput(writableChoices[0]), all, repeatRootFor);
+  assert.deepEqual(secondScope.elements, writableChoices);
+  assert.deepEqual(secondScope.elements.filter((candidate) => isEligible(candidate, adapter)), writableChoices);
+});
+
+test("choice option values do not look filled while checked groups stay fail closed", () => {
+  const document = new FakeDocument("https://app.mokahr.com/apply");
+  const adapter = getSiteAdapter(document.location.href);
+  const cases = [
+    {
+      type: "radio" as const,
+      name: "gender",
+      label: "性别",
+      values: ["m", "f"],
+      options: [{ label: "男", value: "m" }, { label: "女", value: "f" }],
+      profile: { ...EMPTY_PROFILE, gender: "女" },
+      expectedValue: "f",
+    },
+    {
+      type: "checkbox" as const,
+      name: "skills",
+      label: "技能",
+      values: ["py", "fa"],
+      options: [{ label: "Python", value: "py" }, { label: "FastAPI", value: "fa" }],
+      profile: { ...EMPTY_PROFILE, skills: "Python、FastAPI" },
+      expectedValue: ["py", "fa"],
+    },
+  ];
+
+  for (const choiceCase of cases) {
+    const container = new FakeElement("fieldset", document);
+    const choices = choiceCase.values.map((value) => {
+      const input = new FakeElement("input", document);
+      input.type = choiceCase.type;
+      input.name = choiceCase.name;
+      input.value = value;
+      input.setAttribute("aria-label", choiceCase.label);
+      input.throwOnValueRead = true;
+      input.parentElement = container;
+      return input;
+    });
+    const inputs = choices.map(asInput);
+    const unselectedScope = scopeNamedChoiceGroup(inputs[0], inputs, () => null, () => asElement(container));
+    assert.equal(unselectedScope.ambiguous, false, choiceCase.type);
+    assert.equal(isEligible(asElement(choices[0]), adapter), true, choiceCase.type);
+
+    const descriptor = describeField(asElement(choices[0]), adapter);
+    assert.equal(descriptor.hasValue, false, `${choiceCase.type} fixed option value is not user state`);
+    assert.equal(choices[0].valueReadCount, 0, `${choiceCase.type} descriptor stays value blind`);
+    descriptor.options = choiceCase.options;
+    descriptor.controlType = choiceCase.type;
+    descriptor.multiple = choiceCase.type === "checkbox";
+    const decision = matchDescriptor(descriptor, choiceCase.profile);
+    assert.equal(decision.action, "fill", choiceCase.type);
+    assert.deepEqual(decision.value, choiceCase.expectedValue, choiceCase.type);
+    assert.equal(choices[0].valueReadCount, 0, `${choiceCase.type} matching uses sanitized options`);
+
+    if (decision.value === null) throw new Error(`missing ${choiceCase.type} decision value`);
+    for (const choice of choices) choice.throwOnValueRead = false;
+    assert.equal(fillTarget(inputs, decision.value), true, `${choiceCase.type} unique group fills`);
+    assert.deepEqual(
+      choices.map((choice) => choice.checked),
+      choiceCase.type === "radio" ? [false, true] : [true, true],
+      choiceCase.type,
+    );
+    const valueReadsAfterWrite = choices.map((choice) => choice.valueReadCount);
+    const checkedScope = scopeNamedChoiceGroup(inputs[0], inputs, () => null, () => asElement(container));
+    assert.deepEqual(checkedScope, {
+      elements: inputs,
+      ambiguous: true,
+      reason: "choice_group_has_existing_selection",
+    }, choiceCase.type);
+    const checkedDescriptor = describeField(asElement(choices[1]), adapter);
+    assert.equal(checkedDescriptor.hasValue, true, `${choiceCase.type} checked state is user state`);
+    assert.deepEqual(
+      choices.map((choice) => choice.valueReadCount),
+      valueReadsAfterWrite,
+      `${choiceCase.type} checked detection stays value blind`,
+    );
+  }
+});
+
+test("duplicate native choice values fail before any checked or selected write", () => {
+  const document = new FakeDocument("https://app.mokahr.com/apply");
+  for (const type of ["radio", "checkbox"] as const) {
+    const makeChoice = (label: string) => {
+      const input = new FakeElement("input", document);
+      input.type = type;
+      input.name = `${type}-skills`;
+      input.value = "on";
+      input.setAttribute("aria-label", label);
+      return input;
+    };
+    const python = makeChoice("Python");
+    const java = makeChoice("Java");
+    const requested = type === "radio" ? "on" : ["on"];
+
+    assert.equal(fillTarget([asInput(python), asInput(java)], requested), false, type);
+    assert.equal(python.checked, false, `${type} Python remains clear`);
+    assert.equal(java.checked, false, `${type} Java remains clear`);
+    assert.equal(python.checkedWriteCount, 0, `${type} Python zero writes`);
+    assert.equal(java.checkedWriteCount, 0, `${type} Java zero writes`);
+    assert.deepEqual(python.events, [], `${type} Python zero events`);
+    assert.deepEqual(java.events, [], `${type} Java zero events`);
+  }
+
+  for (const multiple of [false, true]) {
+    let pythonSelected = false;
+    let javaSelected = false;
+    let pythonWrites = 0;
+    let javaWrites = 0;
+    const select = new FakeElement("select", document);
+    select.multiple = multiple;
+    select.value = "";
+    select.options = [
+      {
+        text: "Python",
+        value: "on",
+        disabled: false,
+        get selected() { return pythonSelected; },
+        set selected(value: boolean) { pythonWrites += 1; pythonSelected = value; },
+      },
+      {
+        text: "Java",
+        value: "on",
+        disabled: false,
+        get selected() { return javaSelected; },
+        set selected(value: boolean) { javaWrites += 1; javaSelected = value; },
+      },
+    ];
+    const requested = multiple ? ["on"] : "on";
+
+    assert.equal(fillTarget(asElement(select), requested), false, multiple ? "multi-select" : "single-select");
+    assert.equal(pythonSelected, false);
+    assert.equal(javaSelected, false);
+    assert.equal(pythonWrites, 0, "Python option zero writes");
+    assert.equal(javaWrites, 0, "Java option zero writes");
+    assert.deepEqual(select.events, [], "select zero events");
+  }
 });
 
 test("same-form radios spanning repeat roots are rejected before any fill", () => {

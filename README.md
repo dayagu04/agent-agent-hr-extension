@@ -75,7 +75,7 @@ AI 的职责是调整结构、措辞和岗位侧重点，而不是制造事实�
 
 原生 select 只有当前值为空时才视为 placeholder；即使 `selectedIndex === 0`，非空真实选项也属于已有值，不会被覆盖。`:disabled`（包括禁用 fieldset 的有效状态）、自身或祖先的 `aria-disabled`，以及 `aria-readonly` 都会使控件退出自动填写。
 
-`tests/fixtures/field-matcher.json` 使用 56 条脱敏案例覆盖中英文基础字段、城市/地址、教育字段、重复经历显式绑定、单选/多选、动态下拉、附件、日期精度、URL、高风险字段和各种跳过状态；`tests/fixtures/ats-page-validation.json` 只保存 3 条不含 DOM 和页面正文的平台入口证据及安全降级回放，它不是 DOM fixture。DOM 安全测试使用自建 Fake DOM，直接覆盖同源/嵌套 iframe 监听、跨域 iframe 人工降级、隐藏附件的有界代理判断、跨重复根 radio 拒绝、checkbox 行隔离、重复语义漏识别降级、select/有效禁用状态、扫描 epoch 失效、填写前目标复核和人工项身份去重。它们是协议回归，不是任何真实 ATS 的准确率结论。
+`tests/fixtures/field-matcher.json` 使用 60 条脱敏案例覆盖中英文基础字段、城市/地址、教育字段、重复经历显式绑定、单选/多选、重复选项值拒绝、动态下拉、附件、日期精度、URL、高风险字段和各种跳过状态；`tests/fixtures/ats-page-validation.json` 只保存 3 条不含 DOM 和页面正文的平台入口证据及安全降级回放，它不是 DOM fixture。DOM 安全测试使用自建 Fake DOM，直接覆盖同源/嵌套 iframe 监听、跨域 iframe 人工降级、隐藏附件的有界代理判断、跨重复根 radio 拒绝、checkbox 行隔离、重复语义漏识别降级、radio/checkbox/select 重复值零写入、select/有效禁用状态、扫描 epoch 失效、填写前目标复核和人工项身份去重。它们是协议回归，不是任何真实 ATS 的准确率结论。
 
 2026-10-10 对 Moka、北森和字节公开职位入口做了无账号、无提交的只读验证：三者的职位列表和详情均可访问，但点击申请后都进入登录墙，因此按安全边界停止。未看到登录后的真实申请表，也未验证真实重复经历组、动态下拉、附件或 iframe 的字段级准确率；本轮新增的这些能力只具有脱敏契约和构建证据，不能据此宣称三个平台已经真实可用。
 

@@ -192,14 +192,18 @@ function choiceTokens(value: unknown): Set<string> {
 
 function matchChoice(value: string, options: FieldOption[]): { value: string | null; reason: string } {
   const sourceTokens = choiceTokens(value);
-  const matches = options.filter((option) => {
-    if (option.disabled) return false;
+  const writableOptions = options.filter((option) => !option.disabled);
+  const matches = writableOptions.filter((option) => {
     const optionTokens = choiceTokens(option.label || option.value);
     return [...sourceTokens].some((token) => optionTokens.has(token));
   });
-  const values = [...new Set(matches.map((option) => option.value))];
-  if (values.length === 1) return { value: values[0], reason: "choice_matched" };
-  if (values.length > 1) return { value: null, reason: "ambiguous_choice" };
+  if (matches.length > 1) return { value: null, reason: "ambiguous_choice" };
+  if (matches.length === 1) {
+    const [match] = matches;
+    const valueOwners = writableOptions.filter((option) => option.value === match.value);
+    if (valueOwners.length !== 1) return { value: null, reason: "ambiguous_choice" };
+    return { value: match.value, reason: "choice_matched" };
+  }
   return { value: null, reason: "choice_not_found" };
 }
 
@@ -243,7 +247,10 @@ function prepareValue(spec: FieldSpec, value: string, descriptor: FieldDescripto
       const selected: string[] = [];
       for (const item of splitMulti(value)) {
         const match = matchChoice(item, options);
-        if (!match.value) return { value: null, reason: "partial_multi_choice" };
+        if (!match.value) {
+          return { value: null, reason: match.reason === "ambiguous_choice" ? "ambiguous_choice" : "partial_multi_choice" };
+        }
+        if (selected.includes(match.value)) return { value: null, reason: "ambiguous_choice" };
         selected.push(match.value);
       }
       return selected.length ? { value: selected, reason: "choices_matched" } : { value: null, reason: "choice_not_found" };
@@ -254,7 +261,10 @@ function prepareValue(spec: FieldSpec, value: string, descriptor: FieldDescripto
     const selected: string[] = [];
     for (const item of splitMulti(value)) {
       const match = matchChoice(item, options);
-      if (!match.value) return { value: null, reason: "partial_multi_choice" };
+      if (!match.value) {
+        return { value: null, reason: match.reason === "ambiguous_choice" ? "ambiguous_choice" : "partial_multi_choice" };
+      }
+      if (selected.includes(match.value)) return { value: null, reason: "ambiguous_choice" };
       selected.push(match.value);
     }
     return selected.length ? { value: selected, reason: "choices_matched" } : { value: null, reason: "choice_not_found" };
