@@ -1,24 +1,37 @@
 import panelCss from "./content.css?inline";
-import { matchDescriptor, type FieldControl, type FieldDescriptor } from "./field-matcher";
-import { adapterLabelCandidates, getSiteAdapter, isIgnoredByAdapter, type SiteAdapter } from "./site-adapters";
-import type { FieldMatch, ProfileData, ProfileFieldKey, StoredState } from "./types";
+import {
+  collectCandidates,
+  collectScanDocuments,
+  describeField,
+  fillTarget,
+  isEligible,
+  isInputElement,
+  isSelectElement,
+  isTextareaElement,
+  optionLabel,
+  resolveRepeatGroupIdentity,
+  restoreElement,
+  snapshotTarget,
+  type ElementSnapshot,
+  type FillableElement,
+  type FillTarget,
+  type ManualField,
+} from "./dom-safety";
+import { matchDescriptor, type FieldDescriptor } from "./field-matcher";
+import { inferStructuredEntryField, inferStructuredEntryKind, structuredEntryOptions, type StructuredEntryOption } from "./repeat-context.ts";
+import { getSiteAdapter, isIgnoredByAdapter, type SiteAdapter } from "./site-adapters";
+import type { FieldMatch, ProfileData, ProfileFieldKey, RepeatedFieldContext, StoredState, StructuredEntryKind } from "./types";
 
 declare global {
   interface Window { __guguApplicationAssistantInstalled?: boolean; }
 }
 
-type FillableElement = HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | HTMLElement;
-type FillTarget = FillableElement | HTMLInputElement[];
-
-interface ElementSnapshot {
-  element: FillableElement;
-  value: string;
-  checked?: boolean;
-}
-
-interface ManualField {
-  label: string;
-  reason: string;
+interface RepeatGroupPrompt {
+  groupKey: string;
+  groupLabel: string;
+  kind: StructuredEntryKind;
+  selectedEntryId?: string;
+  options: StructuredEntryOption[];
 }
 
 const FIELD_LABELS: Record<ProfileFieldKey, string> = {
@@ -69,16 +82,21 @@ function installAssistant() {
   const elements = new Map<string, FillTarget>();
   const descriptors = new Map<string, FieldDescriptor>();
   const elementIds = new WeakMap<FillableElement, string>();
+  const repeatGroupIds = new WeakMap<Element, string>();
   const adapter = getSiteAdapter();
   let state: StoredState | null = null;
   let matches: FieldMatch[] = [];
   let manualRequired: ManualField[] = [];
+  let manualAttention: ManualField[] = [];
+  let repeatGroups: RepeatGroupPrompt[] = [];
+  const repeatBindings = new Map<string, string>();
   let savedMappings: Record<string, ProfileFieldKey> = {};
   let selectedIds = new Set<string>();
   let hasRenderedOnce = false;
   let lastFill: ElementSnapshot[] = [];
   let panelOpen = false;
   let refreshTimer: number | undefined;
+  let pageObservers: MutationObserver[] = [];
 
   function showNotice(message: string, error = false) {
     notice.textContent = message;
@@ -90,15 +108,19 @@ function installAssistant() {
   }
 
   function render() {
-    count.textContent = `可填写 ${matches.length} 个 · 必填需人工 ${manualRequired.length} 个 · ${adapter.name}`;
+    count.textContent = `可填写 ${matches.length} 个 · 必填需人工 ${manualRequired.length} 个 · 其他需确认 ${manualAttention.length} 个 · ${adapter.name}`;
     tier.textContent = state?.ai.enabled ? "二档 · AI 可选" : "一档 · 本地填写";
     fillButton.disabled = matches.length === 0;
     undoButton.classList.toggle("gugu-hidden", lastFill.length === 0);
-    const manualSummary = manualRequired.length
-      ? `<div class="gugu-manual"><strong>以下可见必填项不会自动填写</strong>${manualRequired.map((item) => `<p>${escapeHtml(item.label || "未命名字段")} · ${escapeHtml(manualReason(item.reason))}</p>`).join("")}</div>`
+    const repeatSummary = repeatGroups.length
+      ? `<div class="gugu-manual"><strong>重复经历必须先绑定档案记录</strong>${repeatGroups.map((group) => `<label>${escapeHtml(group.groupLabel)}<select data-action="bind-entry" data-group-key="${escapeHtml(group.groupKey)}"><option value="">请选择，不会默认使用第一条</option>${group.options.map((option) => `<option value="${escapeHtml(option.id)}" ${option.id === group.selectedEntryId ? "selected" : ""}>${escapeHtml(option.label)}</option>`).join("")}</select></label>`).join("")}</div>`
+      : "";
+    const manualItems = [...manualRequired, ...manualAttention];
+    const manualSummary = manualItems.length
+      ? `<div class="gugu-manual"><strong>以下控件不会自动处理</strong>${manualItems.map((item) => `<p>${escapeHtml(item.label || "未命名字段")} · ${item.required ? "必填 · " : ""}${escapeHtml(manualReason(item.reason))}</p>`).join("")}</div>`
       : "";
     if (!matches.length) {
-      list.innerHTML = `<p class="gugu-empty">暂未找到能够可靠匹配的空白字段。可滚动页面让动态表单加载后，再重新识别。</p>${manualSummary}`;
+      list.innerHTML = `<p class="gugu-empty">暂未找到能够可靠匹配的空白字段。可滚动页面让动态表单加载后，再重新识别。</p>${repeatSummary}${manualSummary}`;
       return;
     }
     list.innerHTML = matches.map((match) => {
@@ -108,13 +130,16 @@ function installAssistant() {
         ? `<small class="gugu-original">原文：${escapeHtml(match.value)}</small><textarea class="gugu-suggestion" data-action="edit-suggestion" aria-label="编辑 AI 建议">${escapeHtml(displayValue)}</textarea>${(match.factWarnings ?? []).map((warning) => `<small class="gugu-warning">⚠ ${escapeHtml(warning)}</small>`).join("")}`
         : `<span class="gugu-field-value" title="${escapeHtml(displayValue)}">${escapeHtml(displayValue) || "档案中暂无该字段"}</span>`;
       const checked = selectedIds.has(match.id);
+      const mappingControl = match.mappingLocked
+        ? `<span class="gugu-record-source">${escapeHtml(match.recordLabel ?? "已绑定结构化记录")}</span>`
+        : `<select class="gugu-key-select" data-action="map" aria-label="将${escapeHtml(match.label)}映射为">${fieldOptions(match.key)}</select>`;
       return `<div class="gugu-row" data-id="${match.id}">
         <input class="gugu-check" type="checkbox" ${checked ? "checked" : ""} aria-label="填写${escapeHtml(match.label)}" />
-        <span class="gugu-field"><span class="gugu-field-label" title="${escapeHtml(match.label)}">${escapeHtml(match.label)}</span><select class="gugu-key-select" data-action="map" aria-label="将${escapeHtml(match.label)}映射为">${fieldOptions(match.key)}</select>${suggestion}</span>
+        <span class="gugu-field"><span class="gugu-field-label" title="${escapeHtml(match.label)}">${escapeHtml(match.label)}</span>${mappingControl}${suggestion}</span>
         <span class="gugu-confidence ${match.confidence < 0.78 ? "medium" : ""}">${Math.round(match.confidence * 100)}%</span>
         ${canPolish ? `<button class="gugu-ai" data-action="polish" type="button">AI 润色此项</button>` : ""}
       </div>`;
-    }).join("") + manualSummary;
+    }).join("") + repeatSummary + manualSummary;
   }
 
   async function refresh() {
@@ -123,9 +148,18 @@ function installAssistant() {
     if (!response.ok || !response.state) throw new Error(response.error || "无法读取个人档案");
     state = response.state;
     savedMappings = await loadSiteMappings();
-    const scan = scanPage(state.profile, elements, descriptors, adapter, elementIds, savedMappings);
+    const scan = scanPage(state.profile, elements, descriptors, adapter, elementIds, savedMappings, repeatBindings, repeatGroupIds);
     matches = scan.matches;
     manualRequired = scan.manualRequired;
+    manualAttention = scan.manualAttention;
+    repeatGroups = scan.repeatGroups;
+    observeDocuments(scan.documents, host, () => {
+      if (!panelOpen) return;
+      window.clearTimeout(refreshTimer);
+      refreshTimer = window.setTimeout(() => {
+        void refresh().then(() => showNotice("页面新增字段，已自动更新识别结果。"), (error) => showNotice(error instanceof Error ? error.message : "动态字段识别失败", true));
+      }, 350);
+    });
     selectedIds = new Set(matches.filter((match) => hasRenderedOnce ? selectedIds.has(match.id) : match.confidence >= 0.78).map((match) => match.id));
     hasRenderedOnce = true;
     render();
@@ -209,6 +243,14 @@ function installAssistant() {
 
   root.addEventListener("change", (event) => {
     const input = event.target as HTMLInputElement | HTMLSelectElement;
+    if (input instanceof HTMLSelectElement && input.dataset.action === "bind-entry") {
+      const groupKey = input.dataset.groupKey;
+      if (!groupKey) return;
+      if (input.value) repeatBindings.set(groupKey, input.value);
+      else repeatBindings.delete(groupKey);
+      void refresh().then(() => showNotice(input.value ? "已绑定该页面行，仍需逐字段预览后填写。" : "已取消重复经历绑定。"));
+      return;
+    }
     const row = input.closest<HTMLElement>(".gugu-row");
     if (!row) return;
     const id = row.dataset.id;
@@ -247,19 +289,122 @@ function installAssistant() {
     if ((message as { type?: string }).type === "OPEN_ASSISTANT") void open();
   });
 
-  const observer = new MutationObserver((records) => {
-    if (!panelOpen || records.every((record) => isAssistantMutation(record, host))) return;
+  document.addEventListener("load", (event) => {
+    if (!panelOpen || !(event.target instanceof HTMLIFrameElement)) return;
     window.clearTimeout(refreshTimer);
     refreshTimer = window.setTimeout(() => {
-      void refresh().then(() => showNotice("页面新增字段，已自动更新识别结果。"), (error) => showNotice(error instanceof Error ? error.message : "动态字段识别失败", true));
-    }, 350);
-  });
-  observer.observe(document.documentElement, { childList: true, subtree: true });
+      void refresh().then(() => showNotice("iframe 已加载，已重新检查其中的表单控件。"), (error) => showNotice(error instanceof Error ? error.message : "iframe 识别失败", true));
+    }, 100);
+  }, true);
+
+  function observeDocuments(documents: Document[], assistantHost: HTMLElement, onMutation: () => void) {
+    for (const observer of pageObservers) observer.disconnect();
+    pageObservers = documents.map((scanDocument) => {
+      const observer = new MutationObserver((records) => {
+        if (records.every((record) => scanDocument === document && isAssistantMutation(record, assistantHost))) return;
+        onMutation();
+      });
+      observer.observe(scanDocument.documentElement, { childList: true, subtree: true });
+      return observer;
+    });
+  }
 }
 
 function isAssistantMutation(record: MutationRecord, host: HTMLElement): boolean {
   if (record.target === host || host.contains(record.target)) return true;
-  return Array.from(record.addedNodes).every((node) => node instanceof Node && (node === host || host.contains(node)));
+  return Array.from(record.addedNodes).every((node) => node === host || host.contains(node));
+}
+
+function repeatSignal(element: Element): string {
+  const values: string[] = [];
+  let current: Element | null = element;
+  for (let depth = 0; current && depth < 4; depth += 1, current = current.parentElement) {
+    values.push(
+      current.tagName,
+      current.id,
+      current.className,
+      current.getAttribute("data-section") ?? "",
+      current.getAttribute("data-type") ?? "",
+      current.getAttribute("aria-label") ?? "",
+    );
+    const heading = current.querySelector<HTMLElement>(":scope > legend, :scope > h2, :scope > h3, :scope > h4, :scope > [class*='section-title' i], :scope > [class*='group-title' i]");
+    if (heading) values.push(cleanText(heading.innerText || heading.textContent).slice(0, 100));
+    const previous = current.previousElementSibling;
+    if (previous?.matches("legend, h2, h3, h4, [class*='section-title' i], [class*='group-title' i]")) {
+      values.push(cleanText((previous as HTMLElement).innerText || previous.textContent).slice(0, 100));
+    }
+  }
+  return values.filter(Boolean).join(" ");
+}
+
+function repeatedControlCount(element: Element): number {
+  return element.querySelectorAll("input, textarea, select, [contenteditable=true], [role=combobox]").length;
+}
+
+function hasRepeatedSiblingShape(element: Element): boolean {
+  const parent = element.parentElement;
+  if (!parent) return false;
+  const signature = `${element.tagName}:${element.className}`;
+  return Array.from(parent.children).filter((sibling) => (
+    `${sibling.tagName}:${sibling.className}` === signature && repeatedControlCount(sibling) >= 2
+  )).length >= 2;
+}
+
+function findRepeatedRoot(element: FillableElement, adapter: SiteAdapter): { root: Element; kind: StructuredEntryKind } | null {
+  const explicit = element.closest<HTMLElement>("[data-gugu-repeat-kind]");
+  if (explicit) {
+    const kind = inferStructuredEntryKind(explicit.dataset.guguRepeatKind ?? repeatSignal(explicit));
+    if (kind) return { root: explicit, kind };
+  }
+  const selectors = adapter.repeatedGroupSelectors.join(",");
+  let current: Element | null = element.parentElement;
+  for (let depth = 0; current && depth < 7; depth += 1, current = current.parentElement) {
+    if (repeatedControlCount(current) < 2) continue;
+    const kind = inferStructuredEntryKind(repeatSignal(current));
+    if (!kind) continue;
+    const selectorMatch = selectors ? current.matches(selectors) : false;
+    const semanticClass = /(experience|education|project|award|employment|internship|经历|教育|项目|奖项)/i.test(repeatSignal(current));
+    if (selectorMatch || semanticClass || hasRepeatedSiblingShape(current)) return { root: current, kind };
+  }
+  return null;
+}
+
+function describeRepeatedContext(
+  element: FillableElement,
+  descriptor: FieldDescriptor,
+  adapter: SiteAdapter,
+  bindings: Map<string, string>,
+  groupIds: WeakMap<Element, string>,
+): RepeatedFieldContext | undefined {
+  const found = findRepeatedRoot(element, adapter);
+  if (!found) return undefined;
+  const field = inferStructuredEntryField(found.kind, [
+    descriptor.label,
+    descriptor.ariaLabel,
+    descriptor.placeholder,
+    descriptor.name,
+  ].filter(Boolean).join(" | "));
+  if (!field) return undefined;
+  const { groupKey, targetEntryId } = resolveRepeatGroupIdentity(
+    found.root,
+    groupIds,
+    bindings,
+    () => `repeat-group-${nextElementId++}`,
+  );
+  const siblings = found.root.parentElement
+    ? Array.from(found.root.parentElement.children).filter((candidate) => (
+      repeatedControlCount(candidate) >= 2 && inferStructuredEntryKind(repeatSignal(candidate)) === found.kind
+    ))
+    : [found.root];
+  const position = Math.max(0, siblings.indexOf(found.root)) + 1;
+  const labels: Record<StructuredEntryKind, string> = { education: "教育经历", experience: "工作 / 实习经历", project: "项目经历", award: "获奖经历" };
+  return {
+    groupKey,
+    groupLabel: `${labels[found.kind]}第 ${position} 行`,
+    kind: found.kind,
+    field,
+    targetEntryId,
+  };
 }
 
 function scanPage(
@@ -269,21 +414,29 @@ function scanPage(
   adapter: SiteAdapter,
   elementIds: WeakMap<FillableElement, string>,
   mappings: Record<string, ProfileFieldKey>,
-): { matches: FieldMatch[]; manualRequired: ManualField[] } {
+  repeatBindings: Map<string, string>,
+  repeatGroupIds: WeakMap<Element, string>,
+): { matches: FieldMatch[]; manualRequired: ManualField[]; manualAttention: ManualField[]; repeatGroups: RepeatGroupPrompt[]; documents: Document[] } {
   elements.clear();
   descriptors.clear();
-  const candidates = Array.from(document.querySelectorAll<FillableElement>("input, textarea, select, [contenteditable=true]"));
+  const frameScan = collectScanDocuments(document);
+  const candidates = frameScan.documents.flatMap((scanDocument) => collectCandidates(scanDocument, adapter));
   const matches: FieldMatch[] = [];
   const manualRequired: ManualField[] = [];
+  const manualAttention: ManualField[] = [...frameScan.manualFrames];
+  const repeatGroupMap = new Map<string, RepeatGroupPrompt>();
   const processedGroups = new Set<string>();
+  const documentIndexes = new Map(frameScan.documents.map((scanDocument, index) => [scanDocument, index]));
 
   const addMatch = (target: FillTarget, anchor: FillableElement, descriptor: FieldDescriptor) => {
     const label = descriptor.label ?? "";
-    const explicitKey = mappings[descriptorMappingKey(descriptor)];
+    const explicitKey = descriptor.repeated ? undefined : mappings[descriptorMappingKey(descriptor)];
     const decision = matchDescriptor(descriptor, profile, explicitKey);
     if (decision.action !== "fill" || !decision.profileKey || decision.value === null) {
-      if (descriptor.required && decision.action === "manual") {
-        manualRequired.push({ label: label.slice(0, 100), reason: decision.reason });
+      if (decision.action === "manual") {
+        const item = { label: label.slice(0, 100), reason: decision.reason, required: Boolean(descriptor.required) };
+        if (descriptor.required) manualRequired.push(item);
+        else if (isAttentionReason(decision.reason)) manualAttention.push(item);
       }
       return;
     }
@@ -295,28 +448,33 @@ function scanPage(
       id,
       label: label.slice(0, 100) || FIELD_LABELS[decision.profileKey],
       key: decision.profileKey,
-      value: profile[decision.profileKey],
+      value: decision.sourceValue ?? profile[decision.profileKey],
       resolvedValue: decision.value,
       confidence: decision.confidence,
       kind: elementKind(anchor),
+      mappingLocked: Boolean(descriptor.repeated),
+      recordLabel: descriptor.repeated?.groupLabel,
     });
   };
 
   for (const element of candidates) {
-    if (!isEligible(element) || isIgnoredByAdapter(element, adapter)) continue;
-    if (element instanceof HTMLInputElement && ["radio", "checkbox"].includes(element.type) && element.name) {
-      const groupKey = `${element.type}:${element.name}`;
+    if (!isEligible(element, adapter) || isIgnoredByAdapter(element, adapter)) continue;
+    if (isInputElement(element) && ["radio", "checkbox"].includes(element.type) && element.name) {
+      const groupKey = `${documentIndexes.get(element.ownerDocument) ?? 0}:${element.type}:${element.name}`;
       if (processedGroups.has(groupKey)) continue;
       processedGroups.add(groupKey);
       const group = candidates.filter((candidate): candidate is HTMLInputElement => (
-        candidate instanceof HTMLInputElement
+        isInputElement(candidate)
+        && candidate.ownerDocument === element.ownerDocument
         && candidate.type === element.type
         && candidate.name === element.name
-        && isEligible(candidate)
+        && isEligible(candidate, adapter)
         && !isIgnoredByAdapter(candidate, adapter)
       ));
       if (!group.length || group.some((candidate) => candidate.checked)) continue;
       const descriptor = describeField(group[0], adapter);
+      descriptor.repeated = describeRepeatedContext(group[0], descriptor, adapter, repeatBindings, repeatGroupIds);
+      registerRepeatGroup(descriptor.repeated, profile, repeatGroupMap);
       descriptor.controlType = element.type as "radio" | "checkbox";
       descriptor.multiple = element.type === "checkbox";
       descriptor.options = group.map((candidate) => ({
@@ -327,9 +485,55 @@ function scanPage(
       addMatch(group, group[0], descriptor);
       continue;
     }
-    addMatch(element, element, describeField(element, adapter));
+    const descriptor = describeField(element, adapter);
+    descriptor.repeated = describeRepeatedContext(element, descriptor, adapter, repeatBindings, repeatGroupIds);
+    registerRepeatGroup(descriptor.repeated, profile, repeatGroupMap);
+    addMatch(element, element, descriptor);
   }
-  return { matches: deduplicate(matches), manualRequired };
+  return {
+    matches: deduplicate(matches),
+    manualRequired: deduplicateManual(manualRequired),
+    manualAttention: deduplicateManual(manualAttention),
+    repeatGroups: [...repeatGroupMap.values()],
+    documents: frameScan.documents,
+  };
+}
+
+function registerRepeatGroup(
+  context: RepeatedFieldContext | undefined,
+  profile: ProfileData,
+  groups: Map<string, RepeatGroupPrompt>,
+) {
+  if (!context || groups.has(context.groupKey)) return;
+  groups.set(context.groupKey, {
+    groupKey: context.groupKey,
+    groupLabel: context.groupLabel,
+    kind: context.kind,
+    selectedEntryId: context.targetEntryId,
+    options: structuredEntryOptions(profile, context.kind),
+  });
+}
+
+function isAttentionReason(reason: string): boolean {
+  return [
+    "attachment_user_required",
+    "dynamic_choice_requires_user_action",
+    "repeated_group_unbound",
+    "repeated_group_target_missing",
+    "unsupported_repeated_field",
+    "cross_origin_iframe",
+    "iframe_not_ready",
+  ].includes(reason);
+}
+
+function deduplicateManual(items: ManualField[]): ManualField[] {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    const identity = `${item.required}:${item.reason}:${item.label}`;
+    if (seen.has(identity)) return false;
+    seen.add(identity);
+    return true;
+  });
 }
 
 function manualReason(reason: string): string {
@@ -343,85 +547,19 @@ function manualReason(reason: string): string {
     ambiguous_choice: "存在重复或歧义选项",
     partial_multi_choice: "多选项只能部分匹配",
     invalid_date: "日期格式无效",
+    attachment_user_required: "附件必须由你核对后手动选择",
+    dynamic_choice_requires_user_action: "动态下拉未验证选项与事件链，保持人工选择",
+    repeated_group_unbound: "重复经历行尚未绑定结构化档案记录",
+    repeated_group_target_missing: "已绑定的档案记录不存在，请重新选择",
+    unsupported_repeated_field: "重复经历中的该字段暂不支持",
+    cross_origin_iframe: "跨域 iframe 无法读取，必须人工检查",
+    iframe_not_ready: "iframe 尚未加载完成，请稍后重新识别",
   };
   return messages[reason] ?? "需要人工确认";
 }
 
-function isEligible(element: FillableElement): boolean {
-  const rect = element.getBoundingClientRect();
-  const style = getComputedStyle(element);
-  if (rect.width < 4 || rect.height < 4 || style.display === "none" || style.visibility === "hidden") return false;
-  if (element instanceof HTMLInputElement) {
-    if (["hidden", "password", "file", "submit", "button", "reset", "image"].includes(element.type)) return false;
-    if (element.disabled || element.readOnly) return false;
-    if (!["checkbox", "radio"].includes(element.type) && element.value.trim()) return false;
-  } else if (element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement) {
-    if (element.disabled || ("readOnly" in element && element.readOnly)) return false;
-    if (element instanceof HTMLTextAreaElement && element.value.trim()) return false;
-    if (element instanceof HTMLSelectElement && element.value && element.selectedIndex > 0) return false;
-  } else if (element.textContent?.trim()) return false;
-  return true;
-}
-
 function cleanText(value: string | null | undefined): string {
   return (value ?? "").replace(/\s+/g, " ").replace(/[*：:]+$/g, "").trim();
-}
-
-function describeField(element: FillableElement, adapter: SiteAdapter): FieldDescriptor {
-  const parts = new Set<string>();
-  if (element.id) {
-    const label = document.querySelector<HTMLLabelElement>(`label[for="${CSS.escape(element.id)}"]`);
-    if (label) parts.add(cleanText(label.innerText));
-  }
-  const wrappingLabel = element.closest("label");
-  if (wrappingLabel) parts.add(cleanText(wrappingLabel.textContent));
-  const container = element.closest("[class*='form-item'], [class*='field'], [class*='question'], .ant-form-item, .el-form-item");
-  if (container) {
-    const explicit = container.querySelector<HTMLElement>("label, [class*='label'], [class*='title']");
-    if (explicit && explicit !== element) parts.add(cleanText(explicit.innerText).slice(0, 120));
-  }
-  const previous = element.previousElementSibling as HTMLElement | null;
-  if (previous) parts.add(cleanText(previous.innerText).slice(0, 100));
-  for (const candidate of adapterLabelCandidates(element, adapter)) parts.add(cleanText(candidate).slice(0, 120));
-  return {
-    label: Array.from(parts).filter(Boolean).join(" | "),
-    ariaLabel: cleanText(element.getAttribute("aria-label")),
-    placeholder: cleanText(element.getAttribute("placeholder") ?? element.getAttribute("data-placeholder")),
-    name: cleanText(element.getAttribute("name") ?? element.id),
-    autocomplete: element instanceof HTMLInputElement ? element.autocomplete : "",
-    controlType: elementControl(element),
-    required: element.hasAttribute("required") || element.getAttribute("aria-required") === "true",
-    disabled: "disabled" in element && Boolean(element.disabled),
-    readOnly: "readOnly" in element && Boolean(element.readOnly),
-    hasValue: element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement
-      ? Boolean(element.value.trim())
-      : element instanceof HTMLSelectElement
-        ? Boolean(element.value && element.selectedIndex > 0)
-        : Boolean(element.textContent?.trim()),
-    multiple: element instanceof HTMLSelectElement && element.multiple,
-    options: element instanceof HTMLSelectElement
-      ? Array.from(element.options).map((option) => ({ label: cleanText(option.text), value: option.value, disabled: option.disabled }))
-      : [],
-  };
-}
-
-function optionLabel(element: HTMLInputElement): string {
-  if (element.id) {
-    const label = document.querySelector<HTMLLabelElement>(`label[for="${CSS.escape(element.id)}"]`);
-    if (label) return cleanText(label.innerText || label.textContent);
-  }
-  const wrapping = element.closest("label");
-  return cleanText(wrapping?.innerText || wrapping?.textContent || element.value);
-}
-
-function elementControl(element: FillableElement): FieldControl {
-  if (element instanceof HTMLTextAreaElement) return "textarea";
-  if (element instanceof HTMLSelectElement) return "select";
-  if (element instanceof HTMLInputElement) {
-    const supported = new Set<FieldControl>(["text", "email", "tel", "url", "date", "month", "number", "radio", "checkbox", "hidden"]);
-    return supported.has(element.type as FieldControl) ? element.type as FieldControl : "text";
-  }
-  return element.isContentEditable ? "contenteditable" : "unknown";
 }
 
 const MAPPINGS_STORAGE_KEY = "guguSiteMappings";
@@ -484,85 +622,10 @@ function deduplicate(matches: FieldMatch[]): FieldMatch[] {
 }
 
 function elementKind(element: FillableElement): FieldMatch["kind"] {
-  if (element instanceof HTMLTextAreaElement) return "textarea";
-  if (element instanceof HTMLSelectElement) return "select";
-  if (element instanceof HTMLInputElement && element.type === "radio") return "radio";
-  if (element instanceof HTMLInputElement && element.type === "checkbox") return "checkbox";
-  if (element instanceof HTMLInputElement) return "input";
+  if (isTextareaElement(element)) return "textarea";
+  if (isSelectElement(element)) return "select";
+  if (isInputElement(element) && element.type === "radio") return "radio";
+  if (isInputElement(element) && element.type === "checkbox") return "checkbox";
+  if (isInputElement(element)) return "input";
   return "contenteditable";
-}
-
-function snapshotTarget(target: FillTarget): ElementSnapshot[] {
-  const items = Array.isArray(target) ? target : [target];
-  return items.map((element) => ({
-    element,
-    value: element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement
-      ? element.value
-      : element.textContent ?? "",
-    checked: element instanceof HTMLInputElement && ["radio", "checkbox"].includes(element.type) ? element.checked : undefined,
-  }));
-}
-
-function fillTarget(target: FillTarget, value: string | string[]): boolean {
-  try {
-    const elements = Array.isArray(target) ? target : [target];
-    const element = elements[0];
-    element.scrollIntoView({ block: "center", behavior: "smooth" });
-    if (Array.isArray(target)) {
-      const requested = new Set(Array.isArray(value) ? value : [value]);
-      if (!requested.size || [...requested].some((item) => !target.some((input) => input.value === item))) return false;
-      if (target[0]?.type === "radio" && requested.size !== 1) return false;
-      for (const input of target) {
-        const checked = requested.has(input.value);
-        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "checked")?.set?.call(input, checked);
-        input.dispatchEvent(new Event("input", { bubbles: true }));
-        input.dispatchEvent(new Event("change", { bubbles: true }));
-      }
-      return true;
-    }
-    if (element instanceof HTMLSelectElement) {
-      const requested = Array.isArray(value) ? value : [value];
-      if (!requested.length || requested.some((item) => !Array.from(element.options).some((option) => !option.disabled && option.value === item))) return false;
-      if (element.multiple) {
-        for (const option of element.options) option.selected = requested.includes(option.value);
-      } else {
-        if (requested.length !== 1) return false;
-        element.value = requested[0];
-      }
-    } else if (element instanceof HTMLInputElement) {
-      if (Array.isArray(value)) return false;
-      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
-      setter?.call(element, value);
-    } else if (element instanceof HTMLTextAreaElement) {
-      if (Array.isArray(value)) return false;
-      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
-      setter?.call(element, value);
-    } else {
-      if (Array.isArray(value)) return false;
-      element.textContent = value;
-    }
-    const eventValue = Array.isArray(value) ? value.join(",") : value;
-    element.focus();
-    element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: eventValue }));
-    element.dispatchEvent(new Event("change", { bubbles: true }));
-    element.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function restoreElement(snapshot: ElementSnapshot): boolean {
-  const { element, value, checked } = snapshot;
-  if (element instanceof HTMLInputElement && checked !== undefined) {
-    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "checked")?.set?.call(element, checked);
-  } else if (element instanceof HTMLSelectElement) element.value = value;
-  else if (element instanceof HTMLInputElement) {
-    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(element, value);
-  } else if (element instanceof HTMLTextAreaElement) {
-    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set?.call(element, value);
-  } else element.textContent = value;
-  element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
-  element.dispatchEvent(new Event("change", { bubbles: true }));
-  return true;
 }

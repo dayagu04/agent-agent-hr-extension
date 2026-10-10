@@ -61,6 +61,31 @@ export interface AwardEntry {
   description: string;
 }
 
+export type StructuredEntryKind = "education" | "experience" | "project" | "award";
+
+export type StructuredEntryField =
+  | "organization"
+  | "role"
+  | "name"
+  | "school"
+  | "major"
+  | "degree"
+  | "gpa"
+  | "startDate"
+  | "endDate"
+  | "date"
+  | "location"
+  | "link"
+  | "description";
+
+export interface RepeatedFieldContext {
+  groupKey: string;
+  groupLabel: string;
+  kind: StructuredEntryKind;
+  field: StructuredEntryField;
+  targetEntryId?: string;
+}
+
 export type ProfileData = Record<ProfileFieldKey, string> & {
   resumeRawText: string;
   experienceEntries: ExperienceEntry[];
@@ -94,6 +119,8 @@ export interface FieldMatch {
   kind: "input" | "textarea" | "select" | "radio" | "checkbox" | "contenteditable";
   suggestedValue?: string;
   factWarnings?: string[];
+  mappingLocked?: boolean;
+  recordLabel?: string;
 }
 
 export interface PolishRequest {

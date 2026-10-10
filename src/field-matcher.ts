@@ -1,8 +1,9 @@
-import type { ProfileData, ProfileFieldKey } from "./types";
+import { repeatedProfileKey, resolveRepeatedValue } from "./repeat-context.ts";
+import type { ProfileData, ProfileFieldKey, RepeatedFieldContext, StructuredEntryField } from "./types";
 
 export type FieldControl =
   | "text" | "textarea" | "email" | "tel" | "url" | "date" | "month" | "number"
-  | "select" | "radio" | "checkbox" | "contenteditable" | "hidden" | "unknown";
+  | "select" | "radio" | "checkbox" | "combobox" | "file" | "contenteditable" | "hidden" | "unknown";
 
 export interface FieldOption {
   value: string;
@@ -24,6 +25,7 @@ export interface FieldDescriptor {
   hasValue?: boolean;
   multiple?: boolean;
   options?: FieldOption[];
+  repeated?: RepeatedFieldContext;
 }
 
 export interface FieldDecision {
@@ -32,6 +34,8 @@ export interface FieldDecision {
   confidence: number;
   reason: string;
   value: string | string[] | null;
+  sourceValue?: string;
+  entrySource?: RepeatedFieldContext;
 }
 
 export interface RequiredCoverage {
@@ -241,6 +245,51 @@ function prepareValue(spec: FieldSpec, value: string, descriptor: FieldDescripto
   return value.trim() ? { value: value.trim(), reason: "value_ready" } : { value: null, reason: "missing_profile_value" };
 }
 
+const REPEATED_FIELD_CONTROLS: Record<StructuredEntryField, Set<FieldControl>> = {
+  organization: new Set(TEXT),
+  role: new Set(TEXT),
+  name: new Set(TEXT),
+  school: new Set([...TEXT, ...CHOICE]),
+  major: new Set([...TEXT, ...CHOICE]),
+  degree: new Set([...TEXT, ...CHOICE]),
+  gpa: new Set([...TEXT, "number"]),
+  startDate: new Set([...TEXT, "date", "month"]),
+  endDate: new Set([...TEXT, "date", "month"]),
+  date: new Set([...TEXT, "date", "month"]),
+  location: new Set([...TEXT, ...CHOICE]),
+  link: new Set([...TEXT, "url"]),
+  description: new Set(TEXT),
+};
+
+function matchRepeatedDescriptor(descriptor: FieldDescriptor, profile: ProfileData): FieldDecision {
+  const context = descriptor.repeated!;
+  const profileKey = repeatedProfileKey(context);
+  if (!profileKey) {
+    return { action: "manual", profileKey: null, confidence: 1, reason: "unsupported_repeated_field", value: null, entrySource: context };
+  }
+  const resolved = resolveRepeatedValue(profile, context);
+  if (resolved.value === null) {
+    return { action: "manual", profileKey, confidence: 1, reason: resolved.reason, value: null, entrySource: context };
+  }
+  if (!resolved.value) {
+    return { action: "manual", profileKey, confidence: 1, reason: "missing_profile_value", value: null, entrySource: context };
+  }
+  const prepared = prepareValue(
+    { key: profileKey, aliases: [], controls: REPEATED_FIELD_CONTROLS[context.field] },
+    resolved.value,
+    descriptor,
+  );
+  return {
+    action: prepared.value === null ? "manual" : "fill",
+    profileKey,
+    confidence: 1,
+    reason: prepared.reason === "value_ready" ? "record_value_ready" : prepared.reason,
+    value: prepared.value,
+    sourceValue: resolved.value,
+    entrySource: context,
+  };
+}
+
 export function matchDescriptor(
   descriptor: FieldDescriptor,
   profile: ProfileData,
@@ -250,6 +299,14 @@ export function matchDescriptor(
   if (descriptor.disabled) return { action: "skip", profileKey: null, confidence: 1, reason: "disabled_field", value: null };
   if (descriptor.readOnly) return { action: "skip", profileKey: null, confidence: 1, reason: "readonly_field", value: null };
   if (descriptor.hasValue) return { action: "skip", profileKey: null, confidence: 1, reason: "already_filled", value: null };
+  if (descriptor.controlType === "file") {
+    return { action: "manual", profileKey: null, confidence: 1, reason: "attachment_user_required", value: null };
+  }
+  if (descriptor.controlType === "combobox") {
+    const classification = classifyDescriptor(descriptor);
+    return { action: "manual", ...classification, reason: "dynamic_choice_requires_user_action", value: null };
+  }
+  if (descriptor.repeated) return matchRepeatedDescriptor(descriptor, profile);
 
   const classification = explicitKey
     ? { profileKey: explicitKey, confidence: 0.99, reason: "user_mapping" }
@@ -268,5 +325,6 @@ export function matchDescriptor(
     confidence: classification.confidence,
     reason: prepared.reason,
     value: prepared.value,
+    ...(prepared.value === null ? {} : { sourceValue: value.trim() }),
   };
 }
