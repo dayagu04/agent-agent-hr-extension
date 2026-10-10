@@ -10,11 +10,14 @@ import {
   isSelectElement,
   isTextareaElement,
   optionLabel,
+  RepeatBindingStore,
   repeatedMatchIdentity,
   repeatGroupStructureSignature,
   resolveRepeatGroupIdentity,
   restoreElement,
+  scopeNamedChoiceGroup,
   snapshotTarget,
+  validateCachedFillTarget,
   type ElementSnapshot,
   type FillableElement,
   type FillTarget,
@@ -94,7 +97,7 @@ function installAssistant() {
   let manualRequired: ManualField[] = [];
   let manualAttention: ManualField[] = [];
   let repeatGroups: RepeatGroupPrompt[] = [];
-  const repeatBindings = new Map<string, string>();
+  const repeatBindings = new RepeatBindingStore();
   let savedMappings: Record<string, ProfileFieldKey> = {};
   let selectedIds = new Set<string>();
   let hasRenderedOnce = false;
@@ -102,6 +105,8 @@ function installAssistant() {
   let panelOpen = false;
   let refreshTimer: number | undefined;
   let pageObservers: MutationObserver[] = [];
+  let pageActivityCleanups: Array<() => void> = [];
+  let assistantWriteInProgress = false;
 
   function showNotice(message: string, error = false) {
     notice.textContent = message;
@@ -118,7 +123,7 @@ function installAssistant() {
     fillButton.disabled = matches.length === 0;
     undoButton.classList.toggle("gugu-hidden", lastFill.length === 0);
     const repeatSummary = repeatGroups.length
-      ? `<div class="gugu-manual"><strong>重复经历必须先绑定档案记录</strong>${repeatGroups.map((group) => `<label>${escapeHtml(group.groupLabel)}<select data-action="bind-entry" data-group-key="${escapeHtml(group.groupKey)}"><option value="">请选择，不会默认使用第一条</option>${group.options.map((option) => `<option value="${escapeHtml(option.id)}" ${option.id === group.selectedEntryId ? "selected" : ""}>${escapeHtml(option.label)}</option>`).join("")}</select></label>`).join("")}</div>`
+      ? `<div class="gugu-manual"><strong>重复经历必须先绑定档案记录</strong>${repeatGroups.map((group) => `<label>${escapeHtml(group.groupLabel)}<select data-action="bind-entry" data-group-key="${escapeHtml(group.groupKey)}" data-scan-epoch="${repeatBindings.epoch}"><option value="">请选择，不会默认使用第一条</option>${group.options.map((option) => `<option value="${escapeHtml(option.id)}" ${option.id === group.selectedEntryId ? "selected" : ""}>${escapeHtml(option.label)}</option>`).join("")}</select></label>`).join("")}</div>`
       : "";
     const manualItems = [...manualRequired, ...manualAttention];
     const manualSummary = manualItems.length
@@ -169,11 +174,20 @@ function installAssistant() {
     manualAttention = scan.manualAttention;
     repeatGroups = scan.repeatGroups;
     observeDocuments(scan.documents, host, () => {
+      invalidateRepeatSnapshot();
       if (!panelOpen) return;
       window.clearTimeout(refreshTimer);
       refreshTimer = window.setTimeout(() => {
-        void refresh().then(() => showNotice("页面新增字段，已自动更新识别结果。"), (error) => showNotice(error instanceof Error ? error.message : "动态字段识别失败", true));
+        void refresh().then(() => showNotice("页面已变化；重复经历需重新绑定，识别结果已更新。"), (error) => showNotice(error instanceof Error ? error.message : "动态字段识别失败", true));
       }, 350);
+    }, () => {
+      if (assistantWriteInProgress) return;
+      invalidateRepeatSnapshot();
+      if (!panelOpen) return;
+      window.clearTimeout(refreshTimer);
+      refreshTimer = window.setTimeout(() => {
+        void refresh().then(() => showNotice("页面字段发生输入或选择；重复经历需重新绑定。"), (error) => showNotice(error instanceof Error ? error.message : "动态字段识别失败", true));
+      }, 150);
     });
     selectedIds = new Set(matches.filter((match) => hasRenderedOnce ? selectedIds.has(match.id) : match.confidence >= 0.78).map((match) => match.id));
     hasRenderedOnce = true;
@@ -181,6 +195,7 @@ function installAssistant() {
   }
 
   async function open() {
+    invalidateRepeatSnapshot();
     panelOpen = true;
     panel.classList.remove("gugu-hidden");
     bubble.classList.add("gugu-hidden");
@@ -199,38 +214,84 @@ function installAssistant() {
     if (button === bubble) return open();
     if (action === "close") return close();
     if (action === "rescan") {
+      invalidateRepeatSnapshot();
       try { await refresh(); } catch (error) { showNotice(error instanceof Error ? error.message : "识别失败", true); }
       return;
     }
     if (action === "undo") {
       let restored = 0;
-      for (const snapshot of lastFill) {
-        if (restoreElement(snapshot)) restored += 1;
+      assistantWriteInProgress = true;
+      try {
+        for (const snapshot of lastFill) {
+          if (restoreElement(snapshot)) restored += 1;
+        }
+      } finally {
+        assistantWriteInProgress = false;
       }
       lastFill = [];
-      render();
-      showNotice(`已撤销 ${restored} 项填写。`);
+      invalidateRepeatSnapshot();
+      try { await refresh(); } catch (error) { showNotice(error instanceof Error ? error.message : "撤销后重新识别失败", true); return; }
+      showNotice(`已撤销 ${restored} 项填写；重复经历需重新绑定。`);
       return;
     }
     if (action === "fill") {
       let filled = 0;
+      let stale = 0;
       const snapshots: ElementSnapshot[] = [];
-      for (const row of list.querySelectorAll<HTMLElement>(".gugu-row")) {
-        if (!row.querySelector<HTMLInputElement>(".gugu-check")?.checked) continue;
-        const match = matches.find((item) => item.id === row.dataset.id);
-        const target = match ? elements.get(match.id) : undefined;
-        if (match && target) {
-          const before = snapshotTarget(target);
-          const fillValue = match.suggestedValue ?? match.resolvedValue;
-          if (fillTarget(target, fillValue)) {
+      const selectedMatchIds = Array.from(list.querySelectorAll<HTMLElement>(".gugu-row"))
+        .filter((row) => row.querySelector<HTMLInputElement>(".gugu-check")?.checked)
+        .map((row) => row.dataset.id)
+        .filter((id): id is string => Boolean(id));
+      assistantWriteInProgress = true;
+      try {
+        for (const id of selectedMatchIds) {
+          const cachedMatch = matches.find((item) => item.id === id);
+          const cachedTarget = elements.get(id);
+          const cachedDescriptor = descriptors.get(id);
+          if (!cachedMatch || !cachedTarget || !cachedDescriptor || !state) {
+            stale += 1;
+            continue;
+          }
+
+          const currentElements = new Map<string, FillTarget>();
+          const currentDescriptors = new Map<string, FieldDescriptor>();
+          const currentScan = scanPage(
+            state.profile,
+            currentElements,
+            currentDescriptors,
+            adapter,
+            elementIds,
+            savedMappings,
+            repeatBindings,
+            repeatGroupIds,
+            repeatStructureNodeIds,
+          );
+          const currentMatch = currentScan.matches.find((item) => item.id === id);
+          const currentTarget = currentElements.get(id);
+          const currentDescriptor = currentDescriptors.get(id);
+          if (!currentMatch || !currentTarget || !currentDescriptor) {
+            stale += 1;
+            continue;
+          }
+          const validation = validateCachedFillTarget(cachedTarget, currentTarget, cachedDescriptor, currentDescriptor, adapter);
+          if (!validation.valid) {
+            stale += 1;
+            continue;
+          }
+          const before = snapshotTarget(currentTarget);
+          const fillValue = cachedMatch.suggestedValue ?? currentMatch.resolvedValue;
+          if (fillTarget(currentTarget, fillValue)) {
             snapshots.push(...before);
             filled += 1;
           }
         }
+      } finally {
+        assistantWriteInProgress = false;
       }
       lastFill = snapshots;
-      render();
-      showNotice(`已填写 ${filled} 项。请逐项检查，确认无误后由你手动提交。`);
+      invalidateRepeatSnapshot();
+      try { await refresh(); } catch (error) { showNotice(error instanceof Error ? error.message : "填写后重新识别失败", true); return; }
+      showNotice(`已填写 ${filled} 项${stale ? `，跳过 ${stale} 个扫描后已变化的过期项` : ""}。请逐项检查，确认无误后由你手动提交。`, stale > 0);
       return;
     }
     if (action === "polish" && button) {
@@ -264,9 +325,30 @@ function installAssistant() {
     if (input instanceof HTMLSelectElement && input.dataset.action === "bind-entry") {
       const groupKey = input.dataset.groupKey;
       if (!groupKey) return;
-      if (input.value) repeatBindings.set(groupKey, input.value);
+      if (Number(input.dataset.scanEpoch) !== repeatBindings.epoch) {
+        input.value = "";
+        void refresh().then(
+          () => showNotice("页面在本次识别后已变化，请在刷新后的行上重新绑定。", true),
+          (error) => showNotice(error instanceof Error ? error.message : "重新识别失败", true),
+        );
+        return;
+      }
+      for (const [id, descriptor] of descriptors) {
+        if (descriptor.repeated?.groupKey === groupKey) selectedIds.delete(id);
+      }
+      const selectedEntryId = input.value;
+      if (selectedEntryId) repeatBindings.set(groupKey, selectedEntryId);
       else repeatBindings.delete(groupKey);
-      void refresh().then(() => showNotice(input.value ? "已绑定该页面行，仍需逐字段预览后填写。" : "已取消重复经历绑定。"));
+      void refresh().then(
+        () => {
+          if (selectedEntryId && repeatBindings.get(groupKey) !== selectedEntryId) {
+            showNotice("页面在绑定过程中发生变化，绑定未保留，请重新选择。", true);
+            return;
+          }
+          showNotice(selectedEntryId ? "已绑定该页面行，仍需逐字段预览后填写。" : "已取消重复经历绑定。");
+        },
+        (error) => showNotice(error instanceof Error ? error.message : "绑定后重新识别失败", true),
+      );
       return;
     }
     const row = input.closest<HTMLElement>(".gugu-row");
@@ -311,15 +393,37 @@ function installAssistant() {
   });
 
   document.addEventListener("load", (event) => {
-    if (!panelOpen || !(event.target instanceof HTMLIFrameElement)) return;
+    if (!(event.target instanceof HTMLIFrameElement)) return;
+    invalidateRepeatSnapshot();
+    if (!panelOpen) return;
     window.clearTimeout(refreshTimer);
     refreshTimer = window.setTimeout(() => {
-      void refresh().then(() => showNotice("iframe 已加载，已重新检查其中的表单控件。"), (error) => showNotice(error instanceof Error ? error.message : "iframe 识别失败", true));
+      void refresh().then(() => showNotice("iframe 已加载；重复经历需重新绑定，表单控件已重新检查。"), (error) => showNotice(error instanceof Error ? error.message : "iframe 识别失败", true));
     }, 100);
   }, true);
 
-  function observeDocuments(documents: Document[], assistantHost: HTMLElement, onMutation: () => void) {
+  function invalidateRepeatSnapshot() {
+    repeatBindings.invalidate();
+    for (const [id, descriptor] of descriptors) {
+      if (descriptor.repeated) selectedIds.delete(id);
+    }
+  }
+
+  function observeDocuments(documents: Document[], assistantHost: HTMLElement, onMutation: () => void, onPageActivity: () => void) {
     for (const observer of pageObservers) observer.disconnect();
+    for (const cleanup of pageActivityCleanups) cleanup();
+    pageActivityCleanups = documents.flatMap((scanDocument) => {
+      const listener = (event: Event) => {
+        if (scanDocument === document && event.composedPath().includes(assistantHost)) return;
+        onPageActivity();
+      };
+      scanDocument.addEventListener("input", listener, true);
+      scanDocument.addEventListener("change", listener, true);
+      return [
+        () => scanDocument.removeEventListener("input", listener, true),
+        () => scanDocument.removeEventListener("change", listener, true),
+      ];
+    });
     pageObservers = documents.map((scanDocument) => {
       const observer = new MutationObserver((records) => {
         if (records.every((record) => scanDocument === document && isAssistantMutation(record, assistantHost))) return;
@@ -331,7 +435,8 @@ function installAssistant() {
         characterData: true,
         attributes: true,
         attributeFilter: [
-          "id", "name", "type", "role", "aria-label", "placeholder",
+          "id", "name", "type", "role", "aria-label", "aria-required", "placeholder",
+          "disabled", "readonly", "required", "checked", "value", "class", "style",
           "data-field", "data-index", "data-row-key", "data-key", "data-section", "data-type", "data-gugu-repeat-kind",
         ],
       });
@@ -342,7 +447,8 @@ function installAssistant() {
 
 function isAssistantMutation(record: MutationRecord, host: HTMLElement): boolean {
   if (record.target === host || host.contains(record.target)) return true;
-  return Array.from(record.addedNodes).every((node) => node === host || host.contains(node));
+  const addedNodes = Array.from(record.addedNodes);
+  return addedNodes.length > 0 && addedNodes.every((node) => node === host || host.contains(node));
 }
 
 function repeatSignal(element: Element): string {
@@ -403,7 +509,7 @@ function describeRepeatedContext(
   element: FillableElement,
   descriptor: FieldDescriptor,
   adapter: SiteAdapter,
-  bindings: Map<string, string>,
+  bindings: RepeatBindingStore,
   groupIds: WeakMap<Element, RepeatGroupIdentity>,
   structureNodeIds: WeakMap<Element, string>,
 ): RepeatedFieldContext | undefined {
@@ -454,7 +560,7 @@ function scanPage(
   adapter: SiteAdapter,
   elementIds: WeakMap<FillableElement, string>,
   mappings: Record<string, ProfileFieldKey>,
-  repeatBindings: Map<string, string>,
+  repeatBindings: RepeatBindingStore,
   repeatGroupIds: WeakMap<Element, RepeatGroupIdentity>,
   repeatStructureNodeIds: WeakMap<Element, string>,
 ): { matches: FieldMatch[]; manualRequired: ManualField[]; manualAttention: ManualField[]; repeatGroups: RepeatGroupPrompt[]; documents: Document[] } {
@@ -466,7 +572,7 @@ function scanPage(
   const manualRequired: ManualField[] = [];
   const manualAttention: ManualField[] = [...frameScan.manualFrames];
   const repeatGroupMap = new Map<string, RepeatGroupPrompt>();
-  const processedGroups = new Set<string>();
+  const processedChoices = new Set<FillableElement>();
   const documentIndexes = new Map(frameScan.documents.map((scanDocument, index) => [scanDocument, index]));
 
   const addMatch = (target: FillTarget, anchor: FillableElement, descriptor: FieldDescriptor) => {
@@ -492,7 +598,7 @@ function scanPage(
       }
       return;
     }
-    const id = repeatedMatchIdentity(baseElementId, descriptor.repeated?.groupKey);
+    const id = repeatedMatchIdentity(baseElementId, descriptor.repeated?.groupKey, repeatBindings.epoch);
     elements.set(id, target);
     descriptors.set(id, descriptor);
     matches.push({
@@ -512,10 +618,8 @@ function scanPage(
   for (const element of candidates) {
     if (!isEligible(element, adapter) || isIgnoredByAdapter(element, adapter)) continue;
     if (isInputElement(element) && ["radio", "checkbox"].includes(element.type) && element.name) {
-      const groupKey = `${documentIndexes.get(element.ownerDocument) ?? 0}:${element.type}:${element.name}`;
-      if (processedGroups.has(groupKey)) continue;
-      processedGroups.add(groupKey);
-      const group = candidates.filter((candidate): candidate is HTMLInputElement => (
+      if (processedChoices.has(element)) continue;
+      const sameNamedChoices = candidates.filter((candidate): candidate is HTMLInputElement => (
         isInputElement(candidate)
         && candidate.ownerDocument === element.ownerDocument
         && candidate.type === element.type
@@ -523,6 +627,30 @@ function scanPage(
         && isEligible(candidate, adapter)
         && !isIgnoredByAdapter(candidate, adapter)
       ));
+      const scoped = scopeNamedChoiceGroup(
+        element,
+        sameNamedChoices,
+        (candidate) => findRepeatedRoot(candidate, adapter)?.root ?? null,
+      );
+      for (const candidate of scoped.elements) processedChoices.add(candidate);
+      if (scoped.ambiguous) {
+        const ambiguousDescriptor = describeField(element, adapter);
+        const identityParts = scoped.elements.map((candidate) => {
+          const id = elementIds.get(candidate) ?? `field-${nextElementId++}`;
+          elementIds.set(candidate, id);
+          return id;
+        });
+        const item: ManualField = {
+          identity: `document-${documentIndexes.get(element.ownerDocument) ?? 0}:ambiguous-choice:${identityParts.join("+")}`,
+          label: (ambiguousDescriptor.label ?? "").slice(0, 100),
+          reason: "ambiguous_choice_group_scope",
+          required: scoped.elements.some((candidate) => candidate.hasAttribute("required") || candidate.getAttribute("aria-required") === "true"),
+        };
+        if (item.required) manualRequired.push(item);
+        else manualAttention.push(item);
+        continue;
+      }
+      const group = scoped.elements;
       if (!group.length || group.some((candidate) => candidate.checked)) continue;
       const descriptor = describeField(group[0], adapter);
       descriptor.repeated = describeRepeatedContext(group[0], descriptor, adapter, repeatBindings, repeatGroupIds, repeatStructureNodeIds);
@@ -580,6 +708,7 @@ function isAttentionReason(reason: string): boolean {
     "date_precision_insufficient",
     "cross_origin_iframe",
     "iframe_not_ready",
+    "ambiguous_choice_group_scope",
   ].includes(reason);
 }
 
@@ -602,6 +731,7 @@ function manualReason(reason: string): string {
     unsupported_repeated_field: "重复经历中的该字段暂不支持",
     cross_origin_iframe: "跨域 iframe 无法读取，必须人工检查",
     iframe_not_ready: "iframe 尚未加载完成，请稍后重新识别",
+    ambiguous_choice_group_scope: "同名单选或多选控件无法唯一归属到一个表单行，保持整组人工处理",
   };
   return messages[reason] ?? "需要人工确认";
 }

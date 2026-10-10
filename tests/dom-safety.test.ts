@@ -8,9 +8,12 @@ import {
   describeField,
   fillTarget,
   isEligible,
+  RepeatBindingStore,
   repeatedMatchIdentity,
   repeatGroupStructureSignature,
   resolveRepeatGroupIdentity,
+  scopeNamedChoiceGroup,
+  validateCachedFillTarget,
   type RepeatGroupIdentity,
 } from "../src/dom-safety.ts";
 import { matchDescriptor } from "../src/field-matcher.ts";
@@ -78,6 +81,7 @@ class FakeElement {
   textContent = "";
   innerText = "";
   isContentEditable = false;
+  isConnected = true;
   display = "block";
   visibility = "visible";
   width = 180;
@@ -173,6 +177,10 @@ function asElement(element: FakeElement): HTMLElement {
   return element as unknown as HTMLElement;
 }
 
+function asInput(element: FakeElement): HTMLInputElement {
+  return element as unknown as HTMLInputElement;
+}
+
 test("a same-origin iframe field enters matching and is filled with iframe-realm events", () => {
   const root = new FakeDocument("https://jobs.bytedance.com/apply");
   const child = new FakeDocument("https://jobs.bytedance.com/apply/form");
@@ -224,7 +232,7 @@ test("a cross-origin application iframe is not traversed and is reported manual"
   assert.equal(frame.contentDocumentReads, 1);
 });
 
-test("a hidden file input without a visible proxy is ignored, while a visible sibling upload button stays manual", () => {
+test("a hidden file input without a visible proxy is ignored, while a bounded outer-sibling upload button stays manual", () => {
   const document = new FakeDocument("https://app.mokahr.com/apply");
   const adapter = getSiteAdapter(document.location.href);
   const hiddenFile = new FakeElement("input", document);
@@ -236,13 +244,16 @@ test("a hidden file input without a visible proxy is ignored, while a visible si
   assert.equal(isEligible(asElement(hiddenFile), adapter), false);
 
   const wrapper = new FakeElement("div", document);
+  const inner = new FakeElement("div", document);
   const visibleUploadButton = new FakeElement("button", document);
   visibleUploadButton.textContent = "上传简历附件";
-  wrapper.children = [hiddenFile, visibleUploadButton];
-  hiddenFile.parentElement = wrapper;
-  hiddenFile.nextElementSibling = visibleUploadButton;
+  wrapper.children = [inner, visibleUploadButton];
+  inner.children = [hiddenFile];
+  hiddenFile.parentElement = inner;
+  inner.parentElement = wrapper;
+  inner.nextElementSibling = visibleUploadButton;
   visibleUploadButton.parentElement = wrapper;
-  visibleUploadButton.previousElementSibling = hiddenFile;
+  visibleUploadButton.previousElementSibling = inner;
   assert.equal(isEligible(asElement(hiddenFile), adapter), true);
   const descriptor = describeField(asElement(hiddenFile), adapter);
   assert.equal(descriptor.required, true);
@@ -270,7 +281,7 @@ test("a reused repeat row invalidates binding and selection when its non-value s
 
   const groupIds = new WeakMap<Element, RepeatGroupIdentity>();
   const structureNodeIds = new WeakMap<Element, string>();
-  const bindings = new Map<string, string>();
+  const bindings = new RepeatBindingStore();
   let sequence = 0;
   const allocate = () => `repeat-group-${++sequence}`;
   let nodeSequence = 0;
@@ -308,6 +319,145 @@ test("a reused repeat row invalidates binding and selection when its non-value s
   const moved = resolveRepeatGroupIdentity(asElement(row), movedSignature, groupIds, bindings, allocate);
   assert.equal(moved.targetEntryId, undefined);
   assert.equal(moved.invalidatedGroupKey, reused.groupKey);
+});
+
+test("an unchanged repeat row loses its binding after a new page scan epoch", () => {
+  const document = new FakeDocument("https://app.mokahr.com/apply");
+  const row = new FakeElement("div", document);
+  const groupIds = new WeakMap<Element, RepeatGroupIdentity>();
+  const bindings = new RepeatBindingStore();
+  let sequence = 0;
+  const allocate = () => `repeat-group-${++sequence}`;
+
+  const first = resolveRepeatGroupIdentity(asElement(row), "same-structure", groupIds, bindings, allocate);
+  bindings.set(first.groupKey, "experience-entry-1");
+  const bound = resolveRepeatGroupIdentity(asElement(row), "same-structure", groupIds, bindings, allocate);
+  assert.equal(bound.targetEntryId, "experience-entry-1");
+  const firstMatchId = repeatedMatchIdentity("field-1", first.groupKey, bindings.epoch);
+
+  bindings.invalidate();
+  const afterDynamicPageActivity = resolveRepeatGroupIdentity(asElement(row), "same-structure", groupIds, bindings, allocate);
+  assert.equal(afterDynamicPageActivity.groupKey, first.groupKey);
+  assert.equal(afterDynamicPageActivity.targetEntryId, undefined);
+  assert.notEqual(repeatedMatchIdentity("field-1", first.groupKey, bindings.epoch), firstMatchId);
+});
+
+test("same-name choices are scoped to one repeat row and filling a bound row does not touch its sibling", () => {
+  const document = new FakeDocument("https://app.mokahr.com/apply");
+  const rowOne = new FakeElement("div", document);
+  const rowTwo = new FakeElement("div", document);
+  const makeChoice = (row: FakeElement, value: string) => {
+    const input = new FakeElement("input", document);
+    input.type = "radio";
+    input.name = "current-role";
+    input.value = value;
+    input.parentElement = row;
+    row.children.push(input);
+    return input;
+  };
+  const rowOneYes = makeChoice(rowOne, "yes");
+  const rowOneNo = makeChoice(rowOne, "no");
+  const rowTwoYes = makeChoice(rowTwo, "yes");
+  const rowTwoNo = makeChoice(rowTwo, "no");
+  const candidates = [rowOneYes, rowOneNo, rowTwoYes, rowTwoNo].map(asInput);
+
+  const scoped = scopeNamedChoiceGroup(asInput(rowOneYes), candidates, (candidate) => candidate.parentElement);
+  assert.equal(scoped.ambiguous, false);
+  assert.deepEqual(scoped.elements, [rowOneYes, rowOneNo]);
+
+  const bindings = new RepeatBindingStore();
+  const groupIds = new WeakMap<Element, RepeatGroupIdentity>();
+  let sequence = 0;
+  const allocate = () => `repeat-${++sequence}`;
+  const first = resolveRepeatGroupIdentity(asElement(rowOne), "row-shape", groupIds, bindings, allocate);
+  const second = resolveRepeatGroupIdentity(asElement(rowTwo), "row-shape", groupIds, bindings, allocate);
+  bindings.set(first.groupKey, "entry-1");
+  assert.equal(resolveRepeatGroupIdentity(asElement(rowOne), "row-shape", groupIds, bindings, allocate).targetEntryId, "entry-1");
+  assert.equal(resolveRepeatGroupIdentity(asElement(rowTwo), "row-shape", groupIds, bindings, allocate).targetEntryId, undefined);
+
+  assert.equal(fillTarget(scoped.elements, "yes"), true);
+  assert.equal(rowOneYes.checked, true);
+  assert.equal(rowOneNo.checked, false);
+  assert.equal(rowTwoYes.checked, false);
+  assert.equal(rowTwoNo.checked, false);
+  assert.notEqual(first.groupKey, second.groupKey);
+});
+
+test("mixed repeat ownership makes a same-name choice group ambiguous", () => {
+  const document = new FakeDocument("https://app.mokahr.com/apply");
+  const row = new FakeElement("div", document);
+  const owned = new FakeElement("input", document);
+  const unowned = new FakeElement("input", document);
+  owned.type = unowned.type = "radio";
+  owned.name = unowned.name = "shared-name";
+  const scoped = scopeNamedChoiceGroup(
+    asInput(owned),
+    [asInput(owned), asInput(unowned)],
+    (candidate) => candidate === asInput(owned) ? asElement(row) : null,
+  );
+  assert.equal(scoped.ambiguous, true);
+  assert.deepEqual(scoped.elements, [owned, unowned]);
+});
+
+test("cached targets are rejected after user value, disable, removal, or semantic change", () => {
+  const document = new FakeDocument("https://jobs.bytedance.com/apply");
+  const adapter = getSiteAdapter(document.location.href);
+  const input = new FakeElement("input", document);
+  input.setAttribute("aria-label", "姓名");
+  const cachedDescriptor = describeField(asElement(input), adapter);
+  const cachedTarget = asElement(input);
+
+  assert.deepEqual(
+    validateCachedFillTarget(cachedTarget, cachedTarget, cachedDescriptor, describeField(cachedTarget, adapter), adapter),
+    { valid: true },
+  );
+
+  input.value = "页面刚写入的值";
+  assert.deepEqual(
+    validateCachedFillTarget(cachedTarget, cachedTarget, cachedDescriptor, describeField(cachedTarget, adapter), adapter),
+    { valid: false, reason: "target_ineligible" },
+  );
+  input.value = "";
+  input.disabled = true;
+  assert.deepEqual(
+    validateCachedFillTarget(cachedTarget, cachedTarget, cachedDescriptor, describeField(cachedTarget, adapter), adapter),
+    { valid: false, reason: "target_ineligible" },
+  );
+  input.disabled = false;
+  input.isConnected = false;
+  assert.deepEqual(
+    validateCachedFillTarget(cachedTarget, cachedTarget, cachedDescriptor, describeField(cachedTarget, adapter), adapter),
+    { valid: false, reason: "target_disconnected" },
+  );
+  input.isConnected = true;
+  input.setAttribute("aria-label", "联系电话");
+  assert.deepEqual(
+    validateCachedFillTarget(cachedTarget, cachedTarget, cachedDescriptor, describeField(cachedTarget, adapter), adapter),
+    { valid: false, reason: "semantics_changed" },
+  );
+});
+
+test("cached radio groups are rejected when the page already selected an option", () => {
+  const document = new FakeDocument("https://app.mokahr.com/apply");
+  const adapter = getSiteAdapter(document.location.href);
+  const first = new FakeElement("input", document);
+  const second = new FakeElement("input", document);
+  first.type = second.type = "radio";
+  first.name = second.name = "gender";
+  first.value = "female";
+  second.value = "male";
+  const target = [asInput(first), asInput(second)];
+  const descriptor = describeField(asElement(first), adapter);
+  descriptor.controlType = "radio";
+  descriptor.options = [
+    { label: "女", value: "female", disabled: false },
+    { label: "男", value: "male", disabled: false },
+  ];
+  second.checked = true;
+  assert.deepEqual(
+    validateCachedFillTarget(target, target, descriptor, { ...descriptor }, adapter),
+    { valid: false, reason: "choice_already_selected" },
+  );
 });
 
 test("manual items with the same label stay distinct across document, group, and element identities", () => {

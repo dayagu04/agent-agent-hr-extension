@@ -1,5 +1,5 @@
 import type { FieldControl, FieldDescriptor } from "./field-matcher.ts";
-import { adapterLabelCandidates, type SiteAdapter } from "./site-adapters.ts";
+import { adapterLabelCandidates, isIgnoredByAdapter, type SiteAdapter } from "./site-adapters.ts";
 
 export type FillableElement = HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | HTMLElement;
 export type FillTarget = FillableElement | HTMLInputElement[];
@@ -20,6 +20,53 @@ export interface ManualField {
 export interface RepeatGroupIdentity {
   groupKey: string;
   signature: string;
+}
+
+export class RepeatBindingStore {
+  private values = new Map<string, { entryId: string; epoch: number }>();
+  private currentEpoch = 0;
+
+  get epoch(): number {
+    return this.currentEpoch;
+  }
+
+  get(groupKey: string): string | undefined {
+    const record = this.values.get(groupKey);
+    return record?.epoch === this.currentEpoch ? record.entryId : undefined;
+  }
+
+  set(groupKey: string, entryId: string): this {
+    this.values.set(groupKey, { entryId, epoch: this.currentEpoch });
+    return this;
+  }
+
+  delete(groupKey: string): boolean {
+    return this.values.delete(groupKey);
+  }
+
+  has(groupKey: string): boolean {
+    return this.get(groupKey) !== undefined;
+  }
+
+  keys(): IterableIterator<string> {
+    return this.values.keys();
+  }
+
+  invalidate(): number {
+    this.currentEpoch += 1;
+    this.values.clear();
+    return this.currentEpoch;
+  }
+}
+
+export interface ChoiceGroupScope {
+  elements: HTMLInputElement[];
+  ambiguous: boolean;
+}
+
+export interface CachedTargetValidation {
+  valid: boolean;
+  reason?: "target_replaced" | "target_disconnected" | "target_ineligible" | "target_ignored" | "choice_already_selected" | "semantics_changed";
 }
 
 export interface FrameScan {
@@ -62,10 +109,21 @@ export function fileControlHasVisibleProxy(element: HTMLInputElement): boolean {
   const associated = escapedId ? ownerDocument.querySelector(`label[for="${escapedId}"]`) : null;
   const enclosing = element.closest("label, [class*='upload' i], [class*='attachment' i]");
   if ((associated && isElementVisible(associated)) || (enclosing && isElementVisible(enclosing))) return true;
-  const siblings = element.parentElement
-    ? Array.from(element.parentElement.children).filter((candidate) => candidate !== element)
-    : [element.previousElementSibling, element.nextElementSibling].filter((candidate): candidate is Element => Boolean(candidate));
-  return siblings.some((candidate) => isVisibleUploadProxy(candidate));
+  let branch: Element = element;
+  let container = element.parentElement;
+  for (let depth = 0; container && depth < 3; depth += 1) {
+    const nearby = Array.from(container.children).filter((candidate) => candidate !== branch);
+    for (const candidate of nearby) {
+      if (isVisibleUploadProxy(candidate)) return true;
+      const nested = Array.from(candidate.querySelectorAll("button, label, [role='button'], [class*='upload' i], [class*='attachment' i]"))
+        .slice(0, 24);
+      if (nested.some((item) => isVisibleUploadProxy(item))) return true;
+    }
+    if (container.tagName === "FORM") break;
+    branch = container;
+    container = container.parentElement;
+  }
+  return false;
 }
 
 function isVisibleUploadProxy(element: Element): boolean {
@@ -229,6 +287,46 @@ export function optionLabel(element: HTMLInputElement): string {
   return cleanText((wrapping as HTMLElement | null)?.innerText || wrapping?.textContent || element.value);
 }
 
+function defaultChoiceContainer(element: HTMLInputElement): Element | null {
+  return element.closest("fieldset, [role='radiogroup'], [role='group'], [class*='form-item' i], [class*='field' i], [class*='question' i], [data-field]");
+}
+
+/**
+ * A name is not a page-wide choice-group identifier: repeated ATS rows often
+ * clone it verbatim. Scope choices to one detected repeat root (or one bounded
+ * form container). Mixed owned/unowned candidates are ambiguous and must not
+ * be written as a group.
+ */
+export function scopeNamedChoiceGroup(
+  anchor: HTMLInputElement,
+  candidates: HTMLInputElement[],
+  repeatRootFor: (element: HTMLInputElement) => Element | null,
+  containerFor: (element: HTMLInputElement) => Element | null = defaultChoiceContainer,
+): ChoiceGroupScope {
+  const repeatRoots = new Map(candidates.map((candidate) => [candidate, repeatRootFor(candidate)]));
+  const hasRepeated = [...repeatRoots.values()].some(Boolean);
+  const hasUnowned = [...repeatRoots.values()].some((root) => !root);
+  if (hasRepeated && hasUnowned) return { elements: candidates, ambiguous: true };
+
+  const anchorRepeatRoot = repeatRoots.get(anchor) ?? null;
+  if (anchorRepeatRoot) {
+    return {
+      elements: candidates.filter((candidate) => repeatRoots.get(candidate) === anchorRepeatRoot),
+      ambiguous: false,
+    };
+  }
+
+  const containers = new Map(candidates.map((candidate) => [candidate, containerFor(candidate)]));
+  const hasContainer = [...containers.values()].some(Boolean);
+  const hasNoContainer = [...containers.values()].some((container) => !container);
+  if (hasContainer && hasNoContainer) return { elements: candidates, ambiguous: true };
+  const distinctContainers = new Set([...containers.values()].filter((container): container is Element => Boolean(container)));
+  if (distinctContainers.size > 1 || (!hasContainer && candidates.length > 1)) {
+    return { elements: candidates, ambiguous: true };
+  }
+  return { elements: candidates, ambiguous: false };
+}
+
 function elementControl(element: FillableElement, adapter: SiteAdapter): FieldControl {
   if (isDynamicChoiceElement(element, adapter)) return "combobox";
   if (isTextareaElement(element)) return "textarea";
@@ -244,7 +342,7 @@ export function resolveRepeatGroupIdentity(
   root: Element,
   signature: string,
   groupIds: WeakMap<Element, RepeatGroupIdentity>,
-  bindings: Map<string, string>,
+  bindings: RepeatBindingStore,
   allocateKey: () => string,
 ): { groupKey: string; targetEntryId?: string; invalidatedGroupKey?: string } {
   const previous = groupIds.get(root);
@@ -316,8 +414,8 @@ export function repeatGroupStructureSignature(
   return stableStructureHash([structuralToken(kind), String(position), ...rootShape, ...controls].join("|"));
 }
 
-export function repeatedMatchIdentity(baseElementId: string, groupKey?: string): string {
-  return groupKey ? `${baseElementId}@${groupKey}` : baseElementId;
+export function repeatedMatchIdentity(baseElementId: string, groupKey?: string, epoch?: number): string {
+  return groupKey ? `${baseElementId}@${groupKey}#${epoch ?? 0}` : baseElementId;
 }
 
 export function deduplicateManualFields(items: ManualField[]): ManualField[] {
@@ -339,6 +437,63 @@ export function snapshotTarget(target: FillTarget): ElementSnapshot[] {
       : element.textContent ?? "",
     checked: isInputElement(element) && ["radio", "checkbox"].includes(element.type) ? element.checked : undefined,
   }));
+}
+
+function sameTargetIdentity(cached: FillTarget, current: FillTarget): boolean {
+  const cachedItems = Array.isArray(cached) ? cached : [cached];
+  const currentItems = Array.isArray(current) ? current : [current];
+  return cachedItems.length === currentItems.length
+    && cachedItems.every((element, index) => element === currentItems[index]);
+}
+
+function descriptorSnapshot(descriptor: FieldDescriptor): string {
+  const repeated = descriptor.repeated
+    ? {
+        groupKey: descriptor.repeated.groupKey,
+        groupLabel: descriptor.repeated.groupLabel,
+        kind: descriptor.repeated.kind,
+        field: descriptor.repeated.field,
+        targetEntryId: descriptor.repeated.targetEntryId ?? "",
+      }
+    : null;
+  return JSON.stringify({
+    label: descriptor.label,
+    ariaLabel: descriptor.ariaLabel,
+    placeholder: descriptor.placeholder,
+    name: descriptor.name,
+    autocomplete: descriptor.autocomplete,
+    controlType: descriptor.controlType,
+    required: descriptor.required,
+    multiple: descriptor.multiple,
+    options: (descriptor.options ?? []).map((option) => ({ label: option.label, value: option.value, disabled: option.disabled })),
+    repeated,
+  });
+}
+
+/**
+ * Re-checks a cached target immediately before writing. Current values are
+ * read only to prove the control is still blank; they are never used to derive
+ * or retain repeat bindings.
+ */
+export function validateCachedFillTarget(
+  cachedTarget: FillTarget,
+  currentTarget: FillTarget,
+  cachedDescriptor: FieldDescriptor,
+  currentDescriptor: FieldDescriptor,
+  adapter: SiteAdapter,
+): CachedTargetValidation {
+  if (!sameTargetIdentity(cachedTarget, currentTarget)) return { valid: false, reason: "target_replaced" };
+  const elements = Array.isArray(currentTarget) ? currentTarget : [currentTarget];
+  if (elements.some((element) => !element.isConnected)) return { valid: false, reason: "target_disconnected" };
+  if (elements.some((element) => !isEligible(element, adapter))) return { valid: false, reason: "target_ineligible" };
+  if (elements.some((element) => isIgnoredByAdapter(element, adapter))) return { valid: false, reason: "target_ignored" };
+  if (elements.some((element) => isInputElement(element) && ["radio", "checkbox"].includes(element.type) && element.checked)) {
+    return { valid: false, reason: "choice_already_selected" };
+  }
+  if (descriptorSnapshot(cachedDescriptor) !== descriptorSnapshot(currentDescriptor)) {
+    return { valid: false, reason: "semantics_changed" };
+  }
+  return { valid: true };
 }
 
 function setNativeProperty(element: Element, property: "value" | "checked", value: string | boolean): void {
