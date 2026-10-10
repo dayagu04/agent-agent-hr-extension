@@ -1,8 +1,9 @@
-import type { ProfileData, ProfileFieldKey } from "./types";
+import { repeatedProfileKey, resolveRepeatedValue } from "./repeat-context.ts";
+import type { ProfileData, ProfileFieldKey, RepeatedFieldContext, StructuredEntryField } from "./types";
 
 export type FieldControl =
   | "text" | "textarea" | "email" | "tel" | "url" | "date" | "month" | "number"
-  | "select" | "radio" | "checkbox" | "contenteditable" | "hidden" | "unknown";
+  | "select" | "radio" | "checkbox" | "combobox" | "file" | "contenteditable" | "hidden" | "unknown";
 
 export interface FieldOption {
   value: string;
@@ -24,6 +25,7 @@ export interface FieldDescriptor {
   hasValue?: boolean;
   multiple?: boolean;
   options?: FieldOption[];
+  repeated?: RepeatedFieldContext;
 }
 
 export interface FieldDecision {
@@ -32,6 +34,8 @@ export interface FieldDecision {
   confidence: number;
   reason: string;
   value: string | string[] | null;
+  sourceValue?: string;
+  entrySource?: RepeatedFieldContext;
 }
 
 export interface RequiredCoverage {
@@ -162,6 +166,17 @@ export function classifyDescriptor(descriptor: FieldDescriptor): Omit<FieldDecis
   return { profileKey: bestKey, confidence: bestScore, reason: "matched" };
 }
 
+/**
+ * Resolves only the semantic owner of a field.  Eligibility state (including
+ * an existing value, disabled, or readonly state) is intentionally ignored so
+ * non-fillable controls can still guard against an unsafe scalar duplicate.
+ */
+export function semanticProfileKey(descriptor: FieldDescriptor, explicitKey?: ProfileFieldKey): ProfileFieldKey | null {
+  if (descriptor.repeated) return repeatedProfileKey(descriptor.repeated);
+  if (explicitKey) return explicitKey;
+  return classifyDescriptor(descriptor).profileKey;
+}
+
 const CHOICE_SYNONYMS = [
   ["男", "male", "m", "man"],
   ["女", "female", "f", "woman"],
@@ -177,14 +192,18 @@ function choiceTokens(value: unknown): Set<string> {
 
 function matchChoice(value: string, options: FieldOption[]): { value: string | null; reason: string } {
   const sourceTokens = choiceTokens(value);
-  const matches = options.filter((option) => {
-    if (option.disabled) return false;
+  const writableOptions = options.filter((option) => !option.disabled);
+  const matches = writableOptions.filter((option) => {
     const optionTokens = choiceTokens(option.label || option.value);
     return [...sourceTokens].some((token) => optionTokens.has(token));
   });
-  const values = [...new Set(matches.map((option) => option.value))];
-  if (values.length === 1) return { value: values[0], reason: "choice_matched" };
-  if (values.length > 1) return { value: null, reason: "ambiguous_choice" };
+  if (matches.length > 1) return { value: null, reason: "ambiguous_choice" };
+  if (matches.length === 1) {
+    const [match] = matches;
+    const valueOwners = writableOptions.filter((option) => option.value === match.value);
+    if (valueOwners.length !== 1) return { value: null, reason: "ambiguous_choice" };
+    return { value: match.value, reason: "choice_matched" };
+  }
   return { value: null, reason: "choice_not_found" };
 }
 
@@ -192,29 +211,35 @@ function splitMulti(value: string): string[] {
   return value.split(/[,，、;；\n]/).map((item) => item.trim()).filter(Boolean);
 }
 
-function normalizeDate(value: string, control: FieldControl): string | null {
+function normalizeDate(value: string, control: FieldControl): { value: string | null; reason: string } {
   const parts = normalizeText(value)
     .replace(/日$/u, "")
     .replace(/[年月/.]/gu, "-")
     .replace(/-+$/u, "")
     .split("-")
     .map((part) => part.trim());
-  if (parts.length < 2 || parts.length > 3 || parts.some((part) => !/^\d+$/.test(part))) return null;
+  if (parts.length < 2 || parts.length > 3 || parts.some((part) => !/^\d+$/.test(part))) {
+    return { value: null, reason: "invalid_date" };
+  }
+  if (control === "date" && parts.length !== 3) {
+    return { value: null, reason: "date_precision_insufficient" };
+  }
   const year = Number(parts[0]);
   const month = Number(parts[1]);
   const day = Number(parts[2] ?? 1);
   const date = new Date(Date.UTC(year, month - 1, day));
-  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return null;
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) {
+    return { value: null, reason: "invalid_date" };
+  }
   const monthText = String(month).padStart(2, "0");
-  if (control === "month") return `${year}-${monthText}`;
-  return `${year}-${monthText}-${String(day).padStart(2, "0")}`;
+  if (control === "month") return { value: `${year}-${monthText}`, reason: "date_normalized" };
+  return { value: `${year}-${monthText}-${String(day).padStart(2, "0")}`, reason: "date_normalized" };
 }
 
 function prepareValue(spec: FieldSpec, value: string, descriptor: FieldDescriptor): { value: string | string[] | null; reason: string } {
   if (!spec.controls.has(descriptor.controlType)) return { value: null, reason: "unsupported_control" };
   if (["date", "month"].includes(descriptor.controlType)) {
-    const normalized = normalizeDate(value, descriptor.controlType);
-    return normalized ? { value: normalized, reason: "date_normalized" } : { value: null, reason: "invalid_date" };
+    return normalizeDate(value, descriptor.controlType);
   }
   const options = descriptor.options ?? [];
   if (descriptor.controlType === "select" || descriptor.controlType === "radio") {
@@ -222,7 +247,10 @@ function prepareValue(spec: FieldSpec, value: string, descriptor: FieldDescripto
       const selected: string[] = [];
       for (const item of splitMulti(value)) {
         const match = matchChoice(item, options);
-        if (!match.value) return { value: null, reason: "partial_multi_choice" };
+        if (!match.value) {
+          return { value: null, reason: match.reason === "ambiguous_choice" ? "ambiguous_choice" : "partial_multi_choice" };
+        }
+        if (selected.includes(match.value)) return { value: null, reason: "ambiguous_choice" };
         selected.push(match.value);
       }
       return selected.length ? { value: selected, reason: "choices_matched" } : { value: null, reason: "choice_not_found" };
@@ -233,12 +261,65 @@ function prepareValue(spec: FieldSpec, value: string, descriptor: FieldDescripto
     const selected: string[] = [];
     for (const item of splitMulti(value)) {
       const match = matchChoice(item, options);
-      if (!match.value) return { value: null, reason: "partial_multi_choice" };
+      if (!match.value) {
+        return { value: null, reason: match.reason === "ambiguous_choice" ? "ambiguous_choice" : "partial_multi_choice" };
+      }
+      if (selected.includes(match.value)) return { value: null, reason: "ambiguous_choice" };
       selected.push(match.value);
     }
     return selected.length ? { value: selected, reason: "choices_matched" } : { value: null, reason: "choice_not_found" };
   }
   return value.trim() ? { value: value.trim(), reason: "value_ready" } : { value: null, reason: "missing_profile_value" };
+}
+
+export function isAiPolishAllowed(descriptor: FieldDescriptor, profileKey: ProfileFieldKey): boolean {
+  if (descriptor.repeated) return descriptor.repeated.field === "description";
+  return ["summary", "experience", "projects"].includes(profileKey);
+}
+
+const REPEATED_FIELD_CONTROLS: Record<StructuredEntryField, Set<FieldControl>> = {
+  organization: new Set(TEXT),
+  role: new Set(TEXT),
+  name: new Set(TEXT),
+  school: new Set([...TEXT, ...CHOICE]),
+  major: new Set([...TEXT, ...CHOICE]),
+  degree: new Set([...TEXT, ...CHOICE]),
+  gpa: new Set([...TEXT, "number"]),
+  startDate: new Set([...TEXT, "date", "month"]),
+  endDate: new Set([...TEXT, "date", "month"]),
+  date: new Set([...TEXT, "date", "month"]),
+  location: new Set([...TEXT, ...CHOICE]),
+  link: new Set([...TEXT, "url"]),
+  description: new Set(TEXT),
+};
+
+function matchRepeatedDescriptor(descriptor: FieldDescriptor, profile: ProfileData): FieldDecision {
+  const context = descriptor.repeated!;
+  const profileKey = repeatedProfileKey(context);
+  if (!profileKey) {
+    return { action: "manual", profileKey: null, confidence: 1, reason: "unsupported_repeated_field", value: null, entrySource: context };
+  }
+  const resolved = resolveRepeatedValue(profile, context);
+  if (resolved.value === null) {
+    return { action: "manual", profileKey, confidence: 1, reason: resolved.reason, value: null, entrySource: context };
+  }
+  if (!resolved.value) {
+    return { action: "manual", profileKey, confidence: 1, reason: "missing_profile_value", value: null, entrySource: context };
+  }
+  const prepared = prepareValue(
+    { key: profileKey, aliases: [], controls: REPEATED_FIELD_CONTROLS[context.field] },
+    resolved.value,
+    descriptor,
+  );
+  return {
+    action: prepared.value === null ? "manual" : "fill",
+    profileKey,
+    confidence: 1,
+    reason: prepared.reason === "value_ready" ? "record_value_ready" : prepared.reason,
+    value: prepared.value,
+    sourceValue: resolved.value,
+    entrySource: context,
+  };
 }
 
 export function matchDescriptor(
@@ -250,6 +331,14 @@ export function matchDescriptor(
   if (descriptor.disabled) return { action: "skip", profileKey: null, confidence: 1, reason: "disabled_field", value: null };
   if (descriptor.readOnly) return { action: "skip", profileKey: null, confidence: 1, reason: "readonly_field", value: null };
   if (descriptor.hasValue) return { action: "skip", profileKey: null, confidence: 1, reason: "already_filled", value: null };
+  if (descriptor.controlType === "file") {
+    return { action: "manual", profileKey: null, confidence: 1, reason: "attachment_user_required", value: null };
+  }
+  if (descriptor.controlType === "combobox") {
+    const classification = classifyDescriptor(descriptor);
+    return { action: "manual", ...classification, reason: "dynamic_choice_requires_user_action", value: null };
+  }
+  if (descriptor.repeated) return matchRepeatedDescriptor(descriptor, profile);
 
   const classification = explicitKey
     ? { profileKey: explicitKey, confidence: 0.99, reason: "user_mapping" }
@@ -268,5 +357,6 @@ export function matchDescriptor(
     confidence: classification.confidence,
     reason: prepared.reason,
     value: prepared.value,
+    ...(prepared.value === null ? {} : { sourceValue: value.trim() }),
   };
 }

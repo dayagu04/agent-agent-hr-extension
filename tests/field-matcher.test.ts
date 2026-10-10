@@ -3,8 +3,8 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-import { matchDescriptor, summarizeRequiredCoverage, type FieldDecision, type FieldDescriptor } from "../src/field-matcher.ts";
-import { EMPTY_PROFILE, type ProfileData } from "../src/types.ts";
+import { isAiPolishAllowed, matchDescriptor, summarizeRequiredCoverage, type FieldDecision, type FieldDescriptor } from "../src/field-matcher.ts";
+import { EMPTY_PROFILE, type ProfileData, type ProfileFieldKey, type StructuredEntryField, type StructuredEntryKind } from "../src/types.ts";
 
 interface ContractCase {
   id: string;
@@ -59,4 +59,32 @@ test("visible required manual fields are counted instead of silently omitted", (
     requiredManual: 1,
     complete: false,
   });
+});
+
+test("AI polish is limited to narrative fields inside repeated records", () => {
+  const repeated = (kind: StructuredEntryKind, field: StructuredEntryField): FieldDescriptor => ({
+    label: "重复经历字段",
+    controlType: "text",
+    repeated: {
+      groupKey: `${kind}-row-1`,
+      groupLabel: "重复经历第 1 行",
+      kind,
+      field,
+      targetEntryId: `${kind}-1`,
+    },
+  });
+  const policyCases: Array<[StructuredEntryKind, StructuredEntryField, ProfileFieldKey, boolean]> = [
+    ["experience", "description", "experience", true],
+    ["experience", "organization", "experience", false],
+    ["experience", "role", "experience", false],
+    ["education", "school", "school", false],
+    ["project", "name", "projects", false],
+    ["experience", "location", "experience", false],
+    ["experience", "startDate", "experience", false],
+  ];
+  for (const [kind, field, key, expected] of policyCases) {
+    assert.equal(isAiPolishAllowed(repeated(kind, field), key), expected, `${kind}.${field}`);
+  }
+  assert.equal(isAiPolishAllowed({ label: "个人简介", controlType: "textarea" }, "summary"), true);
+  assert.equal(isAiPolishAllowed({ label: "姓名", controlType: "text" }, "fullName"), false);
 });
