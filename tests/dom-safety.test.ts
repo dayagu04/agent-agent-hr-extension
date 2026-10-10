@@ -6,27 +6,32 @@ import {
   collectScanDocuments,
   deduplicateManualFields,
   describeField,
+  duplicateSemanticCandidateIds,
   fillTarget,
   isEligible,
   RepeatBindingStore,
+  registerFrameLoadListeners,
   repeatedMatchIdentity,
   repeatGroupStructureSignature,
   resolveRepeatGroupIdentity,
   scopeNamedChoiceGroup,
+  selectHasCurrentValue,
   validateCachedFillTarget,
   type RepeatGroupIdentity,
 } from "../src/dom-safety.ts";
-import { matchDescriptor } from "../src/field-matcher.ts";
-import { getSiteAdapter } from "../src/site-adapters.ts";
+import { matchDescriptor, type FieldDecision, type FieldDescriptor } from "../src/field-matcher.ts";
+import { getSiteAdapter, isIgnoredByAdapter } from "../src/site-adapters.ts";
 import { EMPTY_PROFILE, type ProfileData } from "../src/types.ts";
 
 class FakeEvent {
   readonly type: string;
   readonly bubbles: boolean;
+  readonly target: FakeElement | null;
 
-  constructor(type: string, options?: { bubbles?: boolean }) {
+  constructor(type: string, options?: { bubbles?: boolean; target?: FakeElement }) {
     this.type = type;
     this.bubbles = Boolean(options?.bubbles);
+    this.target = options?.target ?? null;
   }
 }
 
@@ -41,6 +46,7 @@ class FakeDocument {
   };
   frames: FakeFrame[] = [];
   controls: FakeElement[] = [];
+  private listeners = new Map<string, Set<(event: FakeEvent) => void>>();
 
   constructor(url: string) {
     this.location = { href: url };
@@ -59,6 +65,20 @@ class FakeDocument {
 
   querySelector(): FakeElement | null {
     return null;
+  }
+
+  addEventListener(type: string, listener: (event: FakeEvent) => void): void {
+    const listeners = this.listeners.get(type) ?? new Set();
+    listeners.add(listener);
+    this.listeners.set(type, listeners);
+  }
+
+  removeEventListener(type: string, listener: (event: FakeEvent) => void): void {
+    this.listeners.get(type)?.delete(listener);
+  }
+
+  emit(type: string, target: FakeElement): void {
+    for (const listener of this.listeners.get(type) ?? []) listener(new FakeEvent(type, { target }));
   }
 }
 
@@ -82,6 +102,9 @@ class FakeElement {
   innerText = "";
   isContentEditable = false;
   isConnected = true;
+  effectiveDisabled = false;
+  ignoredByAdapter = false;
+  form: FakeElement | null = null;
   display = "block";
   visibility = "visible";
   width = 180;
@@ -125,10 +148,19 @@ class FakeElement {
 
   closest(selector: string): FakeElement | null {
     if (this.proxy && /(label|upload|attachment)/i.test(selector)) return this.proxy;
+    if (this.ignoredByAdapter && /(captcha|verify|password|sms|code)/i.test(selector)) return this;
     return null;
   }
 
-  matches(): boolean {
+  matches(selector = ""): boolean {
+    if (selector === ":disabled") {
+      if (this.disabled || this.effectiveDisabled) return true;
+      let current = this.parentElement;
+      while (current) {
+        if (current.tagName === "FIELDSET" && current.hasAttribute("disabled")) return true;
+        current = current.parentElement;
+      }
+    }
     return false;
   }
 
@@ -230,6 +262,21 @@ test("a cross-origin application iframe is not traversed and is reported manual"
     required: false,
   }]);
   assert.equal(frame.contentDocumentReads, 1);
+});
+
+test("frame load listeners cover every scanned same-origin document, including nested iframe reloads", () => {
+  const root = new FakeDocument("https://jobs.bytedance.com/apply");
+  const child = new FakeDocument("https://jobs.bytedance.com/apply/embedded");
+  const nestedFrame = new FakeFrame(child);
+  nestedFrame.title = "nested application section";
+  let reloads = 0;
+  const cleanups = registerFrameLoadListeners([asDocument(root), asDocument(child)], () => { reloads += 1; });
+
+  child.emit("load", nestedFrame);
+  assert.equal(reloads, 1);
+  for (const cleanup of cleanups) cleanup();
+  child.emit("load", nestedFrame);
+  assert.equal(reloads, 1);
 });
 
 test("a hidden file input without a visible proxy is ignored, while a bounded outer-sibling upload button stays manual", () => {
@@ -342,13 +389,13 @@ test("an unchanged repeat row loses its binding after a new page scan epoch", ()
   assert.notEqual(repeatedMatchIdentity("field-1", first.groupKey, bindings.epoch), firstMatchId);
 });
 
-test("same-name choices are scoped to one repeat row and filling a bound row does not touch its sibling", () => {
+test("same-name checkboxes are scoped to one repeat row and filling a bound row does not touch its sibling", () => {
   const document = new FakeDocument("https://app.mokahr.com/apply");
   const rowOne = new FakeElement("div", document);
   const rowTwo = new FakeElement("div", document);
   const makeChoice = (row: FakeElement, value: string) => {
     const input = new FakeElement("input", document);
-    input.type = "radio";
+    input.type = "checkbox";
     input.name = "current-role";
     input.value = value;
     input.parentElement = row;
@@ -381,6 +428,63 @@ test("same-name choices are scoped to one repeat row and filling a bound row doe
   assert.equal(rowTwoYes.checked, false);
   assert.equal(rowTwoNo.checked, false);
   assert.notEqual(first.groupKey, second.groupKey);
+});
+
+test("same-form radios spanning repeat roots are rejected before any fill", () => {
+  const document = new FakeDocument("https://app.mokahr.com/apply");
+  const form = new FakeElement("form", document);
+  const rowOne = new FakeElement("div", document);
+  const rowTwo = new FakeElement("div", document);
+  const createRadio = (row: FakeElement, value: string) => {
+    const input = new FakeElement("input", document);
+    input.type = "radio";
+    input.name = "employment-status";
+    input.value = value;
+    input.form = form;
+    input.parentElement = row;
+    return input;
+  };
+  const candidates = [
+    createRadio(rowOne, "current"),
+    createRadio(rowOne, "former"),
+    createRadio(rowTwo, "current"),
+    createRadio(rowTwo, "former"),
+  ].map(asInput);
+
+  const policy = scopeNamedChoiceGroup(candidates[0], candidates, (candidate) => candidate.parentElement);
+  assert.deepEqual(policy, {
+    elements: candidates,
+    ambiguous: true,
+    reason: "radio_group_crosses_repeat_roots",
+  });
+});
+
+test("a checked disabled or adapter-ignored member rejects the entire named choice group", () => {
+  const document = new FakeDocument("https://app.mokahr.com/apply");
+  const adapter = getSiteAdapter(document.location.href);
+  const rowOne = new FakeElement("div", document);
+  const rowTwo = new FakeElement("div", document);
+  const visible = new FakeElement("input", document);
+  visible.type = "radio";
+  visible.name = "shared-radio";
+  visible.parentElement = rowOne;
+  const externalChecked = new FakeElement("input", document);
+  externalChecked.type = "radio";
+  externalChecked.name = "shared-radio";
+  externalChecked.parentElement = rowTwo;
+  externalChecked.disabled = true;
+  externalChecked.ignoredByAdapter = true;
+  externalChecked.checked = true;
+  assert.equal(isEligible(asElement(externalChecked), adapter), false);
+  assert.equal(isIgnoredByAdapter(asElement(externalChecked), adapter), true);
+
+  const candidates = [asInput(visible), asInput(externalChecked)];
+  const policy = scopeNamedChoiceGroup(asInput(visible), candidates, (candidate) => candidate.parentElement);
+  assert.deepEqual(policy, {
+    elements: candidates,
+    ambiguous: true,
+    reason: "choice_group_has_existing_selection",
+  });
 });
 
 test("mixed repeat ownership makes a same-name choice group ambiguous", () => {
@@ -458,6 +562,136 @@ test("cached radio groups are rejected when the page already selected an option"
     validateCachedFillTarget(target, target, descriptor, { ...descriptor }, adapter),
     { valid: false, reason: "choice_already_selected" },
   );
+});
+
+test("a non-empty first select option is already filled, while an empty placeholder remains eligible", () => {
+  const document = new FakeDocument("https://jobs.bytedance.com/apply");
+  const adapter = getSiteAdapter(document.location.href);
+  const select = new FakeElement("select", document);
+  select.setAttribute("aria-label", "学历");
+  select.options = [{ text: "请选择", value: "", disabled: false, selected: true }];
+  select.value = "";
+  select.selectedIndex = 0;
+  const blankDescriptor = describeField(asElement(select), adapter);
+  assert.equal(selectHasCurrentValue(asElement(select) as unknown as HTMLSelectElement), false);
+  assert.equal(isEligible(asElement(select), adapter), true);
+  assert.equal(blankDescriptor.hasValue, false);
+
+  select.options = [{ text: "本科", value: "bachelor", disabled: false, selected: true }];
+  select.value = "bachelor";
+  select.selectedIndex = 0;
+  const filledDescriptor = describeField(asElement(select), adapter);
+  assert.equal(selectHasCurrentValue(asElement(select) as unknown as HTMLSelectElement), true);
+  assert.equal(isEligible(asElement(select), adapter), false);
+  assert.equal(filledDescriptor.hasValue, true);
+  assert.equal(matchDescriptor(filledDescriptor, { ...EMPTY_PROFILE, degree: "本科" } as ProfileData).reason, "already_filled");
+  assert.deepEqual(
+    validateCachedFillTarget(asElement(select), asElement(select), blankDescriptor, filledDescriptor, adapter),
+    { valid: false, reason: "target_ineligible" },
+  );
+});
+
+test("effective fieldset and ARIA disabled or readonly state fail closed", () => {
+  const document = new FakeDocument("https://app.mokahr.com/apply");
+  const adapter = getSiteAdapter(document.location.href);
+
+  const fieldset = new FakeElement("fieldset", document);
+  fieldset.setAttribute("disabled", "");
+  const fieldsetInput = new FakeElement("input", document);
+  fieldsetInput.parentElement = fieldset;
+  assert.equal(isEligible(asElement(fieldsetInput), adapter), false);
+  assert.equal(describeField(asElement(fieldsetInput), adapter).disabled, true);
+
+  const disabledContainer = new FakeElement("div", document);
+  disabledContainer.setAttribute("aria-disabled", "true");
+  const ariaDisabledInput = new FakeElement("input", document);
+  ariaDisabledInput.parentElement = disabledContainer;
+  assert.equal(isEligible(asElement(ariaDisabledInput), adapter), false);
+  assert.equal(describeField(asElement(ariaDisabledInput), adapter).disabled, true);
+
+  const readonlyContainer = new FakeElement("div", document);
+  readonlyContainer.setAttribute("aria-readonly", "true");
+  const ariaReadonlyInput = new FakeElement("input", document);
+  ariaReadonlyInput.parentElement = readonlyContainer;
+  assert.equal(isEligible(asElement(ariaReadonlyInput), adapter), false);
+  assert.equal(describeField(asElement(ariaReadonlyInput), adapter).readOnly, true);
+});
+
+test("duplicate scalar school and experience semantics without repeat roots produce zero automatic fills", () => {
+  const document = new FakeDocument("https://careers.example.test/apply");
+  const adapter = getSiteAdapter(document.location.href);
+  const profile = {
+    ...EMPTY_PROFILE,
+    school: "示例大学",
+    experience: "脱敏工作经历",
+  } as ProfileData;
+  const cases: Array<{ id: string; descriptor: FieldDescriptor; decision: FieldDecision }> = [];
+  for (const [id, tagName, label] of [
+    ["school-a", "input", "学校名称"],
+    ["school-b", "input", "毕业院校"],
+    ["experience-a", "textarea", "工作经历"],
+    ["experience-b", "textarea", "实习经历"],
+  ] as const) {
+    const element = new FakeElement(tagName, document);
+    element.setAttribute("aria-label", label);
+    const descriptor = describeField(asElement(element), adapter);
+    const decision = matchDescriptor(descriptor, profile);
+    assert.equal(decision.action, "fill", `${id} precondition`);
+    cases.push({ id, descriptor, decision });
+  }
+  const unsafe = duplicateSemanticCandidateIds(cases.map(({ id, descriptor, decision }) => {
+    if (!decision.profileKey) throw new Error(`missing profile key for ${id}`);
+    return {
+      identity: id,
+      ownerDocument: asDocument(document),
+      profileKey: decision.profileKey,
+      repeated: Boolean(descriptor.repeated),
+    };
+  }));
+  assert.deepEqual([...unsafe].sort(), cases.map(({ id }) => id).sort());
+  const unexpectedFills = cases.filter(({ id, decision }) => decision.action === "fill" && !unsafe.has(id));
+  assert.equal(unexpectedFills.length, 0);
+});
+
+test("one recognized repeat field and one scalar fallback with the same key both fail closed", () => {
+  const document = new FakeDocument("https://careers.example.test/apply");
+  const adapter = getSiteAdapter(document.location.href);
+  const profile = {
+    ...EMPTY_PROFILE,
+    school: "示例大学",
+    educationEntries: [{
+      id: "education-1",
+      school: "示例大学",
+      major: "示例专业",
+      degree: "本科",
+      startDate: "2020-09",
+      endDate: "2024-06",
+      gpa: "",
+      description: "",
+    }],
+  } as ProfileData;
+  const recognized: FieldDescriptor = {
+    label: "学校名称",
+    controlType: "text",
+    repeated: {
+      groupKey: "education-row-1",
+      groupLabel: "教育经历第 1 行",
+      kind: "education",
+      field: "school",
+      targetEntryId: "education-1",
+    },
+  };
+  const fallback: FieldDescriptor = { label: "毕业院校", controlType: "text" };
+  const recognizedDecision = matchDescriptor(recognized, profile);
+  const fallbackDecision = matchDescriptor(fallback, profile);
+  assert.equal(recognizedDecision.action, "fill");
+  assert.equal(fallbackDecision.action, "fill");
+  if (!recognizedDecision.profileKey || !fallbackDecision.profileKey) throw new Error("missing profile key");
+  const unsafe = duplicateSemanticCandidateIds([
+    { identity: "recognized", ownerDocument: asDocument(document), profileKey: recognizedDecision.profileKey, repeated: true },
+    { identity: "fallback", ownerDocument: asDocument(document), profileKey: fallbackDecision.profileKey, repeated: false },
+  ]);
+  assert.deepEqual([...unsafe].sort(), ["fallback", "recognized"]);
 });
 
 test("manual items with the same label stay distinct across document, group, and element identities", () => {

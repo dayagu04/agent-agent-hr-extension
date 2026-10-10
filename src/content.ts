@@ -4,6 +4,7 @@ import {
   collectScanDocuments,
   deduplicateManualFields,
   describeField,
+  duplicateSemanticCandidateIds,
   fillTarget,
   isEligible,
   isInputElement,
@@ -11,6 +12,7 @@ import {
   isTextareaElement,
   optionLabel,
   RepeatBindingStore,
+  registerFrameLoadListeners,
   repeatedMatchIdentity,
   repeatGroupStructureSignature,
   resolveRepeatGroupIdentity,
@@ -188,6 +190,13 @@ function installAssistant() {
       refreshTimer = window.setTimeout(() => {
         void refresh().then(() => showNotice("页面字段发生输入或选择；重复经历需重新绑定。"), (error) => showNotice(error instanceof Error ? error.message : "动态字段识别失败", true));
       }, 150);
+    }, () => {
+      invalidateRepeatSnapshot();
+      if (!panelOpen) return;
+      window.clearTimeout(refreshTimer);
+      refreshTimer = window.setTimeout(() => {
+        void refresh().then(() => showNotice("iframe 已加载；重复经历需重新绑定，表单控件已重新检查。"), (error) => showNotice(error instanceof Error ? error.message : "iframe 识别失败", true));
+      }, 100);
     });
     selectedIds = new Set(matches.filter((match) => hasRenderedOnce ? selectedIds.has(match.id) : match.confidence >= 0.78).map((match) => match.id));
     hasRenderedOnce = true;
@@ -392,16 +401,6 @@ function installAssistant() {
     if ((message as { type?: string }).type === "OPEN_ASSISTANT") void open();
   });
 
-  document.addEventListener("load", (event) => {
-    if (!(event.target instanceof HTMLIFrameElement)) return;
-    invalidateRepeatSnapshot();
-    if (!panelOpen) return;
-    window.clearTimeout(refreshTimer);
-    refreshTimer = window.setTimeout(() => {
-      void refresh().then(() => showNotice("iframe 已加载；重复经历需重新绑定，表单控件已重新检查。"), (error) => showNotice(error instanceof Error ? error.message : "iframe 识别失败", true));
-    }, 100);
-  }, true);
-
   function invalidateRepeatSnapshot() {
     repeatBindings.invalidate();
     for (const [id, descriptor] of descriptors) {
@@ -409,7 +408,13 @@ function installAssistant() {
     }
   }
 
-  function observeDocuments(documents: Document[], assistantHost: HTMLElement, onMutation: () => void, onPageActivity: () => void) {
+  function observeDocuments(
+    documents: Document[],
+    assistantHost: HTMLElement,
+    onMutation: () => void,
+    onPageActivity: () => void,
+    onFrameLoad: () => void,
+  ) {
     for (const observer of pageObservers) observer.disconnect();
     for (const cleanup of pageActivityCleanups) cleanup();
     pageActivityCleanups = documents.flatMap((scanDocument) => {
@@ -423,7 +428,7 @@ function installAssistant() {
         () => scanDocument.removeEventListener("input", listener, true),
         () => scanDocument.removeEventListener("change", listener, true),
       ];
-    });
+    }).concat(registerFrameLoadListeners(documents, onFrameLoad));
     pageObservers = documents.map((scanDocument) => {
       const observer = new MutationObserver((records) => {
         if (records.every((record) => scanDocument === document && isAssistantMutation(record, assistantHost))) return;
@@ -435,8 +440,8 @@ function installAssistant() {
         characterData: true,
         attributes: true,
         attributeFilter: [
-          "id", "name", "type", "role", "aria-label", "aria-required", "placeholder",
-          "disabled", "readonly", "required", "checked", "value", "class", "style",
+          "id", "name", "type", "form", "role", "aria-label", "aria-required", "aria-disabled", "aria-readonly", "placeholder",
+          "disabled", "readonly", "required", "checked", "selected", "value", "class", "style",
           "data-field", "data-index", "data-row-key", "data-key", "data-section", "data-type", "data-gugu-repeat-kind",
         ],
       });
@@ -574,6 +579,15 @@ function scanPage(
   const repeatGroupMap = new Map<string, RepeatGroupPrompt>();
   const processedChoices = new Set<FillableElement>();
   const documentIndexes = new Map(frameScan.documents.map((scanDocument, index) => [scanDocument, index]));
+  const semanticCandidates: Array<{
+    identity: string;
+    ownerDocument: Document;
+    profileKey: ProfileFieldKey;
+    repeated: boolean;
+    matchId?: string;
+    label: string;
+    required: boolean;
+  }> = [];
 
   const addMatch = (target: FillTarget, anchor: FillableElement, descriptor: FieldDescriptor) => {
     const baseElementId = elementIds.get(anchor) ?? `field-${nextElementId++}`;
@@ -581,14 +595,27 @@ function scanPage(
     const label = descriptor.label ?? "";
     const explicitKey = descriptor.repeated ? undefined : mappings[descriptorMappingKey(descriptor)];
     const decision = matchDescriptor(descriptor, profile, explicitKey);
+    const manualIdentity = [
+      `document-${documentIndexes.get(anchor.ownerDocument) ?? 0}`,
+      descriptor.repeated?.groupKey ?? "single",
+      baseElementId,
+    ].join(":");
+    const matchId = repeatedMatchIdentity(baseElementId, descriptor.repeated?.groupKey, repeatBindings.epoch);
+    if (decision.profileKey) {
+      semanticCandidates.push({
+        identity: manualIdentity,
+        ownerDocument: anchor.ownerDocument,
+        profileKey: decision.profileKey,
+        repeated: Boolean(descriptor.repeated),
+        ...(decision.action === "fill" ? { matchId } : {}),
+        label: label.slice(0, 100),
+        required: Boolean(descriptor.required),
+      });
+    }
     if (decision.action !== "fill" || !decision.profileKey || decision.value === null) {
       if (decision.action === "manual") {
         const item = {
-          identity: [
-            `document-${documentIndexes.get(anchor.ownerDocument) ?? 0}`,
-            descriptor.repeated?.groupKey ?? "single",
-            baseElementId,
-          ].join(":"),
+          identity: manualIdentity,
           label: label.slice(0, 100),
           reason: decision.reason,
           required: Boolean(descriptor.required),
@@ -598,7 +625,7 @@ function scanPage(
       }
       return;
     }
-    const id = repeatedMatchIdentity(baseElementId, descriptor.repeated?.groupKey, repeatBindings.epoch);
+    const id = matchId;
     elements.set(id, target);
     descriptors.set(id, descriptor);
     matches.push({
@@ -616,7 +643,6 @@ function scanPage(
   };
 
   for (const element of candidates) {
-    if (!isEligible(element, adapter) || isIgnoredByAdapter(element, adapter)) continue;
     if (isInputElement(element) && ["radio", "checkbox"].includes(element.type) && element.name) {
       if (processedChoices.has(element)) continue;
       const sameNamedChoices = candidates.filter((candidate): candidate is HTMLInputElement => (
@@ -624,17 +650,22 @@ function scanPage(
         && candidate.ownerDocument === element.ownerDocument
         && candidate.type === element.type
         && candidate.name === element.name
-        && isEligible(candidate, adapter)
-        && !isIgnoredByAdapter(candidate, adapter)
+        && candidate.form === element.form
       ));
+      const fillableChoices = sameNamedChoices.filter((candidate) => isEligible(candidate, adapter) && !isIgnoredByAdapter(candidate, adapter));
+      if (!fillableChoices.length) {
+        for (const candidate of sameNamedChoices) processedChoices.add(candidate);
+        continue;
+      }
+      const anchor = fillableChoices[0];
       const scoped = scopeNamedChoiceGroup(
-        element,
+        anchor,
         sameNamedChoices,
         (candidate) => findRepeatedRoot(candidate, adapter)?.root ?? null,
       );
       for (const candidate of scoped.elements) processedChoices.add(candidate);
       if (scoped.ambiguous) {
-        const ambiguousDescriptor = describeField(element, adapter);
+        const ambiguousDescriptor = describeField(anchor, adapter);
         const identityParts = scoped.elements.map((candidate) => {
           const id = elementIds.get(candidate) ?? `field-${nextElementId++}`;
           elementIds.set(candidate, id);
@@ -643,15 +674,15 @@ function scanPage(
         const item: ManualField = {
           identity: `document-${documentIndexes.get(element.ownerDocument) ?? 0}:ambiguous-choice:${identityParts.join("+")}`,
           label: (ambiguousDescriptor.label ?? "").slice(0, 100),
-          reason: "ambiguous_choice_group_scope",
+          reason: scoped.reason ?? "ambiguous_choice_group_scope",
           required: scoped.elements.some((candidate) => candidate.hasAttribute("required") || candidate.getAttribute("aria-required") === "true"),
         };
         if (item.required) manualRequired.push(item);
         else manualAttention.push(item);
         continue;
       }
-      const group = scoped.elements;
-      if (!group.length || group.some((candidate) => candidate.checked)) continue;
+      const group = scoped.elements.filter((candidate) => isEligible(candidate, adapter) && !isIgnoredByAdapter(candidate, adapter));
+      if (!group.length) continue;
       const descriptor = describeField(group[0], adapter);
       descriptor.repeated = describeRepeatedContext(group[0], descriptor, adapter, repeatBindings, repeatGroupIds, repeatStructureNodeIds);
       registerRepeatGroup(descriptor.repeated, profile, repeatGroupMap);
@@ -665,17 +696,43 @@ function scanPage(
       addMatch(group, group[0], descriptor);
       continue;
     }
+    if (!isEligible(element, adapter) || isIgnoredByAdapter(element, adapter)) continue;
     const descriptor = describeField(element, adapter);
     descriptor.repeated = describeRepeatedContext(element, descriptor, adapter, repeatBindings, repeatGroupIds, repeatStructureNodeIds);
     registerRepeatGroup(descriptor.repeated, profile, repeatGroupMap);
     addMatch(element, element, descriptor);
+  }
+  const duplicateSemanticIdentities = duplicateSemanticCandidateIds(semanticCandidates);
+  const duplicateMatchIds = new Set<string>();
+  const removeManualIdentity = (items: ManualField[], identity: string) => {
+    for (let index = items.length - 1; index >= 0; index -= 1) {
+      if (items[index].identity === identity) items.splice(index, 1);
+    }
+  };
+  for (const candidate of semanticCandidates) {
+    if (!duplicateSemanticIdentities.has(candidate.identity)) continue;
+    removeManualIdentity(manualRequired, candidate.identity);
+    removeManualIdentity(manualAttention, candidate.identity);
+    if (candidate.matchId) {
+      duplicateMatchIds.add(candidate.matchId);
+      elements.delete(candidate.matchId);
+      descriptors.delete(candidate.matchId);
+    }
+    const item: ManualField = {
+      identity: candidate.identity,
+      label: candidate.label,
+      reason: "duplicate_semantic_requires_user_action",
+      required: candidate.required,
+    };
+    if (item.required) manualRequired.push(item);
+    else manualAttention.push(item);
   }
   const activeRepeatGroups = new Set(repeatGroupMap.keys());
   for (const groupKey of repeatBindings.keys()) {
     if (!activeRepeatGroups.has(groupKey)) repeatBindings.delete(groupKey);
   }
   return {
-    matches: deduplicate(matches),
+    matches: deduplicate(matches.filter((match) => !duplicateMatchIds.has(match.id))),
     manualRequired: deduplicateManualFields(manualRequired),
     manualAttention: deduplicateManualFields(manualAttention),
     repeatGroups: [...repeatGroupMap.values()],
@@ -709,6 +766,9 @@ function isAttentionReason(reason: string): boolean {
     "cross_origin_iframe",
     "iframe_not_ready",
     "ambiguous_choice_group_scope",
+    "choice_group_has_existing_selection",
+    "radio_group_crosses_repeat_roots",
+    "duplicate_semantic_requires_user_action",
   ].includes(reason);
 }
 
@@ -732,6 +792,9 @@ function manualReason(reason: string): string {
     cross_origin_iframe: "跨域 iframe 无法读取，必须人工检查",
     iframe_not_ready: "iframe 尚未加载完成，请稍后重新识别",
     ambiguous_choice_group_scope: "同名单选或多选控件无法唯一归属到一个表单行，保持整组人工处理",
+    choice_group_has_existing_selection: "同名选择组已有页面选项，保持整组人工处理以免覆盖",
+    radio_group_crosses_repeat_roots: "原生单选组跨越多个重复行，浏览器会跨行互斥，保持整组人工处理",
+    duplicate_semantic_requires_user_action: "同一页面存在重复语义字段且至少一项未识别为重复行，保持整组人工处理",
   };
   return messages[reason] ?? "需要人工确认";
 }

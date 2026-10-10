@@ -1,5 +1,6 @@
 import type { FieldControl, FieldDescriptor } from "./field-matcher.ts";
 import { adapterLabelCandidates, isIgnoredByAdapter, type SiteAdapter } from "./site-adapters.ts";
+import type { ProfileFieldKey } from "./types.ts";
 
 export type FillableElement = HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | HTMLElement;
 export type FillTarget = FillableElement | HTMLInputElement[];
@@ -62,6 +63,14 @@ export class RepeatBindingStore {
 export interface ChoiceGroupScope {
   elements: HTMLInputElement[];
   ambiguous: boolean;
+  reason?: "choice_group_has_existing_selection" | "radio_group_crosses_repeat_roots" | "ambiguous_choice_group_scope";
+}
+
+export interface SemanticScanCandidate {
+  identity: string;
+  ownerDocument: Document;
+  profileKey: ProfileFieldKey;
+  repeated: boolean;
 }
 
 export interface CachedTargetValidation {
@@ -92,6 +101,33 @@ export function isElementVisible(element: Element): boolean {
   const style = view?.getComputedStyle(html);
   const rect = html.getBoundingClientRect();
   return Boolean(style && style.display !== "none" && style.visibility !== "hidden" && rect.width >= 4 && rect.height >= 4);
+}
+
+function elementOrAncestorHasAriaState(element: Element, name: "aria-disabled" | "aria-readonly"): boolean {
+  let current: Element | null = element;
+  while (current) {
+    if (current.getAttribute(name)?.trim().toLowerCase() === "true") return true;
+    current = current.parentElement;
+  }
+  return false;
+}
+
+export function isEffectivelyDisabled(element: FillableElement): boolean {
+  let selectorDisabled = false;
+  try { selectorDisabled = element.matches(":disabled"); } catch { selectorDisabled = false; }
+  return selectorDisabled
+    || ("disabled" in element && Boolean(element.disabled))
+    || elementOrAncestorHasAriaState(element, "aria-disabled");
+}
+
+export function isEffectivelyReadOnly(element: FillableElement): boolean {
+  return ("readOnly" in element && Boolean(element.readOnly))
+    || elementOrAncestorHasAriaState(element, "aria-readonly");
+}
+
+export function selectHasCurrentValue(element: HTMLSelectElement): boolean {
+  if (element.value !== "") return true;
+  return element.multiple && Array.from(element.options).some((option) => option.selected && option.value !== "");
 }
 
 function cleanText(value: string | null | undefined): string {
@@ -209,6 +245,20 @@ export function collectScanDocuments(root: Document): FrameScan {
   return { documents, manualFrames };
 }
 
+export function registerFrameLoadListeners(
+  documents: Document[],
+  onFrameLoad: (frame: HTMLIFrameElement) => void,
+): Array<() => void> {
+  return documents.map((scanDocument) => {
+    const listener = (event: Event) => {
+      const target = event.target as { tagName?: string } | null;
+      if (target?.tagName === "IFRAME") onFrameLoad(event.target as HTMLIFrameElement);
+    };
+    scanDocument.addEventListener("load", listener, true);
+    return () => scanDocument.removeEventListener("load", listener, true);
+  });
+}
+
 export function isDynamicChoiceElement(element: FillableElement, adapter: SiteAdapter): boolean {
   if (isSelectElement(element)) return false;
   return adapter.dynamicChoiceSelectors.some((selector) => {
@@ -217,16 +267,17 @@ export function isDynamicChoiceElement(element: FillableElement, adapter: SiteAd
 }
 
 export function isEligible(element: FillableElement, adapter: SiteAdapter): boolean {
-  if (isInputElement(element) && element.type === "file") return fileControlHasVisibleProxy(element);
+  if (isInputElement(element) && element.type === "file") {
+    return !isEffectivelyDisabled(element) && !isEffectivelyReadOnly(element) && fileControlHasVisibleProxy(element);
+  }
   if (!isElementVisible(element)) return false;
+  if (isEffectivelyDisabled(element) || isEffectivelyReadOnly(element)) return false;
   if (isInputElement(element)) {
     if (["hidden", "password", "submit", "button", "reset", "image"].includes(element.type)) return false;
-    if (element.disabled || element.readOnly) return false;
     if (!["checkbox", "radio"].includes(element.type) && element.value.trim()) return false;
   } else if (isTextareaElement(element) || isSelectElement(element)) {
-    if (element.disabled || ("readOnly" in element && element.readOnly)) return false;
     if (isTextareaElement(element) && element.value.trim()) return false;
-    if (isSelectElement(element) && element.value && element.selectedIndex > 0) return false;
+    if (isSelectElement(element) && selectHasCurrentValue(element)) return false;
   } else if (!isDynamicChoiceElement(element, adapter) && element.textContent?.trim()) return false;
   return true;
 }
@@ -263,12 +314,12 @@ export function describeField(element: FillableElement, adapter: SiteAdapter): F
     autocomplete: isInputElement(element) ? element.autocomplete : "",
     controlType: elementControl(element, adapter),
     required: element.hasAttribute("required") || element.getAttribute("aria-required") === "true" || Boolean(element.closest("[class*='required' i], .ant-form-item-required, .semi-form-field-label-required")),
-    disabled: "disabled" in element && Boolean(element.disabled),
-    readOnly: "readOnly" in element && Boolean(element.readOnly),
+    disabled: isEffectivelyDisabled(element),
+    readOnly: isEffectivelyReadOnly(element),
     hasValue: isInputElement(element) || isTextareaElement(element)
       ? Boolean(element.value.trim())
       : isSelectElement(element)
-        ? Boolean(element.value && element.selectedIndex > 0)
+        ? selectHasCurrentValue(element)
         : false,
     multiple: isSelectElement(element) && element.multiple,
     options: isSelectElement(element)
@@ -303,10 +354,19 @@ export function scopeNamedChoiceGroup(
   repeatRootFor: (element: HTMLInputElement) => Element | null,
   containerFor: (element: HTMLInputElement) => Element | null = defaultChoiceContainer,
 ): ChoiceGroupScope {
+  if (candidates.some((candidate) => candidate.checked)) {
+    return { elements: candidates, ambiguous: true, reason: "choice_group_has_existing_selection" };
+  }
   const repeatRoots = new Map(candidates.map((candidate) => [candidate, repeatRootFor(candidate)]));
   const hasRepeated = [...repeatRoots.values()].some(Boolean);
   const hasUnowned = [...repeatRoots.values()].some((root) => !root);
-  if (hasRepeated && hasUnowned) return { elements: candidates, ambiguous: true };
+  const distinctRepeatRoots = new Set([...repeatRoots.values()].filter((root): root is Element => Boolean(root)));
+  if (anchor.type === "radio" && distinctRepeatRoots.size > 1) {
+    return { elements: candidates, ambiguous: true, reason: "radio_group_crosses_repeat_roots" };
+  }
+  if (hasRepeated && hasUnowned) {
+    return { elements: candidates, ambiguous: true, reason: "ambiguous_choice_group_scope" };
+  }
 
   const anchorRepeatRoot = repeatRoots.get(anchor) ?? null;
   if (anchorRepeatRoot) {
@@ -319,12 +379,42 @@ export function scopeNamedChoiceGroup(
   const containers = new Map(candidates.map((candidate) => [candidate, containerFor(candidate)]));
   const hasContainer = [...containers.values()].some(Boolean);
   const hasNoContainer = [...containers.values()].some((container) => !container);
-  if (hasContainer && hasNoContainer) return { elements: candidates, ambiguous: true };
+  if (hasContainer && hasNoContainer) {
+    return { elements: candidates, ambiguous: true, reason: "ambiguous_choice_group_scope" };
+  }
   const distinctContainers = new Set([...containers.values()].filter((container): container is Element => Boolean(container)));
   if (distinctContainers.size > 1 || (!hasContainer && candidates.length > 1)) {
-    return { elements: candidates, ambiguous: true };
+    return { elements: candidates, ambiguous: true, reason: "ambiguous_choice_group_scope" };
   }
   return { elements: candidates, ambiguous: false };
+}
+
+/**
+ * Repeated controls are safe when every matching semantic is explicitly bound
+ * to a repeat context. If any matching field in the same document fell back to
+ * a scalar, fail the whole semantic group closed.
+ */
+export function duplicateSemanticCandidateIds(candidates: SemanticScanCandidate[]): Set<string> {
+  const byDocument = new Map<Document, Map<ProfileFieldKey, SemanticScanCandidate[]>>();
+  for (const candidate of candidates) {
+    let byKey = byDocument.get(candidate.ownerDocument);
+    if (!byKey) {
+      byKey = new Map();
+      byDocument.set(candidate.ownerDocument, byKey);
+    }
+    const group = byKey.get(candidate.profileKey) ?? [];
+    group.push(candidate);
+    byKey.set(candidate.profileKey, group);
+  }
+  const unsafe = new Set<string>();
+  for (const byKey of byDocument.values()) {
+    for (const group of byKey.values()) {
+      if (group.length > 1 && group.some((candidate) => !candidate.repeated)) {
+        for (const candidate of group) unsafe.add(candidate.identity);
+      }
+    }
+  }
+  return unsafe;
 }
 
 function elementControl(element: FillableElement, adapter: SiteAdapter): FieldControl {
@@ -530,9 +620,17 @@ export function fillTarget(target: FillTarget, value: string | string[]): boolea
       const requested = new Set(Array.isArray(value) ? value : [value]);
       if (!requested.size || [...requested].some((item) => !target.some((input) => input.value === item))) return false;
       if (target[0]?.type === "radio" && requested.size !== 1) return false;
+      if (target[0]?.type === "radio") {
+        const selected = target.find((input) => requested.has(input.value));
+        if (!selected) return false;
+        setNativeProperty(selected, "checked", true);
+        selected.dispatchEvent(basicEventFor(selected, "input"));
+        selected.dispatchEvent(basicEventFor(selected, "change"));
+        return true;
+      }
       for (const input of target) {
-        const checked = requested.has(input.value);
-        setNativeProperty(input, "checked", checked);
+        if (!requested.has(input.value)) continue;
+        setNativeProperty(input, "checked", true);
         input.dispatchEvent(basicEventFor(input, "input"));
         input.dispatchEvent(basicEventFor(input, "change"));
       }
