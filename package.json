@@ -1,13 +1,13 @@
 {
   "name": "agent-agent-hr-browser-extension",
-  "version": "0.1.0",
+  "version": "0.3.6",
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "vite build",
+    "build": "vite build && vite build --config vite.content.config.ts && vite build --config vite.auth-sync.config.ts",
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-strip-types --test tests/*.test.ts",
-    "check": "npm run typecheck && npm test && npm run build"
+    "check": "npm run typecheck && npm run build && npm test"
   },
   "dependencies": {
     "mammoth": "^1.12.3",

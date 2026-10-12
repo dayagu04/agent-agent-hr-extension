@@ -29,9 +29,17 @@ import {
   type RepeatGroupIdentity,
 } from "./dom-safety";
 import { isAiPolishAllowed, matchDescriptor, semanticProfileKey, type FieldDescriptor } from "./field-matcher";
+import { classifyRecruitmentPage } from "./page-classifier";
+import { profileEntry } from "./profile-entry";
+import {
+  normalizeProfileFillPlan,
+  publishedProfileRevision,
+  toRemoteDetectedField,
+  type RemoteProfileStatus,
+} from "./remote-autofill";
 import { inferStructuredEntryField, inferStructuredEntryKind, structuredEntryOptions, type StructuredEntryOption } from "./repeat-context.ts";
 import { getSiteAdapter, isIgnoredByAdapter, staticLabelTextOutsideControls, type SiteAdapter } from "./site-adapters";
-import type { FieldMatch, ProfileData, ProfileFieldKey, RepeatedFieldContext, StoredState, StructuredEntryKind } from "./types";
+import { EMPTY_PROFILE, type FieldMatch, type ProfileData, type ProfileFieldKey, type RepeatedFieldContext, type StoredState, type StructuredEntryKind } from "./types";
 
 declare global {
   interface Window { __guguApplicationAssistantInstalled?: boolean; }
@@ -44,6 +52,22 @@ interface RepeatGroupPrompt {
   selectedEntryId?: string;
   options: StructuredEntryOption[];
 }
+
+interface SafeFieldInventoryItem {
+  id: string;
+  descriptor: FieldDescriptor;
+}
+
+interface ScanPageResult {
+  matches: FieldMatch[];
+  manualRequired: ManualField[];
+  manualAttention: ManualField[];
+  repeatGroups: RepeatGroupPrompt[];
+  documents: Document[];
+  inventory: SafeFieldInventoryItem[];
+}
+
+type DataSourceMode = "remote" | "local";
 
 const FIELD_LABELS: Record<ProfileFieldKey, string> = {
   fullName: "姓名", preferredName: "常用称呼", phone: "手机号", email: "邮箱", gender: "性别",
@@ -69,13 +93,14 @@ function installAssistant() {
   const root = document.createElement("div");
   root.className = "gugu-root";
   root.innerHTML = `
-    <button class="gugu-bubble gugu-hidden" title="打开谷谷网申助手">谷</button>
+    <button class="gugu-bubble gugu-hidden" title="打开谷谷网申助手" aria-label="打开谷谷网申助手">谷</button>
     <aside class="gugu-panel gugu-hidden" aria-label="谷谷网申助手">
       <header class="gugu-header">
         <div class="gugu-brand"><span class="gugu-logo">谷</span><span class="gugu-title"><strong>谷谷网申助手</strong><small>先预览，再填写</small></span></div>
         <button class="gugu-icon-button" data-action="close" aria-label="关闭">×</button>
       </header>
-      <section class="gugu-summary"><div class="gugu-progress"><strong data-role="count">正在识别…</strong><span class="gugu-tier" data-role="tier">一档 · 本地填写</span></div><p>只处理空白且可见的字段，不会点击“提交”或同意协议。</p></section>
+      <section class="gugu-summary"><div class="gugu-progress"><strong data-role="count">正在识别…</strong><span class="gugu-tier" data-role="tier">服务端资料</span></div><p>默认只处理空白且可见的字段；不会点击“提交”或同意协议。</p><label class="gugu-overwrite"><input type="checkbox" data-action="overwrite-existing" />覆盖已有文字（仅普通文本框，写入前逐项预览，可撤销）</label></section>
+      <section class="gugu-source" data-role="source"></section>
       <div class="gugu-list" data-role="list"></div>
       <footer class="gugu-footer"><p class="gugu-notice" data-role="notice"></p><div class="gugu-actions"><button class="gugu-button gugu-secondary" data-action="rescan">重新识别</button><button class="gugu-button gugu-secondary gugu-hidden" data-action="undo">撤销本轮</button><button class="gugu-button gugu-primary" data-action="fill">填写已选字段</button></div></footer>
     </aside>`;
@@ -88,8 +113,10 @@ function installAssistant() {
   const count = root.querySelector<HTMLElement>("[data-role=count]")!;
   const tier = root.querySelector<HTMLElement>("[data-role=tier]")!;
   const notice = root.querySelector<HTMLElement>("[data-role=notice]")!;
+  const source = root.querySelector<HTMLElement>("[data-role=source]")!;
   const fillButton = root.querySelector<HTMLButtonElement>("[data-action=fill]")!;
   const undoButton = root.querySelector<HTMLButtonElement>("[data-action=undo]")!;
+  const overwriteCheckbox = root.querySelector<HTMLInputElement>("[data-action=overwrite-existing]")!;
   const elements = new Map<string, FillTarget>();
   const descriptors = new Map<string, FieldDescriptor>();
   const elementIds = new WeakMap<FillableElement, string>();
@@ -97,6 +124,13 @@ function installAssistant() {
   const repeatStructureNodeIds = new WeakMap<Element, string>();
   const adapter = getSiteAdapter();
   let state: StoredState | null = null;
+  let dataSource: DataSourceMode = "remote";
+  let authenticated = false;
+  let accountDisplayName = "";
+  let remoteProfileStatus: RemoteProfileStatus | null = null;
+  let profileErrorStatus: number | null = null;
+  let baseStateLoaded = false;
+  let emptyHint = "请选择资料来源后生成填写预览。";
   let matches: FieldMatch[] = [];
   let manualRequired: ManualField[] = [];
   let manualAttention: ManualField[] = [];
@@ -106,11 +140,20 @@ function installAssistant() {
   let selectedIds = new Set<string>();
   let hasRenderedOnce = false;
   let lastFill: ElementSnapshot[] = [];
+  let overwriteExisting = false;
+  let previewOverwriteExisting = false;
+  const previewOriginalValues = new Map<string, ElementSnapshot[]>();
   let panelOpen = false;
   let refreshTimer: number | undefined;
   let pageObservers: MutationObserver[] = [];
   let pageActivityCleanups: Array<() => void> = [];
   let assistantWriteInProgress = false;
+  let manualSurface = false;
+  let lastSurfaceLocation = "";
+  let refreshGeneration = 0;
+  let previewGeneration = 0;
+  let previewLocation = "";
+  let refreshInProgress = false;
 
   function showNotice(message: string, error = false) {
     notice.textContent = message;
@@ -121,10 +164,34 @@ function installAssistant() {
     return value.replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[character]!);
   }
 
+  function hasLocalProfile(): boolean {
+    return Boolean(state && (state.profile.fullName || state.profile.phone || state.profile.email || state.profile.resumeRawText));
+  }
+
+  function renderSource() {
+    if (!authenticated) {
+      source.innerHTML = `<div class="gugu-source-copy"><strong>登录后使用网申资料</strong><span>登录凭据只由扩展后台保管，不会交给招聘页面</span></div>
+        <div class="gugu-source-actions">
+          <button class="gugu-inline-button gugu-accent" data-action="login" type="button">登录谷谷账号</button>
+          <button class="gugu-inline-button" data-action="check-auth" type="button">我已登录，重新检查</button>
+        </div>`;
+      return;
+    }
+    const entry = profileEntry(remoteProfileStatus, profileErrorStatus);
+    source.innerHTML = `<div class="gugu-source-copy"><strong>${escapeHtml(accountDisplayName || "已登录谷谷账号")}${escapeHtml(entry.statusLabel)}</strong><span>${escapeHtml(entry.guidance)}</span>${remoteProfileStatus?.publishedStatus === "active" && (remoteProfileStatus.hasPendingImport || remoteProfileStatus.hasUnpublishedDraft) ? "<span>网站有待审核或待发布更新，本次仍使用已发布版本。</span>" : ""}</div>
+      <div class="gugu-source-actions">
+        <button class="gugu-inline-button gugu-accent" data-action="${entry.action}" type="button">${escapeHtml(entry.actionLabel)}</button>
+        <button class="gugu-inline-button" data-action="logout" type="button">退出助手账号</button>
+      </div>`;
+  }
+
   function render() {
+    renderSource();
+    overwriteCheckbox.checked = overwriteExisting;
+    overwriteCheckbox.disabled = dataSource !== "remote" || !authenticated || !remoteProfileStatus?.publishedRevision;
     count.textContent = `可填写 ${matches.length} 个 · 必填需人工 ${manualRequired.length} 个 · 其他需确认 ${manualAttention.length} 个 · ${adapter.name}`;
-    tier.textContent = state?.ai.enabled ? "二档 · AI 可选" : "一档 · 本地填写";
-    fillButton.disabled = matches.length === 0;
+    tier.textContent = remoteProfileStatus?.publishedRevision ? `服务端资料 v${remoteProfileStatus.publishedRevision}` : "服务端资料";
+    fillButton.disabled = matches.length === 0 || refreshInProgress || previewGeneration !== refreshGeneration || previewLocation !== location.href;
     undoButton.classList.toggle("gugu-hidden", lastFill.length === 0);
     const repeatSummary = repeatGroups.length
       ? `<div class="gugu-manual"><strong>重复经历必须先绑定档案记录</strong>${repeatGroups.map((group) => `<label>${escapeHtml(group.groupLabel)}<select data-action="bind-entry" data-group-key="${escapeHtml(group.groupKey)}" data-scan-epoch="${repeatBindings.epoch}"><option value="">请选择，不会默认使用第一条</option>${group.options.map((option) => `<option value="${escapeHtml(option.id)}" ${option.id === group.selectedEntryId ? "selected" : ""}>${escapeHtml(option.label)}</option>`).join("")}</select></label>`).join("")}</div>`
@@ -134,19 +201,23 @@ function installAssistant() {
       ? `<div class="gugu-manual"><strong>以下控件不会自动处理</strong>${manualItems.map((item) => `<p>${escapeHtml(item.label || "未命名字段")} · ${item.required ? "必填 · " : ""}${escapeHtml(manualReason(item.reason))}</p>`).join("")}</div>`
       : "";
     if (!matches.length) {
-      list.innerHTML = `<p class="gugu-empty">暂未找到能够可靠匹配的空白字段。可滚动页面让动态表单加载后，再重新识别。</p>${repeatSummary}${manualSummary}`;
+      list.innerHTML = `<p class="gugu-empty">${escapeHtml(emptyHint)}</p>${repeatSummary}${manualSummary}`;
       return;
     }
     list.innerHTML = matches.map((match) => {
-      const canPolish = state?.ai.enabled && match.aiPolishable && match.value.length >= 12;
+      const canPolish = match.source !== "remote" && state?.ai.enabled && match.aiPolishable && match.value.length >= 12;
       const displayValue = match.suggestedValue ?? match.value;
       const suggestion = match.suggestedValue
         ? `<small class="gugu-original">原文：${escapeHtml(match.value)}</small><textarea class="gugu-suggestion" data-action="edit-suggestion" aria-label="编辑 AI 建议">${escapeHtml(displayValue)}</textarea>${(match.factWarnings ?? []).map((warning) => `<small class="gugu-warning">⚠ ${escapeHtml(warning)}</small>`).join("")}`
         : `<span class="gugu-field-value" title="${escapeHtml(displayValue)}">${escapeHtml(displayValue) || "档案中暂无该字段"}</span>`;
       const checked = selectedIds.has(match.id);
-      const mappingControl = match.mappingLocked
-        ? `<span class="gugu-record-source">${escapeHtml(match.recordLabel ?? "已绑定结构化记录")}</span>`
-        : `<select class="gugu-key-select" data-action="map" aria-label="将${escapeHtml(match.label)}映射为">${fieldOptions(match.key)}</select>`;
+      const mappingControl = match.source === "remote"
+        ? `<span class="gugu-record-source">已发布资料${match.canonicalKey ? ` · ${escapeHtml(match.canonicalKey)}` : ""}${descriptors.get(match.id)?.hasValue ? " · 将覆盖已有文字" : ""}${match.sensitivity === "conditional" ? " · 条件信息，默认不选" : ""}</span>`
+        : match.mappingLocked
+          ? `<span class="gugu-record-source">${escapeHtml(match.recordLabel ?? "已绑定结构化记录")}</span>`
+          : match.key
+            ? `<select class="gugu-key-select" data-action="map" aria-label="将${escapeHtml(match.label)}映射为">${fieldOptions(match.key)}</select>`
+            : `<span class="gugu-record-source">需人工确认</span>`;
       return `<div class="gugu-row" data-id="${match.id}">
         <input class="gugu-check" type="checkbox" ${checked ? "checked" : ""} aria-label="填写${escapeHtml(match.label)}" />
         <span class="gugu-field"><span class="gugu-field-label" title="${escapeHtml(match.label)}">${escapeHtml(match.label)}</span>${mappingControl}${suggestion}</span>
@@ -156,67 +227,342 @@ function installAssistant() {
     }).join("") + repeatSummary + manualSummary;
   }
 
-  async function refresh() {
-    showNotice("");
+  async function loadBaseState(force = false) {
+    if (!force && baseStateLoaded && state) return;
     const response = await chrome.runtime.sendMessage({ type: "GET_ASSISTANT_STATE" }) as { ok: boolean; state?: StoredState; error?: string };
     if (!response.ok || !response.state) throw new Error(response.error || "无法读取个人档案");
     state = response.state;
     savedMappings = await loadSiteMappings();
-    const scan = scanPage(
-      state.profile,
-      elements,
-      descriptors,
-      adapter,
-      elementIds,
-      savedMappings,
-      repeatBindings,
-      repeatGroupIds,
-      repeatStructureNodeIds,
-    );
-    matches = scan.matches;
-    manualRequired = scan.manualRequired;
-    manualAttention = scan.manualAttention;
-    repeatGroups = scan.repeatGroups;
-    observeDocuments(scan.documents, host, () => {
-      invalidateRepeatSnapshot();
-      if (!panelOpen) return;
-      window.clearTimeout(refreshTimer);
-      refreshTimer = window.setTimeout(() => {
-        void refresh().then(() => showNotice("页面已变化；重复经历需重新绑定，识别结果已更新。"), (error) => showNotice(error instanceof Error ? error.message : "动态字段识别失败", true));
-      }, 350);
-    }, () => {
-      if (assistantWriteInProgress) return;
-      invalidateRepeatSnapshot();
-      if (!panelOpen) return;
-      window.clearTimeout(refreshTimer);
-      refreshTimer = window.setTimeout(() => {
-        void refresh().then(() => showNotice("页面字段发生输入或选择；重复经历需重新绑定。"), (error) => showNotice(error instanceof Error ? error.message : "动态字段识别失败", true));
-      }, 150);
-    }, () => {
-      invalidateRepeatSnapshot();
-      if (!panelOpen) return;
-      window.clearTimeout(refreshTimer);
-      refreshTimer = window.setTimeout(() => {
-        void refresh().then(() => showNotice("iframe 已加载；重复经历需重新绑定，表单控件已重新检查。"), (error) => showNotice(error instanceof Error ? error.message : "iframe 识别失败", true));
-      }, 100);
-    });
-    selectedIds = new Set(matches.filter((match) => hasRenderedOnce ? selectedIds.has(match.id) : match.confidence >= 0.78).map((match) => match.id));
-    hasRenderedOnce = true;
+    baseStateLoaded = true;
+  }
+
+  async function refreshAuthState() {
+    const response = await chrome.runtime.sendMessage({ type: "GET_AUTOFILL_SESSION" }) as {
+      ok?: boolean;
+      result?: { authenticated?: boolean; displayName?: string };
+      error?: string;
+    };
+    if (!response.ok) throw new Error(response.error || "无法检查登录状态。 ");
+    authenticated = response.result?.authenticated === true;
+    accountDisplayName = response.result?.displayName ?? "";
+    if (!authenticated) {
+      remoteProfileStatus = null;
+      profileErrorStatus = null;
+      return;
+    }
+    const status = await chrome.runtime.sendMessage({ type: "GET_PROFILE_STATUS" }) as {
+      ok?: boolean;
+      result?: RemoteProfileStatus;
+      error?: string;
+      status?: number;
+    };
+    if (!status.ok) {
+      remoteProfileStatus = null;
+      profileErrorStatus = typeof status.status === "number" ? status.status : null;
+      if (status.status === 401) {
+        authenticated = false;
+        accountDisplayName = "";
+        remoteProfileStatus = null;
+      }
+      throw new Error(status.error || "无法读取网申资料状态。");
+    }
+    remoteProfileStatus = status.result ?? null;
+    profileErrorStatus = null;
+  }
+
+  function stopScanObservers() {
+    for (const observer of pageObservers) observer.disconnect();
+    for (const cleanup of pageActivityCleanups) cleanup();
+    pageObservers = [];
+    pageActivityCleanups = [];
+    window.clearTimeout(refreshTimer);
+  }
+
+  function clearPreview(hint: string) {
+    refreshGeneration += 1;
+    refreshInProgress = false;
+    previewGeneration = 0;
+    previewLocation = "";
+    stopScanObservers();
+    elements.clear();
+    descriptors.clear();
+    previewOriginalValues.clear();
+    previewOverwriteExisting = false;
+    matches = [];
+    manualRequired = [];
+    manualAttention = [];
+    repeatGroups = [];
+    selectedIds.clear();
+    hasRenderedOnce = false;
+    emptyHint = hint;
     render();
   }
 
+  const remoteStructuralReasons = new Set([
+    "attachment_user_required", "dynamic_choice_requires_user_action", "repeated_group_unbound",
+    "repeated_group_target_missing", "unsupported_repeated_field", "cross_origin_iframe", "iframe_not_ready",
+    "ambiguous_choice_group_scope", "choice_group_has_existing_selection", "radio_group_crosses_repeat_roots",
+    "duplicate_semantic_requires_user_action",
+  ]);
+
+  function installScanObservers(scan: ScanPageResult, generation: number) {
+    observeDocuments(scan.documents, host, () => {
+      if (generation !== refreshGeneration) return;
+      invalidateRepeatSnapshot();
+      if (!panelOpen) return;
+      const invalidatedGeneration = ++refreshGeneration;
+      refreshInProgress = true;
+      fillButton.disabled = true;
+      window.clearTimeout(refreshTimer);
+      refreshTimer = window.setTimeout(() => {
+        if (invalidatedGeneration !== refreshGeneration) return;
+        void refresh().then(() => showNotice("页面已变化，识别结果已更新。"), (error) => showNotice(error instanceof Error ? error.message : "动态字段识别失败", true));
+      }, 350);
+    }, () => {
+      if (generation !== refreshGeneration) return;
+      if (assistantWriteInProgress) return;
+      invalidateRepeatSnapshot();
+      if (!panelOpen) return;
+      const invalidatedGeneration = ++refreshGeneration;
+      refreshInProgress = true;
+      fillButton.disabled = true;
+      window.clearTimeout(refreshTimer);
+      refreshTimer = window.setTimeout(() => {
+        if (invalidatedGeneration !== refreshGeneration) return;
+        void refresh().then(() => showNotice("页面字段发生输入或选择，预览已更新。"), (error) => showNotice(error instanceof Error ? error.message : "动态字段识别失败", true));
+      }, 150);
+    }, () => {
+      if (generation !== refreshGeneration) return;
+      invalidateRepeatSnapshot();
+      if (!panelOpen) return;
+      const invalidatedGeneration = ++refreshGeneration;
+      refreshInProgress = true;
+      fillButton.disabled = true;
+      window.clearTimeout(refreshTimer);
+      refreshTimer = window.setTimeout(() => {
+        if (invalidatedGeneration !== refreshGeneration) return;
+        void refresh().then(() => showNotice("iframe 已加载，表单控件已重新检查。"), (error) => showNotice(error instanceof Error ? error.message : "iframe 识别失败", true));
+      }, 100);
+    });
+  }
+
+  async function refresh() {
+    const generation = ++refreshGeneration;
+    const sourceAtStart = dataSource;
+    const overwriteAtStart = sourceAtStart === "remote" && overwriteExisting;
+    const revisionAtStart = publishedProfileRevision(remoteProfileStatus);
+    const selectedAtStart = new Set(selectedIds);
+    const hadRenderedAtStart = hasRenderedOnce;
+    const localElements = new Map<string, FillTarget>();
+    const localDescriptors = new Map<string, FieldDescriptor>();
+    const isCurrent = () => (
+      generation === refreshGeneration
+      && dataSource === sourceAtStart
+      && (sourceAtStart !== "remote" || overwriteExisting === overwriteAtStart)
+      && (sourceAtStart !== "remote" || publishedProfileRevision(remoteProfileStatus) === revisionAtStart)
+    );
+    const commit = (
+      nextMatches: FieldMatch[],
+      nextManualRequired: ManualField[],
+      nextManualAttention: ManualField[],
+      nextRepeatGroups: RepeatGroupPrompt[],
+      nextEmptyHint: string,
+    ) => {
+      if (!isCurrent()) return false;
+      elements.clear();
+      for (const [id, target] of localElements) elements.set(id, target);
+      descriptors.clear();
+      for (const [id, descriptor] of localDescriptors) descriptors.set(id, descriptor);
+      previewOriginalValues.clear();
+      for (const match of nextMatches) {
+        const target = localElements.get(match.id);
+        if (target && localDescriptors.get(match.id)?.hasValue) previewOriginalValues.set(match.id, snapshotTarget(target));
+      }
+      previewOverwriteExisting = overwriteAtStart;
+      matches = nextMatches;
+      manualRequired = nextManualRequired;
+      manualAttention = nextManualAttention;
+      repeatGroups = nextRepeatGroups;
+      emptyHint = nextEmptyHint;
+      selectedIds = new Set(matches
+        .filter((match) => hadRenderedAtStart ? selectedAtStart.has(match.id) : match.confidence >= 0.78 && match.sensitivity !== "conditional")
+        .map((match) => match.id));
+      hasRenderedOnce = true;
+      previewGeneration = generation;
+      previewLocation = location.href;
+      refreshInProgress = false;
+      render();
+      return true;
+    };
+
+    refreshInProgress = true;
+    fillButton.disabled = true;
+    stopScanObservers();
+    showNotice("");
+    try {
+      if (sourceAtStart === "local") await loadBaseState(true);
+      if (!isCurrent()) return;
+
+      if (sourceAtStart === "remote" && !authenticated) {
+        commit([], [], [], [], "请先登录谷谷账号。");
+        return;
+      }
+      if (sourceAtStart === "remote" && !remoteProfileStatus) {
+        commit([], [], [], [], "网申资料服务暂不可用。请稍后重新检查，当前不会填写页面。");
+        return;
+      }
+      if (sourceAtStart === "remote" && !revisionAtStart) {
+        commit([], [], [], [], "尚无已发布的网申资料。请先在谷谷网站上传简历、审核或手工填写并发布。");
+        return;
+      }
+      if (sourceAtStart === "local" && !hasLocalProfile()) {
+        commit([], [], [], [], "当前浏览器没有可用档案，请先编辑本地档案。 ");
+        return;
+      }
+
+      const scan = scanPage(
+        sourceAtStart === "remote" ? EMPTY_PROFILE : state!.profile,
+        localElements,
+        localDescriptors,
+        adapter,
+        elementIds,
+        savedMappings,
+        repeatBindings,
+        repeatGroupIds,
+        repeatStructureNodeIds,
+        sourceAtStart === "remote" ? remoteProfileStatus?.recordOptions : undefined,
+        overwriteAtStart,
+      );
+      installScanObservers(scan, generation);
+
+      if (sourceAtStart === "remote") {
+        const fields = scan.inventory.flatMap((item) => {
+          const remote = toRemoteDetectedField(item.id, item.descriptor);
+          return remote ? [remote] : [];
+        });
+        if (!fields.length) {
+          commit(
+            [],
+            scan.manualRequired.filter((item) => remoteStructuralReasons.has(item.reason)),
+            scan.manualAttention.filter((item) => remoteStructuralReasons.has(item.reason)),
+            [],
+            overwriteAtStart
+              ? "暂未找到账号资料可以安全匹配的文本字段。动态下拉、附件和重复经历会保留人工处理。"
+              : "暂未找到账号资料可以安全处理的空白字段。动态下拉、附件和重复经历会保留人工处理。",
+          );
+          return;
+        }
+
+        const response = await chrome.runtime.sendMessage({
+          type: "CREATE_PROFILE_PLAN",
+          revision: revisionAtStart,
+          vendor: adapter.id,
+          fields,
+          ...(overwriteAtStart ? { overwriteExisting: true } : {}),
+        }) as { ok?: boolean; result?: unknown; error?: string; status?: number };
+        if (!isCurrent()) return;
+        if (!response.ok) {
+          if (response.status === 401) {
+            authenticated = false;
+            accountDisplayName = "";
+            remoteProfileStatus = null;
+          }
+          throw new Error(response.error || "无法生成网申资料填写计划。");
+        }
+        const plan = normalizeProfileFillPlan(response.result, new Map(fields.map((field) => [field.fieldId, field])), revisionAtStart, adapter.id, overwriteAtStart);
+        const inventoryById = new Map(scan.inventory.map((item) => [item.id, item]));
+        const nextMatches = plan.decisions.flatMap((decision): FieldMatch[] => {
+          const item = inventoryById.get(decision.fieldId);
+          const target = localElements.get(decision.fieldId);
+          if (!item || !target || decision.action !== "fill" || decision.value === null) return [];
+          const anchor = Array.isArray(target) ? target[0] : target;
+          if (!anchor) return [];
+          const displayValue = Array.isArray(decision.value) ? decision.value.join("、") : decision.value;
+          return [{
+            id: decision.fieldId,
+            source: "remote",
+            canonicalKey: decision.canonicalKey ?? undefined,
+            label: (item.descriptor.label ?? item.descriptor.ariaLabel ?? item.descriptor.placeholder ?? "未命名字段").slice(0, 100),
+            value: displayValue,
+            resolvedValue: decision.value,
+            confidence: decision.confidence,
+            sensitivity: decision.sensitivity,
+            kind: elementKind(anchor),
+            mappingLocked: true,
+            aiPolishable: false,
+          }];
+        });
+        const planManual = plan.decisions.flatMap((decision): ManualField[] => {
+          const item = inventoryById.get(decision.fieldId);
+          if (!item || decision.action !== "manual") return [];
+          return [{
+            identity: decision.fieldId,
+            label: (item.descriptor.label ?? item.descriptor.ariaLabel ?? item.descriptor.placeholder ?? "未命名字段").slice(0, 100),
+            reason: decision.reason,
+            required: Boolean(item.descriptor.required),
+          }];
+        });
+        const structuralRequired = scan.manualRequired.filter((item) => remoteStructuralReasons.has(item.reason));
+        const structuralAttention = scan.manualAttention.filter((item) => remoteStructuralReasons.has(item.reason));
+        commit(
+          nextMatches,
+          deduplicateManualFields([...structuralRequired, ...planManual.filter((item) => item.required)]),
+          deduplicateManualFields([...structuralAttention, ...planManual.filter((item) => !item.required)]),
+          scan.repeatGroups,
+          "已发布资料没有可可靠匹配的字段；请查看下方人工处理项。",
+        );
+      } else {
+        commit(
+          scan.matches,
+          scan.manualRequired,
+          scan.manualAttention,
+          scan.repeatGroups,
+          "暂未找到能够可靠匹配的空白字段。可滚动页面让动态表单加载后，再重新识别。",
+        );
+      }
+    } catch (error) {
+      if (isCurrent()) {
+        elements.clear();
+        descriptors.clear();
+        previewOriginalValues.clear();
+        matches = [];
+        manualRequired = [];
+        manualAttention = [];
+        repeatGroups = [];
+        selectedIds.clear();
+        hasRenderedOnce = false;
+        emptyHint = "本次预览未生成，请检查提示后重试。";
+        previewGeneration = 0;
+        render();
+      }
+      throw error;
+    } finally {
+      if (generation === refreshGeneration) refreshInProgress = false;
+    }
+  }
+
   async function open() {
+    clearPreview("正在检查登录状态和当前页面。 ");
     invalidateRepeatSnapshot();
     panelOpen = true;
     panel.classList.remove("gugu-hidden");
     bubble.classList.add("gugu-hidden");
-    try { await refresh(); } catch (error) { showNotice(error instanceof Error ? error.message : "识别失败", true); }
+    try {
+      await refreshAuthState();
+      await refresh();
+    } catch (error) {
+      clearPreview("无法载入网申资料，已停止识别与填写。");
+      showNotice(error instanceof Error ? error.message : "识别失败", true);
+    }
   }
 
   function close() {
+    overwriteExisting = false;
+    previewOriginalValues.clear();
+    previewOverwriteExisting = false;
     panelOpen = false;
     panel.classList.add("gugu-hidden");
-    bubble.classList.remove("gugu-hidden");
+    updateAutomaticSurface();
   }
 
   root.addEventListener("click", async (event) => {
@@ -224,9 +570,74 @@ function installAssistant() {
     const action = button?.dataset.action;
     if (button === bubble) return open();
     if (action === "close") return close();
+    if (action === "login") {
+      dataSource = "remote";
+      clearPreview("正在打开谷谷登录页；登录完成后会重新载入网申资料。");
+      const response = await chrome.runtime.sendMessage({ type: "BEGIN_AUTOFILL_LOGIN" }) as { ok?: boolean; error?: string };
+      if (response.ok) showNotice("已打开谷谷登录页。登录完成后返回此页，助手会自动更新；也可以点“重新检查”。");
+      else showNotice(response.error || "无法打开登录页。", true);
+      render();
+      return;
+    }
+    if (action === "check-auth") {
+      try {
+        await refreshAuthState();
+        render();
+        if (authenticated) {
+          await refresh();
+          showNotice(remoteProfileStatus?.publishedRevision ? "登录状态已同步，填写预览已生成。" : "登录状态已同步，请先在网站建立并发布网申资料。");
+        }
+        else showNotice("仍未检测到有效登录，请在刚打开的谷谷页面完成登录。", true);
+      } catch (error) {
+        clearPreview("无法载入网申资料，已停止识别与填写。");
+        showNotice(error instanceof Error ? error.message : "登录状态检查失败。", true);
+      }
+      return;
+    }
+    if (action === "use-local") {
+      dataSource = "local";
+      hasRenderedOnce = false;
+      invalidateRepeatSnapshot();
+      try { await refresh(); } catch (error) { showNotice(error instanceof Error ? error.message : "本地档案识别失败", true); }
+      return;
+    }
+    if (action === "use-remote") {
+      dataSource = "remote";
+      hasRenderedOnce = false;
+      invalidateRepeatSnapshot();
+      try { await refresh(); } catch (error) { showNotice(error instanceof Error ? error.message : "账号简历预览失败", true); }
+      return;
+    }
+    if (action === "edit-profile") {
+      const response = await chrome.runtime.sendMessage({ type: "OPEN_PROFILE_PAGE" }) as { ok?: boolean; error?: string };
+      if (!response.ok) showNotice(response.error || "无法打开网申资料页。", true);
+      return;
+    }
+    if (action === "logout") {
+      clearPreview("正在退出助手账号。 ");
+      const response = await chrome.runtime.sendMessage({ type: "LOGOUT_AUTOFILL" }) as { ok?: boolean; error?: string };
+      if (!response.ok) {
+        showNotice(response.error || "退出失败。", true);
+        return;
+      }
+      authenticated = false;
+      accountDisplayName = "";
+      remoteProfileStatus = null;
+      profileErrorStatus = null;
+      dataSource = "remote";
+      clearPreview("已退出助手账号。请重新登录。");
+      showNotice("已清除扩展会话中的助手登录凭据。 ");
+      return;
+    }
     if (action === "rescan") {
       invalidateRepeatSnapshot();
-      try { await refresh(); } catch (error) { showNotice(error instanceof Error ? error.message : "识别失败", true); }
+      try {
+        if (dataSource === "remote") await refreshAuthState();
+        await refresh();
+      } catch (error) {
+        clearPreview("无法载入网申资料，已停止识别与填写。");
+        showNotice(error instanceof Error ? error.message : "识别失败", true);
+      }
       return;
     }
     if (action === "undo") {
@@ -246,6 +657,19 @@ function installAssistant() {
       return;
     }
     if (action === "fill") {
+      if (refreshInProgress || previewGeneration !== refreshGeneration || previewLocation !== location.href || previewOverwriteExisting !== overwriteExisting) {
+        showNotice("页面正在重新识别，请等待当前预览生成后再填写。", true);
+        return;
+      }
+      const expectedRevision = remoteProfileStatus?.publishedRevision;
+      if (dataSource === "remote") {
+        const validation = await chrome.runtime.sendMessage({ type: "VALIDATE_PROFILE_REVISION", revision: expectedRevision }) as { ok?: boolean; result?: boolean; error?: string };
+        if (!validation.ok || validation.result !== true || previewGeneration !== refreshGeneration || previewLocation !== location.href) {
+          clearPreview("已发布资料或页面已变化，请重新识别后再填写。");
+          showNotice(validation.error || "填写预览已过期，请重新识别。", true);
+          return;
+        }
+      }
       let filled = 0;
       let stale = 0;
       const snapshots: ElementSnapshot[] = [];
@@ -259,7 +683,7 @@ function installAssistant() {
           const cachedMatch = matches.find((item) => item.id === id);
           const cachedTarget = elements.get(id);
           const cachedDescriptor = descriptors.get(id);
-          if (!cachedMatch || !cachedTarget || !cachedDescriptor || !state) {
+          if (!cachedMatch || !cachedTarget || !cachedDescriptor) {
             stale += 1;
             continue;
           }
@@ -267,7 +691,7 @@ function installAssistant() {
           const currentElements = new Map<string, FillTarget>();
           const currentDescriptors = new Map<string, FieldDescriptor>();
           const currentScan = scanPage(
-            state.profile,
+            dataSource === "remote" ? EMPTY_PROFILE : state!.profile,
             currentElements,
             currentDescriptors,
             adapter,
@@ -276,21 +700,27 @@ function installAssistant() {
             repeatBindings,
             repeatGroupIds,
             repeatStructureNodeIds,
+            dataSource === "remote" ? remoteProfileStatus?.recordOptions : undefined,
+            dataSource === "remote" && overwriteExisting,
           );
           const currentMatch = currentScan.matches.find((item) => item.id === id);
           const currentTarget = currentElements.get(id);
           const currentDescriptor = currentDescriptors.get(id);
-          if (!currentMatch || !currentTarget || !currentDescriptor) {
+          const remoteInventoryStillPresent = currentScan.inventory.some((item) => item.id === id);
+          if ((!currentMatch && cachedMatch.source !== "remote") || (cachedMatch.source === "remote" && !remoteInventoryStillPresent) || !currentTarget || !currentDescriptor) {
             stale += 1;
             continue;
           }
-          const validation = validateCachedFillTarget(cachedTarget, currentTarget, cachedDescriptor, currentDescriptor, adapter);
+          const validation = validateCachedFillTarget(cachedTarget, currentTarget, cachedDescriptor, currentDescriptor, adapter, {
+            allowOverwriteExistingText: dataSource === "remote" && overwriteExisting,
+            expectedSnapshots: previewOriginalValues.get(id),
+          });
           if (!validation.valid) {
             stale += 1;
             continue;
           }
           const before = snapshotTarget(currentTarget);
-          const fillValue = cachedMatch.suggestedValue ?? currentMatch.resolvedValue;
+          const fillValue = cachedMatch.suggestedValue ?? cachedMatch.resolvedValue;
           if (fillTarget(currentTarget, fillValue)) {
             snapshots.push(...before);
             filled += 1;
@@ -300,9 +730,14 @@ function installAssistant() {
         assistantWriteInProgress = false;
       }
       lastFill = snapshots;
+      overwriteExisting = false;
       invalidateRepeatSnapshot();
-      try { await refresh(); } catch (error) { showNotice(error instanceof Error ? error.message : "填写后重新识别失败", true); return; }
-      showNotice(`已填写 ${filled} 项${stale ? `，跳过 ${stale} 个扫描后已变化的过期项` : ""}。请逐项检查，确认无误后由你手动提交。`, stale > 0);
+      let refreshError = "";
+      try { await refresh(); } catch (error) { refreshError = error instanceof Error ? error.message : "预览刷新失败"; }
+      showNotice(
+        `已填写 ${filled} 项${stale ? `，跳过 ${stale} 个扫描后已变化的过期项` : ""}。${refreshError ? `页面已经写入，但预览刷新失败：${refreshError}。` : "请逐项检查，确认无误后由你手动提交。"}`,
+        stale > 0 || Boolean(refreshError),
+      );
       return;
     }
     if (action === "polish" && button) {
@@ -333,6 +768,20 @@ function installAssistant() {
 
   root.addEventListener("change", (event) => {
     const input = event.target as HTMLInputElement | HTMLSelectElement;
+    if (input instanceof HTMLInputElement && input.dataset.action === "overwrite-existing") {
+      const requestedOverwrite = input.checked;
+      overwriteExisting = requestedOverwrite;
+      clearPreview("覆盖设置已变化，正在重新生成服务端填写预览。");
+      void refresh().then(
+        () => {
+          if (overwriteExisting === requestedOverwrite) showNotice(requestedOverwrite
+            ? "已开启本次覆盖：请逐项检查标为“将覆盖已有文字”的预览。"
+            : "已恢复仅填写空白字段。");
+        },
+        (error) => showNotice(error instanceof Error ? error.message : "无法重新识别页面。", true),
+      );
+      return;
+    }
     if (input instanceof HTMLSelectElement && input.dataset.action === "bind-entry") {
       const groupKey = input.dataset.groupKey;
       if (!groupKey) return;
@@ -367,7 +816,7 @@ function installAssistant() {
     const id = row.dataset.id;
     if (!id) return;
     const match = matches.find((item) => item.id === id);
-    if (input instanceof HTMLSelectElement && input.dataset.action === "map" && match && state) {
+    if (input instanceof HTMLSelectElement && input.dataset.action === "map" && match && match.source !== "remote" && state) {
       const key = input.value as ProfileFieldKey;
       const descriptor = descriptors.get(id);
       if (!descriptor) return;
@@ -399,9 +848,40 @@ function installAssistant() {
     else selectedIds.delete(id);
   });
 
-  chrome.runtime.onMessage.addListener((message: unknown) => {
-    if ((message as { type?: string }).type === "OPEN_ASSISTANT") void open();
+  chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
+    const type = (message as { type?: string }).type;
+    if (type === "OPEN_ASSISTANT") {
+      manualSurface = true;
+      void open();
+      sendResponse({ ok: true });
+    }
+    if (type === "AUTOFILL_AUTH_CHANGED") {
+      void refreshAuthState().then(() => {
+        dataSource = "remote";
+        clearPreview("登录状态已同步，正在生成填写预览。");
+        void refresh().then(() => showNotice("登录成功，网申资料状态已载入。"), (error) => showNotice(error instanceof Error ? error.message : "预览失败", true));
+      }, (error) => {
+        clearPreview("无法载入网申资料，已停止识别与填写。");
+        showNotice(error instanceof Error ? error.message : "登录同步失败。", true);
+      });
+    }
   });
+
+  function updateAutomaticSurface() {
+    const detection = classifyRecruitmentPage({ url: location.href, title: document.title });
+    lastSurfaceLocation = `${location.href}\n${document.title}`;
+    if (panelOpen) return;
+    bubble.classList.toggle("gugu-hidden", !manualSurface && !detection.detected);
+  }
+
+  const pollAutomaticSurface = () => {
+    const signature = `${location.href}\n${document.title}`;
+    if (signature !== lastSurfaceLocation) updateAutomaticSurface();
+  };
+  window.addEventListener("hashchange", updateAutomaticSurface);
+  window.addEventListener("popstate", updateAutomaticSurface);
+  window.setInterval(pollAutomaticSurface, 1_000);
+  updateAutomaticSurface();
 
   function invalidateRepeatSnapshot() {
     repeatBindings.invalidate();
@@ -570,12 +1050,15 @@ function scanPage(
   repeatBindings: RepeatBindingStore,
   repeatGroupIds: WeakMap<Element, RepeatGroupIdentity>,
   repeatStructureNodeIds: WeakMap<Element, string>,
-): { matches: FieldMatch[]; manualRequired: ManualField[]; manualAttention: ManualField[]; repeatGroups: RepeatGroupPrompt[]; documents: Document[] } {
+  remoteRecordOptions?: RemoteProfileStatus["recordOptions"],
+  allowOverwriteExistingText = false,
+): ScanPageResult {
   elements.clear();
   descriptors.clear();
   const frameScan = collectScanDocuments(document);
   const candidates = frameScan.documents.flatMap((scanDocument) => collectCandidates(scanDocument, adapter));
   const matches: FieldMatch[] = [];
+  const inventory: SafeFieldInventoryItem[] = [];
   const manualRequired: ManualField[] = [];
   const manualAttention: ManualField[] = [...frameScan.manualFrames];
   const repeatGroupMap = new Map<string, RepeatGroupPrompt>();
@@ -662,13 +1145,20 @@ function scanPage(
     const decision = matchDescriptor(descriptor, profile, explicitKey);
     const { manualIdentity, matchId } = candidateIdentity(anchor, descriptor);
     const semanticIdentity = identityOverride ?? manualIdentity;
-    if (decision.profileKey) {
+    const remoteField = toRemoteDetectedField(matchId, descriptor);
+    if (remoteField) {
+      elements.set(matchId, target);
+      descriptors.set(matchId, descriptor);
+      inventory.push({ id: matchId, descriptor });
+    }
+    const candidateProfileKey = decision.profileKey ?? (remoteField ? semanticProfileKey(descriptor, explicitKey) : null);
+    if (candidateProfileKey) {
       recordSemanticCandidate(
         anchor,
         descriptor,
-        decision.profileKey,
+        candidateProfileKey,
         semanticIdentity,
-        decision.action === "fill" ? matchId : undefined,
+        decision.action === "fill" || remoteField ? matchId : undefined,
         true,
       );
     }
@@ -690,6 +1180,7 @@ function scanPage(
     descriptors.set(id, descriptor);
     matches.push({
       id,
+      source: "local",
       label: label.slice(0, 100) || FIELD_LABELS[decision.profileKey],
       key: decision.profileKey,
       value: decision.sourceValue ?? profile[decision.profileKey],
@@ -773,7 +1264,7 @@ function scanPage(
       if (!group.length) continue;
       const descriptor = describeField(group[0], adapter);
       descriptor.repeated = describeRepeatedContext(group[0], descriptor, adapter, repeatBindings, repeatGroupIds, repeatStructureNodeIds);
-      registerRepeatGroup(descriptor.repeated, profile, repeatGroupMap);
+      registerRepeatGroup(descriptor.repeated, profile, repeatGroupMap, remoteRecordOptions);
       descriptor.controlType = element.type as "radio" | "checkbox";
       descriptor.multiple = element.type === "checkbox";
       descriptor.options = group.map((candidate) => ({
@@ -784,10 +1275,10 @@ function scanPage(
       addMatch(group, group[0], descriptor, choiceSemanticIdentity);
       continue;
     }
-    if (isIgnoredByAdapter(element, adapter) || !isEligible(element, adapter)) continue;
+    if (isIgnoredByAdapter(element, adapter) || !isEligible(element, adapter, allowOverwriteExistingText)) continue;
     const descriptor = describeField(element, adapter);
     descriptor.repeated = describeRepeatedContext(element, descriptor, adapter, repeatBindings, repeatGroupIds, repeatStructureNodeIds);
-    registerRepeatGroup(descriptor.repeated, profile, repeatGroupMap);
+    registerRepeatGroup(descriptor.repeated, profile, repeatGroupMap, remoteRecordOptions);
     addMatch(element, element, descriptor);
   }
   const {
@@ -829,6 +1320,7 @@ function scanPage(
     manualAttention: deduplicateManualFields(manualAttention),
     repeatGroups: [...repeatGroupMap.values()],
     documents: frameScan.documents,
+    inventory: inventory.filter((item) => !duplicateMatchIds.has(item.id)),
   };
 }
 
@@ -836,6 +1328,7 @@ function registerRepeatGroup(
   context: RepeatedFieldContext | undefined,
   profile: ProfileData,
   groups: Map<string, RepeatGroupPrompt>,
+  remoteRecordOptions?: RemoteProfileStatus["recordOptions"],
 ) {
   if (!context || groups.has(context.groupKey)) return;
   groups.set(context.groupKey, {
@@ -843,7 +1336,9 @@ function registerRepeatGroup(
     groupLabel: context.groupLabel,
     kind: context.kind,
     selectedEntryId: context.targetEntryId,
-    options: structuredEntryOptions(profile, context.kind),
+    options: remoteRecordOptions
+      ? (remoteRecordOptions[context.kind === "experience" ? "employment" : context.kind] ?? []).map((item) => ({ id: item.recordId, label: item.label }))
+      : structuredEntryOptions(profile, context.kind),
   });
 }
 
@@ -947,7 +1442,7 @@ function findFactWarnings(source: string, suggestion: string): string[] {
 function deduplicate(matches: FieldMatch[]): FieldMatch[] {
   const seen = new Set<string>();
   return matches.filter((match) => {
-    const identity = `${match.id}:${match.key}`;
+    const identity = `${match.id}:${match.canonicalKey ?? match.key ?? "unknown"}`;
     if (seen.has(identity)) return false;
     seen.add(identity);
     return true;

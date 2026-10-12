@@ -36,7 +36,7 @@ const MOKA_ADAPTER: SiteAdapter = {
 const BEISEN_ADAPTER: SiteAdapter = {
   id: "beisen",
   name: "北森",
-  hostPattern: /(^|\.)zhiye\.com$/i,
+  hostPattern: /(^|\.)zhiye\.com$|^we\.zyt\.com$/i,
   labelSelectors: [".ant-form-item-label", "[class*='form-label' i]", "[class*='field-label' i]", "[class*='question' i]", "label"],
   ignoredSelectors: ["[class*='captcha' i]", "[class*='verify' i]", "[class*='password' i]", "[class*='sms' i]"],
   repeatedGroupSelectors: ["[data-gugu-repeat-kind]", "[data-index]", "[data-row-key]", "[class*='experience-item' i]", "[class*='education-item' i]", "[class*='project-item' i]", ".ant-form-list-item", "fieldset"],
@@ -47,7 +47,7 @@ const BEISEN_ADAPTER: SiteAdapter = {
 const BYTEDANCE_ADAPTER: SiteAdapter = {
   id: "bytedance",
   name: "字节跳动招聘",
-  hostPattern: /(^|\.)jobs\.bytedance\.com$/i,
+  hostPattern: /(^|\.)(jobs\.bytedance\.com|joinbytedance\.com)$/i,
   labelSelectors: [".semi-form-field-label", ".semi-form-field-label-text", "[class*='formLabel' i]", "[class*='question' i]", "label"],
   ignoredSelectors: ["[class*='captcha' i]", "[class*='verify' i]", "[class*='code' i]"],
   repeatedGroupSelectors: ["[data-gugu-repeat-kind]", "[data-index]", "[data-row-key]", "[class*='experience-item' i]", "[class*='education-item' i]", "[class*='project-item' i]", ".semi-form-list-item", "fieldset"],

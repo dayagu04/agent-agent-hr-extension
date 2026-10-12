@@ -111,7 +111,10 @@ export interface StoredState {
 
 export interface FieldMatch {
   id: string;
-  key: ProfileFieldKey;
+  key?: ProfileFieldKey;
+  source?: "local" | "remote";
+  canonicalKey?: string;
+  sensitivity?: string;
   label: string;
   value: string;
   resolvedValue: string | string[];

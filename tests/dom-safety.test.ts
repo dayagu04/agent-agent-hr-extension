@@ -17,8 +17,10 @@ import {
   repeatGroupStructureSignature,
   resolveDuplicateSemanticCandidates,
   resolveRepeatGroupIdentity,
+  restoreElement,
   scopeNamedChoiceGroup,
   selectHasCurrentValue,
+  snapshotTarget,
   validateCachedFillTarget,
   type RepeatGroupIdentity,
 } from "../src/dom-safety.ts";
@@ -771,6 +773,41 @@ test("cached targets are rejected after user value, disable, removal, or semanti
     validateCachedFillTarget(cachedTarget, cachedTarget, cachedDescriptor, describeField(cachedTarget, adapter), adapter),
     { valid: false, reason: "semantics_changed" },
   );
+});
+
+test("explicit overwrite applies only to unchanged ordinary text controls", () => {
+  const document = new FakeDocument("https://app.mokahr.com/apply");
+  const adapter = getSiteAdapter(document.location.href);
+  const input = new FakeElement("input", document);
+  input.setAttribute("aria-label", "姓名");
+  input.value = "原有文字";
+  const target = asElement(input);
+  assert.equal(isEligible(target, adapter), false);
+  assert.equal(isEligible(target, adapter, true), true);
+  const original = snapshotTarget(target);
+  const descriptor = describeField(target, adapter);
+  const options = { allowOverwriteExistingText: true, expectedSnapshots: original };
+  assert.deepEqual(validateCachedFillTarget(target, target, descriptor, describeField(target, adapter), adapter, options), { valid: true });
+  assert.equal(fillTarget(target, "新文字"), true);
+  assert.equal(input.value, "新文字");
+  assert.equal(restoreElement(original[0]), true);
+  assert.equal(input.value, "原有文字");
+  assert.deepEqual(validateCachedFillTarget(target, target, descriptor, describeField(target, adapter), adapter),
+    { valid: false, reason: "target_ineligible" });
+  input.value = "用户刚修改";
+  assert.deepEqual(validateCachedFillTarget(target, target, descriptor, describeField(target, adapter), adapter, options),
+    { valid: false, reason: "value_changed" });
+  input.value = "";
+  assert.deepEqual(validateCachedFillTarget(target, target, descriptor, describeField(target, adapter), adapter, options),
+    { valid: false, reason: "value_state_changed" });
+  for (const type of ["password", "file", "checkbox", "radio"]) {
+    input.type = type;
+    input.value = "原有文字";
+    assert.equal(isEligible(target, adapter, true), isEligible(target, adapter), `overwrite must not change ${type} eligibility`);
+  }
+  input.type = "text";
+  input.readOnly = true;
+  assert.equal(isEligible(target, adapter, true), false);
 });
 
 test("cached ignored targets are rejected before their value getter is read", () => {

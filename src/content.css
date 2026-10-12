@@ -13,9 +13,21 @@
 .gugu-icon-button { width: 34px; height: 34px; border: 0; border-radius: 9px; color: #fff; background: #ffffff20; font-size: 20px; cursor: pointer; }
 .gugu-summary { padding: 15px 18px 12px; border-bottom: 1px solid #e2e7f0; background: #fff; }
 .gugu-summary p { margin: 0; color: #536178; font-size: 13px; line-height: 1.55; }
+.gugu-overwrite { display: flex; align-items: flex-start; gap: 7px; margin-top: 8px; color: #536178; font-size: 12px; line-height: 1.4; cursor: pointer; }
+.gugu-overwrite input { flex: none; margin: 2px 0 0; accent-color: #3b63f3; }
+.gugu-overwrite:has(input:disabled) { opacity: .55; cursor: not-allowed; }
 .gugu-progress { display: flex; align-items: center; justify-content: space-between; margin-bottom: 7px; }
 .gugu-progress strong { font-size: 14px; }
 .gugu-tier { padding: 4px 8px; border-radius: 999px; color: #3158dc; background: #e9efff; font-size: 11px; font-weight: 800; }
+.gugu-source { padding: 12px 18px; border-bottom: 1px solid #e2e7f0; background: #f9fbff; }
+.gugu-source-copy { display: flex; flex-direction: column; gap: 3px; }
+.gugu-source-copy strong { color: #26334a; font-size: 13px; }
+.gugu-source-copy span { color: #65738a; font-size: 11px; line-height: 1.45; }
+.gugu-source-actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 9px; }
+.gugu-inline-button { border: 1px solid #d3dbe9; border-radius: 8px; padding: 6px 9px; color: #46546c; background: #fff; font-size: 11px; font-weight: 700; cursor: pointer; }
+.gugu-inline-button.gugu-accent { border-color: #4668ec; color: #fff; background: #4668ec; }
+.gugu-resume-label { display: block; margin-top: 9px; color: #46546c; font-size: 11px; font-weight: 700; }
+.gugu-resume-label select { display: block; width: 100%; margin-top: 4px; border: 1px solid #cfd8e7; border-radius: 8px; padding: 7px 9px; color: #26334a; background: #fff; font-size: 12px; }
 .gugu-list { flex: 1; padding: 12px; overflow: auto; }
 .gugu-empty { margin: 36px 18px; color: #718096; text-align: center; line-height: 1.7; }
 .gugu-row { display: grid; grid-template-columns: 22px 1fr auto; gap: 9px; align-items: start; margin-bottom: 9px; padding: 12px; border: 1px solid #e0e5ee; border-radius: 12px; background: #fff; }

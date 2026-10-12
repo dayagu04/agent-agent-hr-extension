@@ -1,5 +1,22 @@
+import { canUsePendingAuthBridge, type PendingAuthBridge } from "./auth-security";
+import type { RemoteDetectedField, RemoteProfileStatus, RemoteResumeSummary } from "./remote-autofill";
 import { getApiKey, loadState } from "./storage";
 import type { PolishRequest } from "./types";
+
+const AUTOFILL_ORIGIN = "https://gudaya.chat";
+const AUTOFILL_SESSION_KEY = "guguAutofillSession";
+const PENDING_AUTH_KEY = "guguPendingAutofillAuth";
+const AUTH_BRIDGE_TTL_MS = 10 * 60 * 1000;
+
+interface AutofillSession {
+  token: string;
+  displayName: string;
+  userId?: number;
+}
+
+interface AutofillApiError extends Error {
+  status?: number;
+}
 
 function endpoint(baseUrl: string): string {
   return `${baseUrl.replace(/\/$/, "")}/chat/completions`;
@@ -44,8 +61,266 @@ async function polishText(request: PolishRequest): Promise<string> {
   return result;
 }
 
-chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
-  const payload = message as { type?: string; request?: PolishRequest };
+async function getAutofillSession(): Promise<AutofillSession | null> {
+  const stored = await chrome.storage.session.get(AUTOFILL_SESSION_KEY);
+  const value = stored[AUTOFILL_SESSION_KEY] as Partial<AutofillSession> | undefined;
+  if (!value || typeof value.token !== "string" || !value.token) return null;
+  return {
+    token: value.token,
+    displayName: typeof value.displayName === "string" ? value.displayName : "谷谷用户",
+    ...(Number.isInteger(value.userId) ? { userId: Number(value.userId) } : {}),
+  };
+}
+
+async function clearAutofillSession(): Promise<void> {
+  await chrome.storage.session.remove(AUTOFILL_SESSION_KEY);
+}
+
+async function getPendingAuth(): Promise<PendingAuthBridge | null> {
+  const stored = await chrome.storage.session.get(PENDING_AUTH_KEY);
+  const value = stored[PENDING_AUTH_KEY] as Partial<PendingAuthBridge> | undefined;
+  if (!value || !Number.isInteger(value.loginTabId) || !Number.isFinite(value.expiresAt)) return null;
+  return {
+    loginTabId: Number(value.loginTabId),
+    expiresAt: Number(value.expiresAt),
+    ...(Number.isInteger(value.requestTabId) ? { requestTabId: Number(value.requestTabId) } : {}),
+  };
+}
+
+async function autofillApi(path: string, token: string, init: RequestInit = {}): Promise<unknown> {
+  const response = await fetch(`${AUTOFILL_ORIGIN}${path}`, {
+    ...init,
+    cache: "no-store",
+    credentials: "omit",
+    referrerPolicy: "no-referrer",
+    headers: {
+      ...(init.body ? { "Content-Type": "application/json" } : {}),
+      Authorization: `Bearer ${token}`,
+      ...(init.headers ?? {}),
+    },
+  });
+  if (response.status === 401) await clearAutofillSession();
+  if (!response.ok) {
+    const message = response.status === 401
+      ? "登录已失效，请重新登录。"
+      : response.status === 404 && path.startsWith("/api/autofill/profile/")
+        ? "谷谷服务端尚未提供网申资料接口（404），需先部署配套服务端。"
+        : `谷谷服务返回 ${response.status}`;
+    const error = new Error(message) as AutofillApiError;
+    error.status = response.status;
+    throw error;
+  }
+  return response.json();
+}
+
+async function beginAutofillLogin(sender: chrome.runtime.MessageSender): Promise<{ loginTabId: number }> {
+  const tab = await chrome.tabs.create({ url: `${AUTOFILL_ORIGIN}/login?product=application-autofill`, active: true });
+  if (!Number.isInteger(tab.id)) throw new Error("无法打开谷谷登录页。 ");
+  const pending: PendingAuthBridge = {
+    loginTabId: Number(tab.id),
+    ...(Number.isInteger(sender.tab?.id) ? { requestTabId: Number(sender.tab?.id) } : {}),
+    expiresAt: Date.now() + AUTH_BRIDGE_TTL_MS,
+  };
+  await chrome.storage.session.set({ [PENDING_AUTH_KEY]: pending });
+  return { loginTabId: pending.loginTabId };
+}
+
+async function authBridgeAllowed(sender: chrome.runtime.MessageSender): Promise<boolean> {
+  const pending = await getPendingAuth();
+  if (pending && pending.expiresAt <= Date.now()) await chrome.storage.session.remove(PENDING_AUTH_KEY);
+  return canUsePendingAuthBridge(sender.url, sender.tab?.id, pending);
+}
+
+async function syncAutofillToken(token: unknown, sender: chrome.runtime.MessageSender): Promise<{ displayName: string }> {
+  const pending = await getPendingAuth();
+  if (!canUsePendingAuthBridge(sender.url, sender.tab?.id, pending)) throw new Error("登录同步请求已失效，请从网申页面重新发起。 ");
+  if (typeof token !== "string" || token.length < 20 || token.length > 8_192 || /[\r\n]/.test(token)) {
+    throw new Error("登录凭据格式无效。 ");
+  }
+  const profile = await autofillApi("/api/user/profile", token) as Record<string, unknown>;
+  const displayName = [profile.display_name, profile.username, profile.email]
+    .find((value) => typeof value === "string" && value.trim()) as string | undefined;
+  const session: AutofillSession = {
+    token,
+    displayName: displayName?.slice(0, 120) || "谷谷用户",
+    ...(Number.isInteger(profile.id) ? { userId: Number(profile.id) } : {}),
+  };
+  await chrome.storage.session.set({ [AUTOFILL_SESSION_KEY]: session });
+  await chrome.storage.session.remove(PENDING_AUTH_KEY);
+  if (pending?.requestTabId !== undefined) {
+    void chrome.tabs.sendMessage(pending.requestTabId, { type: "AUTOFILL_AUTH_CHANGED" }).catch(() => undefined);
+  }
+  return { displayName: session.displayName };
+}
+
+async function requireAutofillSession(): Promise<AutofillSession> {
+  const session = await getAutofillSession();
+  if (!session) throw new Error("请先登录谷谷账号。 ");
+  return session;
+}
+
+async function listRemoteResumes(): Promise<RemoteResumeSummary[]> {
+  const session = await requireAutofillSession();
+  const body = await autofillApi("/api/autofill/resumes", session.token);
+  if (!Array.isArray(body)) throw new Error("云端简历列表格式无效。 ");
+  return body.flatMap((item) => {
+    if (!item || typeof item !== "object") return [];
+    const row = item as Record<string, unknown>;
+    if (!Number.isInteger(row.resumeId) || Number(row.resumeId) < 1 || typeof row.name !== "string") return [];
+    return [{ resumeId: Number(row.resumeId), name: row.name.slice(0, 200) }];
+  });
+}
+
+const ALLOWED_REMOTE_CONTROLS = new Set([
+  "text", "textarea", "email", "tel", "url", "date", "month", "number", "select", "multi_select", "radio", "checkbox",
+]);
+
+function shortText(value: unknown, limit: number): string {
+  return typeof value === "string" ? value.slice(0, limit) : "";
+}
+
+function sanitizeRemoteFields(value: unknown): RemoteDetectedField[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 150) throw new Error("页面字段数量无效。 ");
+  const seen = new Set<string>();
+  return value.map((item) => {
+    if (!item || typeof item !== "object") throw new Error("页面字段格式无效。 ");
+    const row = item as Record<string, unknown>;
+    const fieldId = shortText(row.fieldId, 128);
+    const controlType = shortText(row.controlType, 30);
+    if (!fieldId || seen.has(fieldId) || !ALLOWED_REMOTE_CONTROLS.has(controlType)) throw new Error("页面字段标识无效。 ");
+    seen.add(fieldId);
+    const options = Array.isArray(row.options) ? row.options : [];
+    if (options.length > 100) throw new Error("页面选项数量无效。 ");
+    const kind = row.recordKind;
+    const recordId = row.recordId;
+    const recordField = row.recordField;
+    if (kind !== undefined && (typeof kind !== "string" || !/^[A-Za-z]{1,32}$/.test(kind))) throw new Error("重复经历类型无效。");
+    if (recordId !== undefined && (typeof recordId !== "string" || !/^[A-Za-z0-9_-]{8,64}$/.test(recordId))) throw new Error("重复经历记录无效。");
+    if (recordId !== undefined && kind === undefined) throw new Error("重复经历记录缺少类型。");
+    if (recordField !== undefined && (typeof recordField !== "string" || !/^[A-Za-z]{1,32}$/.test(recordField) || kind === undefined)) throw new Error("重复经历字段无效。");
+    return {
+      fieldId,
+      label: shortText(row.label, 300),
+      ariaLabel: shortText(row.ariaLabel, 300),
+      placeholder: shortText(row.placeholder, 300),
+      name: shortText(row.name, 300),
+      controlType: controlType as RemoteDetectedField["controlType"],
+      required: Boolean(row.required),
+      hidden: Boolean(row.hidden),
+      disabled: Boolean(row.disabled),
+      readOnly: Boolean(row.readOnly),
+      hasValue: Boolean(row.hasValue),
+      options: options.map((option) => {
+        const candidate = option && typeof option === "object" ? option as Record<string, unknown> : {};
+        return { value: shortText(candidate.value, 500), label: shortText(candidate.label, 500), disabled: Boolean(candidate.disabled) };
+      }),
+      ...(kind ? { recordKind: kind } : {}),
+      ...(recordId ? { recordId } : {}),
+      ...(recordField ? { recordField } : {}),
+    };
+  });
+}
+
+async function getProfileStatus(): Promise<RemoteProfileStatus> {
+  const session = await requireAutofillSession();
+  const body = await autofillApi("/api/autofill/profile/status", session.token);
+  if (!body || typeof body !== "object") throw new Error("网申资料状态格式无效。");
+  const value = body as Record<string, unknown>;
+  if (!Number.isInteger(value.publishedRevision) || Number(value.publishedRevision) < 0
+    || !Number.isInteger(value.draftRevision) || Number(value.draftRevision) < 0
+    || !["active", "empty"].includes(String(value.publishedStatus))) {
+    throw new Error("网申资料状态格式无效。");
+  }
+  const rawOptions = value.recordOptions;
+  if (!rawOptions || typeof rawOptions !== "object" || Array.isArray(rawOptions)) throw new Error("经历摘要格式无效。");
+  const recordOptions: RemoteProfileStatus["recordOptions"] = {};
+  for (const [kind, records] of Object.entries(rawOptions)) {
+    if (!/^[A-Za-z]{1,32}$/.test(kind) || !Array.isArray(records) || records.length > 100) throw new Error("经历摘要格式无效。");
+    recordOptions[kind] = records.map((item) => {
+      const row = item && typeof item === "object" ? item as Record<string, unknown> : {};
+      if (typeof row.recordId !== "string" || !/^[A-Za-z0-9_-]{8,64}$/.test(row.recordId) || typeof row.label !== "string") {
+        throw new Error("经历摘要格式无效。");
+      }
+      return { recordId: row.recordId, label: row.label.slice(0, 120) };
+    });
+  }
+  return {
+    draftRevision: Number(value.draftRevision),
+    publishedRevision: Number(value.publishedRevision),
+    publishedStatus: value.publishedStatus as RemoteProfileStatus["publishedStatus"],
+    hasPendingImport: value.hasPendingImport === true,
+    hasUnpublishedDraft: value.hasUnpublishedDraft === true,
+    recordOptions,
+  };
+}
+
+async function openProfilePage(sender: chrome.runtime.MessageSender): Promise<boolean> {
+  if (!await getAutofillSession()) {
+    await beginAutofillLogin(sender);
+    return true;
+  }
+  try {
+    // 避免在旧网站上打开尚不存在的路由并把用户送回首页。
+    await getProfileStatus();
+  } catch (error) {
+    if ((error as AutofillApiError).status !== 401) throw error;
+    await beginAutofillLogin(sender);
+    return true;
+  }
+  // 先经过网站统一登录页：已有网站会话会直接回跳资料页，并让桥接刷新扩展身份；
+  // 未登录网站则由用户扫码，避免网站账号与扩展账号不一致。
+  await beginAutofillLogin(sender);
+  return true;
+}
+
+async function createProfilePlan(revision: unknown, vendor: unknown, fields: unknown, overwriteExisting: unknown): Promise<unknown> {
+  if (!Number.isInteger(revision) || Number(revision) < 1) throw new Error("请先发布网申资料。");
+  if (overwriteExisting !== undefined && typeof overwriteExisting !== "boolean") throw new Error("覆盖设置无效。");
+  const safeVendor = typeof vendor === "string" && /^[A-Za-z0-9_.-]{1,40}$/.test(vendor) ? vendor : "generic";
+  const safeFields = sanitizeRemoteFields(fields);
+  const session = await requireAutofillSession();
+  return autofillApi("/api/autofill/profile/plan", session.token, {
+    method: "POST", body: JSON.stringify({
+      publishedRevision: Number(revision), vendor: safeVendor, fields: safeFields,
+      ...(overwriteExisting === true ? { overwriteExisting: true } : {}),
+    }),
+  });
+}
+
+async function validateProfileRevision(revision: unknown): Promise<boolean> {
+  if (!Number.isInteger(revision) || Number(revision) < 1) throw new Error("填写预览版本无效。");
+  const session = await requireAutofillSession();
+  const result = await autofillApi("/api/autofill/profile/validate", session.token, {
+    method: "POST", body: JSON.stringify({ publishedRevision: Number(revision) }),
+  }) as { valid?: boolean; publishedRevision?: number };
+  return result.valid === true && result.publishedRevision === revision;
+}
+
+async function createRemotePlan(resumeId: unknown, vendor: unknown, fields: unknown): Promise<unknown> {
+  if (!Number.isInteger(resumeId) || Number(resumeId) < 1) throw new Error("请选择有效的云端简历。 ");
+  const safeVendor = typeof vendor === "string" && /^[A-Za-z0-9_.-]{1,40}$/.test(vendor) ? vendor : "generic";
+  const safeFields = sanitizeRemoteFields(fields);
+  const session = await requireAutofillSession();
+  return autofillApi("/api/autofill/plan", session.token, {
+    method: "POST",
+    body: JSON.stringify({ resumeId: Number(resumeId), vendor: safeVendor, fields: safeFields }),
+  });
+}
+
+function reply<T>(promise: Promise<T>, sendResponse: (response: unknown) => void): true {
+  promise.then(
+    (result) => sendResponse({ ok: true, result }),
+    (error: unknown) => sendResponse({
+      ok: false,
+      error: error instanceof Error ? error.message : "操作失败。",
+      status: typeof (error as AutofillApiError)?.status === "number" ? (error as AutofillApiError).status : undefined,
+    }),
+  );
+  return true;
+}
+
+chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) => {
+  const payload = message as { type?: string; request?: PolishRequest; token?: unknown; resumeId?: unknown; revision?: unknown; vendor?: unknown; fields?: unknown; overwriteExisting?: unknown };
   if (payload.type === "GET_ASSISTANT_STATE") {
     loadState().then((state) => {
       const { apiKey: _secret, ...safeState } = state;
@@ -57,5 +332,18 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
     polishText(payload.request).then((text) => sendResponse({ ok: true, text }), (error) => sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) }));
     return true;
   }
+  if (payload.type === "GET_AUTOFILL_SESSION") {
+    return reply(getAutofillSession().then((session) => ({ authenticated: Boolean(session), displayName: session?.displayName ?? "" })), sendResponse);
+  }
+  if (payload.type === "BEGIN_AUTOFILL_LOGIN") return reply(beginAutofillLogin(sender), sendResponse);
+  if (payload.type === "AUTH_BRIDGE_STATUS") return reply(authBridgeAllowed(sender), sendResponse);
+  if (payload.type === "SYNC_AUTOFILL_TOKEN") return reply(syncAutofillToken(payload.token, sender), sendResponse);
+  if (payload.type === "LOGOUT_AUTOFILL") return reply(clearAutofillSession(), sendResponse);
+  if (payload.type === "GET_REMOTE_RESUMES") return reply(listRemoteResumes(), sendResponse);
+  if (payload.type === "CREATE_REMOTE_PLAN") return reply(createRemotePlan(payload.resumeId, payload.vendor, payload.fields), sendResponse);
+  if (payload.type === "GET_PROFILE_STATUS") return reply(getProfileStatus(), sendResponse);
+  if (payload.type === "CREATE_PROFILE_PLAN") return reply(createProfilePlan(payload.revision, payload.vendor, payload.fields, payload.overwriteExisting), sendResponse);
+  if (payload.type === "VALIDATE_PROFILE_REVISION") return reply(validateProfileRevision(payload.revision), sendResponse);
+  if (payload.type === "OPEN_PROFILE_PAGE") return reply(openProfilePage(sender), sendResponse);
   return false;
 });

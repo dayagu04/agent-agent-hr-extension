@@ -86,7 +86,7 @@ export interface SemanticInventoryEntry {
 
 export interface CachedTargetValidation {
   valid: boolean;
-  reason?: "target_replaced" | "target_disconnected" | "target_ineligible" | "target_ignored" | "choice_already_selected" | "semantics_changed";
+  reason?: "target_replaced" | "target_disconnected" | "target_ineligible" | "target_ignored" | "choice_already_selected" | "semantics_changed" | "value_state_changed" | "value_changed";
 }
 
 export interface FrameScan {
@@ -306,7 +306,9 @@ export function isSemanticInventoryCandidate(element: FillableElement, adapter: 
   return isElementVisible(element);
 }
 
-export function isEligible(element: FillableElement, adapter: SiteAdapter): boolean {
+const OVERWRITABLE_TEXT_TYPES = new Set(["text", "email", "tel", "url", "date", "month", "number"]);
+
+export function isEligible(element: FillableElement, adapter: SiteAdapter, allowOverwriteExistingText = false): boolean {
   if (isInputElement(element) && element.type === "file") {
     return !isEffectivelyDisabled(element) && !isEffectivelyReadOnly(element) && fileControlHasVisibleProxy(element);
   }
@@ -314,9 +316,10 @@ export function isEligible(element: FillableElement, adapter: SiteAdapter): bool
   if (isEffectivelyDisabled(element) || isEffectivelyReadOnly(element)) return false;
   if (isInputElement(element)) {
     if (["hidden", "password", "submit", "button", "reset", "image"].includes(element.type)) return false;
-    if (!["checkbox", "radio"].includes(element.type) && element.value.trim()) return false;
+    if (!["checkbox", "radio"].includes(element.type) && element.value.trim()
+      && !(allowOverwriteExistingText && OVERWRITABLE_TEXT_TYPES.has(element.type))) return false;
   } else if (isTextareaElement(element) || isSelectElement(element)) {
-    if (isTextareaElement(element) && element.value.trim()) return false;
+    if (isTextareaElement(element) && element.value.trim() && !allowOverwriteExistingText) return false;
     if (isSelectElement(element) && selectHasCurrentValue(element)) return false;
   } else if (!isDynamicChoiceElement(element, adapter) && element.textContent?.trim()) return false;
   return true;
@@ -636,6 +639,16 @@ export function snapshotTarget(target: FillTarget): ElementSnapshot[] {
   }));
 }
 
+function targetMatchesSnapshot(target: FillTarget, snapshots: ElementSnapshot[]): boolean {
+  const elements = Array.isArray(target) ? target : [target];
+  if (elements.length !== snapshots.length) return false;
+  return elements.every((element, index) => {
+    const snapshot = snapshots[index];
+    const current = snapshotTarget(element)[0];
+    return snapshot.element === element && snapshot.value === current.value && snapshot.checked === current.checked;
+  });
+}
+
 function sameTargetIdentity(cached: FillTarget, current: FillTarget): boolean {
   const cachedItems = Array.isArray(cached) ? cached : [cached];
   const currentItems = Array.isArray(current) ? current : [current];
@@ -678,12 +691,16 @@ export function validateCachedFillTarget(
   cachedDescriptor: FieldDescriptor,
   currentDescriptor: FieldDescriptor,
   adapter: SiteAdapter,
+  options: { allowOverwriteExistingText?: boolean; expectedSnapshots?: ElementSnapshot[] } = {},
 ): CachedTargetValidation {
   if (!sameTargetIdentity(cachedTarget, currentTarget)) return { valid: false, reason: "target_replaced" };
   const elements = Array.isArray(currentTarget) ? currentTarget : [currentTarget];
   if (elements.some((element) => !element.isConnected)) return { valid: false, reason: "target_disconnected" };
   if (elements.some((element) => isIgnoredByAdapter(element, adapter))) return { valid: false, reason: "target_ignored" };
-  if (elements.some((element) => !isEligible(element, adapter))) return { valid: false, reason: "target_ineligible" };
+  if (elements.some((element) => !isEligible(element, adapter, options.allowOverwriteExistingText))) return { valid: false, reason: "target_ineligible" };
+  if (Boolean(cachedDescriptor.hasValue) !== Boolean(currentDescriptor.hasValue)) return { valid: false, reason: "value_state_changed" };
+  if (cachedDescriptor.hasValue && (!options.allowOverwriteExistingText || !options.expectedSnapshots
+    || !targetMatchesSnapshot(currentTarget, options.expectedSnapshots))) return { valid: false, reason: "value_changed" };
   if (elements.some((element) => isInputElement(element) && ["radio", "checkbox"].includes(element.type) && element.checked)) {
     return { valid: false, reason: "choice_already_selected" };
   }
