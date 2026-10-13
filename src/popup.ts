@@ -11,7 +11,7 @@ document.querySelector("#profile")!.addEventListener("click", async () => {
 
 async function openAssistant() {
   startButton.disabled = true;
-  status.textContent = "正在识别当前页面的可填写字段…";
+  status.textContent = "正在打开助手…";
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab.id || !tab.url || !/^https?:/.test(tab.url)) {
@@ -32,6 +32,6 @@ async function openAssistant() {
 
 startButton.addEventListener("click", openAssistant);
 
-status.textContent = "使用网站上已保存的网申资料；打开后可一键扫描并填写，不会自动提交。";
+status.textContent = "打开我的简历，点击开始填写。";
 startButton.disabled = false;
 

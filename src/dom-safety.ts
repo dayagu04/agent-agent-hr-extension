@@ -327,7 +327,6 @@ export function isEligible(element: FillableElement, adapter: SiteAdapter, allow
 }
 
 function nearbySiblingLabel(element: FillableElement, adapter: SiteAdapter): string {
-  if (adapter.id !== "beisen") return "";
   // Some ATS layouts place a static label beside an input *wrapper* rather
   // than associating it with the input. Stay inside a small field row: a
   // section-level heading must not be borrowed by every control below it.
@@ -367,11 +366,20 @@ function describeFieldSemantics(element: FillableElement, adapter: SiteAdapter):
     }
   }
   if (!label) {
+    // Actual ATS field wrappers, not the selected-value label inside a dropdown.
+    const field = element.closest(".ud-formily-item,.mtd-form-item-body");
+    const title = field?.querySelector<HTMLElement>(".ud-formily-item-label,.label");
+    if (title && !title.querySelector("input,textarea,select")) {
+      label = cleanText(staticLabelTextOutsideControls(title, element, adapter.dynamicChoiceSelectors));
+      if (label) labelSource = "container";
+    }
+  }
+  if (!label) {
     label = nearbySiblingLabel(element, adapter);
     if (label) labelSource = "nearby";
   }
   if (!label) {
-    const container = element.closest("[class*='form-item'], [class*='field'], [class*='question'], .ant-form-item, .el-form-item");
+    const container = element.closest(".ud-formily-item, [class*='form-item'], [class*='field'], [class*='question'], .ant-form-item, .el-form-item");
     const explicit = container?.querySelector<HTMLElement>("label, [class*='label'], [class*='title']");
     if (explicit && explicit !== element) {
       label = cleanText(staticLabelTextOutsideControls(explicit, element, adapter.dynamicChoiceSelectors)).slice(0, 120);
@@ -803,6 +811,8 @@ export function fillTarget(target: FillTarget, value: string | string[]): boolea
   try {
     const elements = Array.isArray(target) ? target : [target];
     const element = elements[0];
+    // Some controlled inputs initialize their value on focus. Focus BEFORE writing.
+    element.focus();
     if (Array.isArray(target)) {
       const requested = Array.isArray(value) ? value : [value];
       const choiceType = target[0]?.type;
@@ -855,10 +865,11 @@ export function fillTarget(target: FillTarget, value: string | string[]): boolea
       element.textContent = value;
     }
     const eventValue = Array.isArray(value) ? value.join(",") : value;
-    element.focus();
     element.dispatchEvent(inputEventFor(element, eventValue));
     element.dispatchEvent(basicEventFor(element, "change"));
-    element.dispatchEvent(basicEventFor(element, "blur"));
+    // A fabricated blur leaves document.activeElement unchanged and omits focusout
+    // (used by React/onBlur and ATS validation). Native blur commits the edit.
+    element.blur();
     return true;
   } catch {
     return false;
@@ -899,7 +910,10 @@ export async function writeAndVerifyTarget(
   const attempted = fillTarget(target, value);
   if (attempted) {
     await wait(180);
-    if (targetRetainsPlannedValue(target, value)) return { attempted, outcome: "retained", before };
+    if (targetRetainsPlannedValue(target, value)) {
+      await wait(240);
+      if (targetRetainsPlannedValue(target, value)) return { attempted, outcome: "retained", before };
+    }
   }
   const restored = before.every((snapshot) => restoreElement(snapshot));
   if (restored) await wait(60);

@@ -74,7 +74,7 @@ export function boundedDiagnostics(stored: unknown, next?: DiagnosticRecord, now
 }
 
 export function formatDiagnostics(records: DiagnosticRecord[]): string {
-  if (!records.length) return "暂无诊断记录。打开助手并点击重新识别后再查看。";
+  if (!records.length) return "暂无诊断记录，点击开始填写后可查看。";
   return records.map((row) => {
     const counts = DIAGNOSTIC_COUNTS.flatMap((key) => row.counts[key] === undefined ? [] : [`${key}=${row.counts[key]}`]);
     return `${new Date(row.at).toLocaleTimeString("zh-CN", { hour12: false })} ${row.vendor} ${row.event}/${row.outcome}/${row.reason}${counts.length ? ` ${counts.join(" ")}` : ""}`;

@@ -1,72 +1,47 @@
 :host { all: initial; }
 * { box-sizing: border-box; }
-.gugu-root { color: #182136; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
-.gugu-bubble { position: fixed; right: 28px; bottom: 28px; z-index: 2147483646; width: 58px; height: 58px; border: 0; border-radius: 22px; color: #fff; background: linear-gradient(145deg, #4869ff, #22c6cc); box-shadow: 0 14px 36px #203b9c55; font-size: 23px; font-weight: 850; cursor: pointer; }
-.gugu-panel { position: fixed; top: 16px; right: 16px; bottom: 16px; z-index: 2147483647; display: flex; flex-direction: column; width: min(430px, calc(100vw - 32px)); border: 1px solid #dce3ef; border-radius: 20px; background: #f7f9fc; box-shadow: 0 28px 80px #17233f4a; overflow: hidden; }
+.gugu-root { color: #252834; font: 14px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+button { font: inherit; cursor: pointer; }
+button:focus-visible { outline: 2px solid #6366f1; outline-offset: 2px; }
 .gugu-hidden { display: none !important; }
-.gugu-header { display: flex; justify-content: space-between; align-items: center; padding: 18px 20px; color: #fff; background: linear-gradient(125deg, #3d61f6, #287bcf); }
-.gugu-brand { display: flex; align-items: center; gap: 11px; }
-.gugu-logo { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 12px; color: #3154d7; background: #fff; font-weight: 900; }
-.gugu-title strong, .gugu-title small { display: block; }
-.gugu-title strong { font-size: 16px; }
-.gugu-title small { margin-top: 2px; color: #dfe7ff; font-size: 12px; }
-.gugu-icon-button { width: 34px; height: 34px; border: 0; border-radius: 9px; color: #fff; background: #ffffff20; font-size: 20px; cursor: pointer; }
-.gugu-summary { padding: 15px 18px 12px; border-bottom: 1px solid #e2e7f0; background: #fff; }
-.gugu-summary p { margin: 0; color: #536178; font-size: 13px; line-height: 1.55; }
-.gugu-summary .gugu-write-guard { margin-top: 9px; padding: 9px 10px; border: 1px solid #f1c97d; border-radius: 8px; background: #fff7e8; color: #80500d; font-size: 12px; }
-.gugu-overwrite { display: flex; align-items: flex-start; gap: 7px; margin-top: 8px; color: #536178; font-size: 12px; line-height: 1.4; cursor: pointer; }
-.gugu-overwrite input { flex: none; margin: 2px 0 0; accent-color: #3b63f3; }
-.gugu-overwrite:has(input:disabled) { opacity: .55; cursor: not-allowed; }
-.gugu-progress { display: flex; align-items: center; justify-content: space-between; margin-bottom: 7px; }
-.gugu-progress strong { font-size: 14px; }
-.gugu-tier { padding: 4px 8px; border-radius: 999px; color: #3158dc; background: #e9efff; font-size: 11px; font-weight: 800; }
-.gugu-source { padding: 12px 18px; border-bottom: 1px solid #e2e7f0; background: #f9fbff; }
-.gugu-source-copy { display: flex; flex-direction: column; gap: 3px; }
-.gugu-source-copy strong { color: #26334a; font-size: 13px; }
-.gugu-source-copy span { color: #65738a; font-size: 11px; line-height: 1.45; }
-.gugu-source-actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 9px; }
-.gugu-inline-button { border: 1px solid #d3dbe9; border-radius: 8px; padding: 6px 9px; color: #46546c; background: #fff; font-size: 11px; font-weight: 700; cursor: pointer; }
-.gugu-inline-button.gugu-accent { border-color: #4668ec; color: #fff; background: #4668ec; }
-.gugu-resume-label { display: block; margin-top: 9px; color: #46546c; font-size: 11px; font-weight: 700; }
-.gugu-resume-label select { display: block; width: 100%; margin-top: 4px; border: 1px solid #cfd8e7; border-radius: 8px; padding: 7px 9px; color: #26334a; background: #fff; font-size: 12px; }
-.gugu-list { flex: 1; padding: 12px; overflow: auto; }
-.gugu-empty { margin: 36px 18px; color: #718096; text-align: center; line-height: 1.7; }
-.gugu-row { display: grid; grid-template-columns: 22px 1fr auto; gap: 9px; align-items: start; margin-bottom: 9px; padding: 12px; border: 1px solid #e0e5ee; border-radius: 12px; background: #fff; }
-.gugu-row:hover { border-color: #c5d1ef; }
-.gugu-check { width: 17px; height: 17px; margin-top: 3px; accent-color: #3b63f3; }
-.gugu-field { min-width: 0; }
-.gugu-field-label { display: block; color: #252f43; font-size: 13px; font-weight: 750; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.gugu-key-select { max-width: 160px; margin-top: 6px; border: 1px solid #d7deea; border-radius: 7px; padding: 4px 6px; color: #46546c; background: #fff; font-size: 11px; }
-.gugu-record-source { display: inline-block; margin-top: 6px; border-radius: 7px; padding: 4px 6px; color: #3158dc; background: #edf2ff; font-size: 11px; }
-.gugu-field-value { display: block; margin-top: 5px; color: #6e7a90; font-size: 12px; line-height: 1.45; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.gugu-manual { margin: 10px 0 2px; padding: 12px; border: 1px solid #f2c777; border-radius: 10px; background: #fff9ed; color: #734d09; font-size: 12px; line-height: 1.45; }
-.gugu-manual strong { display: block; margin-bottom: 6px; }
-.gugu-manual p { margin: 3px 0; }
-.gugu-manual label { display: block; margin: 7px 0; }
-.gugu-manual select { display: block; width: 100%; margin-top: 4px; border: 1px solid #dfbd78; border-radius: 7px; padding: 6px; color: #61440d; background: #fff; font-size: 12px; }
-.gugu-original { display: block; max-height: 36px; margin-top: 6px; color: #8a95a8; font-size: 11px; line-height: 1.4; overflow: hidden; }
-.gugu-suggestion { display: block; width: 100%; min-height: 58px; margin-top: 6px; border: 1px solid #bbc9f5; border-radius: 7px; padding: 7px; color: #26386b; background: #f7f9ff; font-size: 12px; line-height: 1.45; resize: vertical; }
-.gugu-warning { display: block; margin-top: 5px; color: #a66214; font-size: 11px; line-height: 1.4; }
-.gugu-confidence { margin-top: 2px; padding: 3px 6px; border-radius: 7px; color: #187858; background: #e0f6ed; font-size: 10px; font-weight: 800; }
-.gugu-confidence.medium { color: #996514; background: #fff1cc; }
-.gugu-ai { grid-column: 2 / -1; justify-self: start; border: 1px solid #cad5f5; border-radius: 8px; padding: 6px 9px; color: #3158d8; background: #f6f8ff; font-size: 11px; font-weight: 750; cursor: pointer; }
-.gugu-ai:disabled { opacity: .55; cursor: wait; }
-.gugu-diagnostics { flex: none; border-top: 1px solid #e1e6ef; background: #f9fbff; padding: 7px 16px; color: #536178; font-size: 11px; }
-.gugu-diagnostics summary { cursor: pointer; font-weight: 750; color: #46546c; }
-.gugu-diagnostics p { margin: 7px 0; line-height: 1.45; }
-.gugu-diagnostics pre { max-height: 150px; overflow: auto; margin: 6px 0; padding: 8px; border-radius: 7px; background: #eef2f9; color: #334155; font: 11px/1.5 ui-monospace, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
-.gugu-diagnostic-actions { display: flex; gap: 8px; padding-bottom: 3px; }
-.gugu-diagnostic-actions button { border: 1px solid #d3dbe9; border-radius: 7px; padding: 5px 8px; color: #46546c; background: #fff; font-size: 11px; cursor: pointer; }
-.gugu-footer { padding: 12px 16px 16px; border-top: 1px solid #e1e6ef; background: #fff; }
-.gugu-notice { min-height: 18px; margin: 0 0 9px; color: #66758c; font-size: 12px; line-height: 1.45; }
-.gugu-notice.error { color: #ac3939; }
-.gugu-actions { display: grid; grid-template-columns: 1fr 1fr 1.45fr; gap: 9px; }
-.gugu-button { border-radius: 10px; padding: 10px 12px; font-weight: 750; cursor: pointer; }
-.gugu-secondary { border: 1px solid #d5dce8; color: #46546c; background: #fff; }
-.gugu-primary { border: 1px solid #3862f4; color: #fff; background: #3862f4; box-shadow: 0 7px 18px #3862f42b; }
-.gugu-primary:disabled { opacity: .5; cursor: not-allowed; }
-
-@media (max-width: 520px) {
-  .gugu-panel { inset: 0; width: 100vw; border: 0; border-radius: 0; }
-  .gugu-bubble { right: 16px; bottom: 16px; }
-}
+.gugu-bubble { position: fixed; right: 24px; bottom: 24px; z-index: 2147483646; width: 52px; height: 52px; border: 0; border-radius: 18px; color: white; background: #5857db; box-shadow: 0 6px 20px #24244333; font-size: 23px; font-weight: 700; }
+.gugu-panel { position: fixed; right: 20px; bottom: 24px; width: min(360px, calc(100vw - 32px)); height: min(680px, calc(100vh - 48px)); display: flex; flex-direction: column; z-index: 2147483647; overflow: hidden; background: #fff; border: 1px solid #e5e5ed; border-radius: 18px; box-shadow: 0 14px 55px #1e20312e; }
+.gugu-panel.gugu-compact { width: min(280px, calc(100vw - 32px)); height: auto; }
+.gugu-compact .gugu-resume, .gugu-compact footer small { display: none; }
+.gugu-compact footer p:not(.error) { display: none; }
+header { display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; border-bottom: 1px solid #eeeef3; }
+header strong { display: flex; align-items: center; gap: 8px; font-size: 15px; }
+.gugu-logo { display: grid; place-items: center; width: 27px; height: 27px; color: #5857db; background: #f0efff; border-radius: 8px; }
+.gugu-header-actions { display: flex; gap: 4px; }
+.gugu-header-actions button { width: 28px; height: 28px; padding: 0; border: 0; background: transparent; color: #75788a; font-size: 21px; border-radius: 6px; }
+.gugu-header-actions button:hover { background: #f4f4f8; }
+.gugu-menu { position: absolute; top: 52px; right: 14px; z-index: 1; padding: 6px; min-width: 160px; background: white; border: 1px solid #e8e8f0; border-radius: 10px; box-shadow: 0 8px 22px #20223620; }
+.gugu-menu button { display: block; width: 100%; padding: 8px 12px; text-align: left; border: 0; background: transparent; color: #454858; border-radius: 5px; font-size: 13px; }
+.gugu-menu button:hover { background: #f4f3fc; }
+.gugu-resume { flex: 1; overflow-y: auto; overscroll-behavior: contain; padding: 6px 20px 20px; scrollbar-width: thin; scrollbar-color: #d7d6e8 transparent; }
+.gugu-resume section { padding: 15px 0 2px; }
+.gugu-resume h2 { font-size: 13px; margin: 0 0 10px; color: #5857a2; font-weight: 700; }
+.gugu-record + .gugu-record { border-top: 1px solid #efeff4; margin-top: 14px; padding-top: 14px; }
+.gugu-fact { display: flex; gap: 12px; margin: 5px 0; align-items: baseline; }
+.gugu-fact > span { flex: 0 0 66px; color: #9293a0; font-size: 12px; }
+.gugu-fact textarea { flex: 1; min-width: 0; width: 100%; margin: 0; padding: 3px 6px; border: 1px solid transparent; border-radius: 5px; background: #fafafd; color: #252834; resize: vertical; font-family: inherit; line-height: 1.75; font-size: 13px; }
+.gugu-fact textarea:hover { border-color: #e1e0ec; }
+.gugu-fact textarea:focus { outline: 2px solid #b9b6fa; background: #fff; }
+.gugu-fact textarea:disabled { opacity: .7; resize: none; }
+.gugu-draft-hint { font-size: 11px; color: #7a7c8c; margin: 12px 0 0; }
+.gugu-paragraph { display: block; margin-top: 9px; }
+.gugu-paragraph > span { display: block; margin-bottom: 4px; }
+.gugu-empty { padding: 45px 2px; color: #8a8c98; }
+.gugu-empty h2 { font-size: 19px; color: #353746; }
+.gugu-empty p { font-size: 13px; }
+.gugu-empty button { background: transparent; color: #5857db; border: 0; padding: 8px 0; font-size: 12px; }
+footer { padding: 12px 18px 13px; background: #fafafd; border-top: 1px solid #eeeef3; }
+footer p { margin: 0 0 9px; color: #7a7c8c; font-size: 12px; overflow-wrap: anywhere; }
+footer .error { color: #b04444; }
+.gugu-start { width: 100%; padding: 11px 16px; color: #fff; background: #5857db; border: 0; border-radius: 10px; font-size: 14px; font-weight: 600; }
+.gugu-start:hover { background: #4c4ac5; }
+.gugu-start:disabled { opacity: .55; cursor: wait; }
+footer small { display: block; text-align: center; margin-top: 7px; font-size: 10px; color: #aaaab6; }
+.gugu-debug { flex: none; max-height: 230px; overflow: auto; border-top: 1px solid #eaeaf0; padding: 10px 16px; font-size: 11px; color: #777989; }
+.gugu-debug pre { max-height: 120px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 10px/1.5 Consolas, monospace; }
+.gugu-debug button { font-size: 11px; padding: 5px 8px; border: 1px solid #e3e3eb; border-radius: 5px; background: white; color: #5857a2; margin-right: 6px; }

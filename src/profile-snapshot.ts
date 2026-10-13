@@ -1,4 +1,5 @@
 import type { RemoteProfileStatus } from "./remote-autofill.ts";
+import { buildResumeSections } from "./resume-data.ts";
 import { EMPTY_PROFILE, type AwardEntry, type EducationEntry, type ExperienceEntry, type ProfileData, type ProjectEntry } from "./types.ts";
 
 export interface CachedProfileSnapshot extends RemoteProfileStatus {
@@ -99,6 +100,7 @@ export function normalizeProfileSnapshot(raw: unknown): CachedProfileSnapshot {
   const firstWebsite = links.find((record) => !/github/i.test(text(record, "platform")));
   const profile: ProfileData = {
     ...EMPTY_PROFILE,
+    resumeSections: buildResumeSections(rawProfile),
     fullName: text(basic, "legal_name_zh"), preferredName: text(basic, "preferred_name"),
     phone: text(basic, "mobile_number"), email: text(basic, "contact_email"), gender: text(basic, "gender"),
     birthDate: text(basic, "birth_date"), location: text(basic, "residence_city"),

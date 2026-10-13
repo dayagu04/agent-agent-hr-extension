@@ -87,6 +87,7 @@ export interface RepeatedFieldContext {
 }
 
 export type ProfileData = Record<ProfileFieldKey, string> & {
+  resumeSections?: import("./resume-data").ResumeSection[];
   resumeRawText: string;
   experienceEntries: ExperienceEntry[];
   projectEntries: ProjectEntry[];

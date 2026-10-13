@@ -26,6 +26,7 @@ test("copied structure report keeps only bounded structural tokens, never source
     semantic: "private value",
     matched: false,
     outcome: "private failure",
+    resumeField: "private field", resumeSection: "private resume", result: "private result",
   }]);
   assert.match(report, /semantic=email .*planned=yes write=cleared/);
   assert.match(report, /labelSource=other semantic=unknown .*planned=no write=other/);

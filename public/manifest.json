@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "谷谷网申助手",
   "short_name": "谷谷网申",
-  "version": "0.3.10",
+  "version": "0.3.11",
   "description": "登录后会话缓存网申资料，点击后在招聘页面逐项扫描并填写；不会自动提交。",
   "minimum_chrome_version": "114",
   "permissions": ["activeTab", "scripting", "storage"],

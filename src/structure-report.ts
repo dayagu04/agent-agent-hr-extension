@@ -30,6 +30,9 @@ export interface StructureRow {
   planSemantic?: string;
   matched: boolean;
   outcome: string;
+  resumeField?: string;
+  resumeSection?: string;
+  result?: string;
 }
 
 function token(value: string, allowed: Set<string>, fallback = "other"): string {
@@ -62,6 +65,9 @@ export function formatStructureReport(vendor: string, documents: number, control
       `plan=${token(row.planSemantic ?? "unknown", SEMANTICS, "unknown")}`,
       `planned=${row.matched === true ? "yes" : "no"}`,
       `write=${token(row.outcome, OUTCOMES)}`,
+      `section=${token(row.resumeSection ?? "", new Set(["basic", "educations", "internships", "work", "experience", "projects", "campus", "practices", "skills", "awards", "certificates", "languages", "links"]), "unknown")}`,
+      `field=${token(row.resumeField ?? "", new Set(["name", "phone", "email", "gender", "birth_date", "residence_country", "residence_province", "residence_city", "nationality", "ethnicity", "native_place", "political_status", "hukou_location", "contact_address", "personal_summary", "school", "college", "major", "degree", "academic_degree", "start", "end", "gpa", "rank", "is_full_time", "description", "company", "role", "department", "location", "url", "date", "level", "score", "exam_name", "proficiency", "platform"]), "unknown")}`,
+      `result=${token(row.result ?? "", new Set(["filled", "missing", "unknown", "unsupported", "failed"]), "none")}`,
     ].join(" ")),
   ].join("\n");
 }

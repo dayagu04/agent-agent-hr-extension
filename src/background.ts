@@ -1,4 +1,4 @@
-import { canUsePendingAuthBridge, type PendingAuthBridge } from "./auth-security";
+import { canUsePendingAuthBridge, tokenExpiresAt, type PendingAuthBridge } from "./auth-security";
 import { boundedDiagnostics, sanitizeDiagnostic, type DiagnosticRecord } from "./diagnostics";
 import { normalizeProfileSnapshot, type CachedProfileSnapshot } from "./profile-snapshot";
 import type { RemoteDetectedField, RemoteProfileStatus, RemoteResumeSummary } from "./remote-autofill";
@@ -7,12 +7,22 @@ import type { PolishRequest } from "./types";
 
 const AUTOFILL_ORIGIN = "https://gudaya.chat";
 const AUTOFILL_SESSION_KEY = "guguAutofillSession";
-const PROFILE_SNAPSHOT_KEY = "guguAutofillProfileSnapshot";
+const PROFILE_SNAPSHOT_KEY = "guguAutofillProfileSnapshotV2";
+const LEGACY_SNAPSHOT_KEY = "guguAutofillProfileSnapshot";
 const PENDING_AUTH_KEY = "guguPendingAutofillAuth";
 const AUTH_BRIDGE_TTL_MS = 10 * 60 * 1000;
 const DIAGNOSTICS_KEY = "guguAutofillDiagnostics";
 let diagnosticsWrite = Promise.resolve();
 let profileSnapshotLoad: { token: string; promise: Promise<CachedProfileSnapshot> } | null = null;
+// Persistent credentials must never be exposed to content scripts through storage.
+const credentialStorageReady = chrome.storage.local.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" });
+let authWrites = Promise.resolve();
+let authEpoch = 0;
+function mutateAuth<T>(operation: () => Promise<T>): Promise<T> {
+  const result = authWrites.then(operation);
+  authWrites = result.then(() => undefined, () => undefined);
+  return result;
+}
 
 function diagnosticSenderAllowed(sender: chrome.runtime.MessageSender): boolean {
   if (!Number.isInteger(sender.tab?.id) || !sender.url) return false;
@@ -102,8 +112,21 @@ async function polishText(request: PolishRequest): Promise<string> {
 }
 
 async function getAutofillSession(): Promise<AutofillSession | null> {
-  const stored = await chrome.storage.session.get(AUTOFILL_SESSION_KEY);
-  const value = stored[AUTOFILL_SESSION_KEY] as Partial<AutofillSession> | undefined;
+  await credentialStorageReady;
+  // Serialize legacy migration with logout so a stale read cannot resurrect auth.
+  const value = await mutateAuth(async () => {
+    const local = await chrome.storage.local.get(AUTOFILL_SESSION_KEY);
+    const legacy = local[AUTOFILL_SESSION_KEY] ? {} : await chrome.storage.session.get(AUTOFILL_SESSION_KEY);
+    const saved = (local[AUTOFILL_SESSION_KEY] ?? legacy[AUTOFILL_SESSION_KEY]) as Partial<AutofillSession> | undefined;
+    if (!saved || typeof saved.token !== "string" || tokenExpiresAt(saved.token) <= Date.now()) {
+      await chrome.storage.local.remove(AUTOFILL_SESSION_KEY);
+      await chrome.storage.session.remove([AUTOFILL_SESSION_KEY, PROFILE_SNAPSHOT_KEY, LEGACY_SNAPSHOT_KEY]);
+      return null;
+    }
+    if (!local[AUTOFILL_SESSION_KEY]) await chrome.storage.local.set({ [AUTOFILL_SESSION_KEY]: saved });
+    await chrome.storage.session.remove(AUTOFILL_SESSION_KEY);
+    return saved;
+  });
   if (!value || typeof value.token !== "string" || !value.token) return null;
   return {
     token: value.token,
@@ -112,8 +135,25 @@ async function getAutofillSession(): Promise<AutofillSession | null> {
   };
 }
 
-async function clearAutofillSession(): Promise<void> {
-  await chrome.storage.session.remove([AUTOFILL_SESSION_KEY, PROFILE_SNAPSHOT_KEY]);
+async function clearAutofillSession(expectedToken?: string): Promise<void> {
+  await credentialStorageReady;
+  const cleared = await mutateAuth(async () => {
+    if (expectedToken) {
+      const local = await chrome.storage.local.get(AUTOFILL_SESSION_KEY);
+      if ((local[AUTOFILL_SESSION_KEY] as AutofillSession | undefined)?.token !== expectedToken) return false;
+    }
+    authEpoch++;
+    await chrome.storage.local.remove(AUTOFILL_SESSION_KEY);
+    await chrome.storage.session.remove([AUTOFILL_SESSION_KEY, PROFILE_SNAPSHOT_KEY, LEGACY_SNAPSHOT_KEY, PENDING_AUTH_KEY]);
+    return true;
+  });
+  if (cleared) await notifyAutofillTabs();
+}
+
+async function notifyAutofillTabs(): Promise<void> {
+  const tabs = await chrome.tabs.query({});
+  await Promise.all(tabs.filter((tab) => Number.isInteger(tab.id)).map((tab) =>
+    chrome.tabs.sendMessage(tab.id!, { type: "AUTOFILL_AUTH_CHANGED" }).catch(() => undefined)));
 }
 
 async function getPendingAuth(): Promise<PendingAuthBridge | null> {
@@ -142,8 +182,7 @@ async function autofillApi(path: string, token: string, init: RequestInit = {}):
   if (response.status === 401) {
     // A request from an older tab can finish after a new account has logged in.
     // Never let that stale 401 clear the newer browser-session credentials.
-    const active = await getAutofillSession();
-    if (active?.token === token) await clearAutofillSession();
+    await clearAutofillSession(token);
   }
   if (!response.ok) {
     const message = response.status === 401
@@ -177,23 +216,33 @@ async function authBridgeAllowed(sender: chrome.runtime.MessageSender): Promise<
 }
 
 async function syncAutofillToken(token: unknown, sender: chrome.runtime.MessageSender): Promise<{ displayName: string }> {
+  const epoch = authEpoch;
   const pending = await getPendingAuth();
   if (!canUsePendingAuthBridge(sender.url, sender.tab?.id, pending)) throw new Error("登录同步请求已失效，请从网申页面重新发起。 ");
   if (typeof token !== "string" || token.length < 20 || token.length > 8_192 || /[\r\n]/.test(token)) {
     throw new Error("登录凭据格式无效。 ");
   }
-  await clearAutofillSession();
-  const snapshot = normalizeProfileSnapshot(await autofillApi("/api/autofill/profile/snapshot", token));
+  if (tokenExpiresAt(token) <= Date.now()) throw new Error("登录已过期，请在网站重新登录。");
+  const raw = await autofillApi("/api/autofill/profile/snapshot", token);
+  const snapshot = normalizeProfileSnapshot(raw);
   const session: AutofillSession = {
     token,
     displayName: snapshot.account.displayName,
     userId: snapshot.account.userId,
   };
-  await chrome.storage.session.set({ [AUTOFILL_SESSION_KEY]: session, [PROFILE_SNAPSHOT_KEY]: snapshot });
-  await chrome.storage.session.remove(PENDING_AUTH_KEY);
-  if (pending?.requestTabId !== undefined) {
-    void chrome.tabs.sendMessage(pending.requestTabId, { type: "AUTOFILL_AUTH_CHANGED" }).catch(() => undefined);
-  }
+  // Cache the wire format, not the flattened projection: reads validate and
+  // project it exactly once, including after a service-worker restart.
+  await credentialStorageReady;
+  await mutateAuth(async () => {
+    const currentPending = await getPendingAuth();
+    if (epoch !== authEpoch || !canUsePendingAuthBridge(sender.url, sender.tab?.id, currentPending)) {
+      throw new Error("登录状态已变化，请重新发起登录。");
+    }
+    await chrome.storage.local.set({ [AUTOFILL_SESSION_KEY]: session });
+    await chrome.storage.session.remove([AUTOFILL_SESSION_KEY, LEGACY_SNAPSHOT_KEY, PENDING_AUTH_KEY]);
+    await chrome.storage.session.set({ [PROFILE_SNAPSHOT_KEY]: raw });
+  });
+  await notifyAutofillTabs();
   return { displayName: session.displayName };
 }
 
@@ -209,21 +258,30 @@ async function getProfileSnapshot(force = false): Promise<CachedProfileSnapshot>
     const stored = await chrome.storage.session.get(PROFILE_SNAPSHOT_KEY);
     try {
       const cached = normalizeProfileSnapshot(stored[PROFILE_SNAPSHOT_KEY]);
-      if (!session.userId || cached.account.userId === session.userId) return cached;
+      const active = await getAutofillSession();
+      if (active?.token === session.token && (!session.userId || cached.account.userId === session.userId)) return cached;
     } catch {
       await chrome.storage.session.remove(PROFILE_SNAPSHOT_KEY);
     }
   }
   if (profileSnapshotLoad?.token === session.token) return profileSnapshotLoad.promise;
   const promise = (async () => {
-    const snapshot = normalizeProfileSnapshot(await autofillApi("/api/autofill/profile/snapshot", session.token));
+    const raw = await autofillApi("/api/autofill/profile/snapshot", session.token);
+    const snapshot = normalizeProfileSnapshot(raw);
     const active = await getAutofillSession();
     if (!active || active.token !== session.token) throw new Error("登录状态已变化，请重新打开助手。");
     if (session.userId && snapshot.account.userId !== session.userId) {
       await clearAutofillSession();
       throw new Error("网申资料账号与登录账号不一致，请重新登录。");
     }
-    await chrome.storage.session.set({ [PROFILE_SNAPSHOT_KEY]: snapshot });
+    await mutateAuth(async () => {
+      const local = await chrome.storage.local.get(AUTOFILL_SESSION_KEY);
+      if ((local[AUTOFILL_SESSION_KEY] as AutofillSession | undefined)?.token !== session.token) {
+        throw new Error("登录状态已变化，请重新打开助手。");
+      }
+      await chrome.storage.session.remove(LEGACY_SNAPSHOT_KEY);
+      await chrome.storage.session.set({ [PROFILE_SNAPSHOT_KEY]: raw });
+    });
     return snapshot;
   })();
   profileSnapshotLoad = { token: session.token, promise };

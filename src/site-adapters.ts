@@ -29,7 +29,7 @@ const MOKA_ADAPTER: SiteAdapter = {
   labelSelectors: [".ant-form-item-label", ".moka-form-item-label", "[class*='form-item-label' i]", "[class*='field-label' i]", "label"],
   ignoredSelectors: ["[class*='captcha' i]", "[class*='verify' i]", "[class*='password' i]", "[class*='sms' i]"],
   repeatedGroupSelectors: ["[data-gugu-repeat-kind]", "[data-index]", "[data-row-key]", "[class*='experience-item' i]", "[class*='education-item' i]", "[class*='project-item' i]", ".ant-form-list-item", "fieldset"],
-  dynamicChoiceSelectors: ["[role='combobox']", "[aria-haspopup='listbox']", ".ant-select", ".ant-cascader-picker", "[class*='moka-select' i]"],
+  dynamicChoiceSelectors: ["[role='combobox']", "[aria-haspopup='listbox']", ".ant-select", ".ant-cascader-picker", "[class*='moka-select' i]", "[class*='sd-Select-container-']"],
   confidenceBoost: () => 0,
 };
 
@@ -48,17 +48,17 @@ const BYTEDANCE_ADAPTER: SiteAdapter = {
   id: "bytedance",
   name: "字节跳动招聘",
   hostPattern: /(^|\.)(jobs\.bytedance\.com|joinbytedance\.com)$/i,
-  labelSelectors: [".semi-form-field-label", ".semi-form-field-label-text", "[class*='formLabel' i]", "[class*='question' i]", "label"],
+  labelSelectors: [".ud-formily-item-label", ".semi-form-field-label", ".semi-form-field-label-text", "[class*='formLabel' i]", "[class*='question' i]", "label"],
   ignoredSelectors: ["[class*='captcha' i]", "[class*='verify' i]", "[class*='code' i]"],
-  repeatedGroupSelectors: ["[data-gugu-repeat-kind]", "[data-index]", "[data-row-key]", "[class*='experience-item' i]", "[class*='education-item' i]", "[class*='project-item' i]", ".semi-form-list-item", "fieldset"],
-  dynamicChoiceSelectors: ["[role='combobox']", "[aria-haspopup='listbox']", ".semi-select", ".semi-cascader"],
+  repeatedGroupSelectors: ["[data-gugu-repeat-kind]", "[data-index]", "[data-row-key]", "[class*='experience-item' i]", "[class*='education-item' i]", "[class*='project-item' i]", ".semi-form-list-item", "[class*='apply-form-array-card-content']", "fieldset"],
+  dynamicChoiceSelectors: ["[role='combobox']", "[aria-haspopup='listbox']", ".semi-select", ".semi-cascader", ".ud__select"],
   confidenceBoost: (label, key) => key === "fullName" && /姓名|name/i.test(label) ? 0.06 : 0,
 };
 
 const TENCENT_ADAPTER: SiteAdapter = {
   id: "tencent",
   name: "腾讯招聘",
-  hostPattern: /(^|\.)(join\.qq\.com|campus\.tencent\.com)$/i,
+  hostPattern: /(^|\.)(join\.qq\.com|campus\.tencent\.com|careers\.tencent\.com)$/i,
   labelSelectors: [".form-item-label", ".form-label", "[class*='question' i]", "[class*='label' i]", "label"],
   ignoredSelectors: ["[class*='captcha' i]", "[class*='verify' i]"],
   repeatedGroupSelectors: GENERIC_ADAPTER.repeatedGroupSelectors,
@@ -152,7 +152,7 @@ export function adapterLabelCandidates(element: HTMLElement, adapter: SiteAdapte
   for (const selector of adapter.labelSelectors) {
     const closest = element.closest<HTMLElement>(selector);
     if (closest && closest !== element) labels.push(staticLabelTextOutsideControls(closest, element, adapter.dynamicChoiceSelectors));
-    const parent = element.closest<HTMLElement>("[class*='form-item' i], [class*='field' i], [class*='question' i], [data-field]");
+    const parent = element.closest<HTMLElement>(".ud-formily-item, [class*='form-item' i], [class*='field' i], [class*='question' i], [data-field]");
     const child = parent?.querySelector<HTMLElement>(selector);
     if (child && child !== element) labels.push(staticLabelTextOutsideControls(child, element, adapter.dynamicChoiceSelectors));
   }

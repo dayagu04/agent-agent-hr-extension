@@ -29,6 +29,8 @@ import {
 import { matchDescriptor, semanticProfileKey, type FieldDecision, type FieldDescriptor } from "../src/field-matcher.ts";
 import { getSiteAdapter, isIgnoredByAdapter } from "../src/site-adapters.ts";
 import { EMPTY_PROFILE, type ProfileData } from "../src/types.ts";
+import { fillSequentially } from "../src/sequential-fill.ts";
+import { buildResumeSections } from "../src/resume-data.ts";
 
 class FakeEvent {
   readonly type: string;
@@ -242,7 +244,13 @@ class FakeElement {
 
   scrollIntoView(): void {}
 
+  compareDocumentPosition(other: FakeElement): number {
+    return this.ownerDocument.controls.indexOf(this) < this.ownerDocument.controls.indexOf(other) ? 4 : 2;
+  }
+
   focus(): void {}
+
+  blur(): void { this.events.push("blur", "focusout"); }
 
   dispatchEvent(event: FakeEvent): boolean {
     this.events.push(event.type);
@@ -309,7 +317,7 @@ test("a same-origin iframe field enters matching and is filled with iframe-realm
   assert.equal(fillTarget(asElement(nameInput), decision.value ?? ""), true);
   assert.equal(nameInput.value, "脱敏测试用户");
   assert.equal(targetRetainsPlannedValue(asElement(nameInput), "脱敏测试用户"), true);
-  assert.deepEqual(nameInput.events, ["input", "change", "blur"]);
+  assert.deepEqual(nameInput.events, ["input", "change", "blur", "focusout"]);
 });
 
 test("write attempt is not accepted as a retained value after the page reverts or replaces a control", () => {
@@ -348,11 +356,52 @@ test("one-click write verifies retention and compensates failed blank or overwri
   assert.equal(retained.outcome, "retained");
   assert.equal(stable.value, "planned");
 
+  const controlled = new FakeElement("input", document);
+  let committed = "";
+  controlled.focus = () => { controlled.value = committed; };
+  controlled.blur = () => { committed = controlled.value; controlled.events.push("focusout"); };
+  const committedResult = await writeAndVerifyTarget(asInput(controlled), "edited", async () => { controlled.value = committed; });
+  assert.equal(committedResult.outcome, "retained");
+  assert.equal(committed, "edited");
+
+  const lateReset = new FakeElement("input", document);
+  let ticks = 0;
+  const lateResult = await writeAndVerifyTarget(asInput(lateReset), "planned", async () => {
+    if (++ticks === 2) lateReset.value = "";
+  });
+  assert.equal(lateResult.outcome, "cleared");
+
   const replaced = new FakeElement("input", document);
   const reverted = await writeAndVerifyTarget(asInput(replaced), "planned", async () => {
     replaced.isConnected = false;
   });
   assert.equal(reverted.outcome, "reverted");
+  const savedObserver = globalThis.MutationObserver;
+  globalThis.MutationObserver = class { observe() {} disconnect() {} } as unknown as typeof MutationObserver;
+  try {
+    const name = new FakeElement("input", document); name.id = "name"; name.setAttribute("aria-label", "姓名");
+    const email = new FakeElement("input", document); email.id = "email"; email.type = "email"; email.setAttribute("aria-label", "邮箱");
+    const secret = new FakeElement("input", document); secret.id = "secret"; secret.type = "password"; secret.throwOnValueRead = true;
+    // Formily repeats field IDs across cards; neither record may disappear from the walk.
+    const school1 = new FakeElement("input", document); school1.id = "formily-item-school"; school1.setAttribute("aria-label", "学校名称");
+    const school2 = new FakeElement("input", document); school2.id = "formily-item-school"; school2.setAttribute("aria-label", "学校名称");
+    const educationRoot = new FakeElement("div", document);
+    const card1 = new FakeElement("div", document), card2 = new FakeElement("div", document);
+    educationRoot.children = [card1, card2]; card1.parentElement = card2.parentElement = educationRoot;
+    card1.children = [school1]; card2.children = [school2]; school1.parentElement = card1; school2.parentElement = card2;
+    document.controls = [name, email, secret, school1, school2];
+    const result = await fillSequentially(asDocument(document), getSiteAdapter(document.location.href), buildResumeSections({
+      basic: { legal_name_zh: "示例姓名", contact_email: "person@example.invalid" },
+      educations: [{ recordId: "education1", school_name: "示例大学一" }, { recordId: "education2", school_name: "示例大学二" }],
+    }), { cancelled: () => false, onProgress: () => undefined, onField: () => undefined });
+    assert.equal(name.value, "示例姓名");
+    assert.equal(email.value, "person@example.invalid");
+    assert.equal(school1.value, "示例大学一");
+    assert.equal(school2.value, "示例大学二");
+    assert.equal(result.progress.filled, 4);
+    assert.equal(result.undo.length, 4);
+    assert.equal(secret.valueReadCount, 0);
+  } finally { globalThis.MutationObserver = savedObserver; }
 });
 
 test("a cross-origin application iframe is not traversed and is reported manual", () => {
@@ -1214,6 +1263,15 @@ test("semantic inventory reads zero input, textarea, select, or contenteditable 
     assert.equal(descriptor && semanticProfileKey(descriptor), expectedKey);
     assert.equal(field.valueReadCount, 0);
   }
+  // A selected-value label inside a dropdown must not outrank the actual field title.
+  const field = new FakeElement("input", beisenDocument);
+  const item = new FakeElement("div", beisenDocument);
+  const title = new FakeElement("div", beisenDocument); title.innerText = "性别";
+  item.querySelector = () => title;
+  field.closest = (selector) => selector === ".ud-formily-item,.mtd-form-item-body" ? item : null;
+  field.throwOnValueRead = true;
+  assert.equal(describeSemanticField(asElement(field), getSiteAdapter("https://zhaopin.meituan.com/"))?.label, "性别");
+  assert.equal(field.valueReadCount, 0);
 });
 
 test("ignored OTP text controls are rejected before any value or text read", () => {

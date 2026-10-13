@@ -3,6 +3,16 @@ export const AUTOFILL_FIRST_PARTY_ORIGINS = new Set([
   "https://www.gudaya.chat",
 ]);
 
+/** Expiry metadata only; authentication is still verified by the server. */
+export function tokenExpiresAt(token: string): number {
+  try {
+    const part = token.split(".")[1];
+    const encoded = part.replace(/-/g, "+").replace(/_/g, "/");
+    const payload = JSON.parse(atob(encoded.padEnd(Math.ceil(encoded.length / 4) * 4, "="))) as { exp?: unknown };
+    return typeof payload.exp === "number" && Number.isFinite(payload.exp) ? payload.exp * 1000 : 0;
+  } catch { return 0; }
+}
+
 export interface PendingAuthBridge {
   loginTabId: number;
   requestTabId?: number;
