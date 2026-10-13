@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { getSiteAdapter } from "../src/site-adapters.ts";
-import { applicationWriteAllowed } from "../src/write-policy.ts";
 
 test("public ATS hosts select explicit adapters", () => {
   assert.equal(getSiteAdapter("https://app.mokahr.com/social-recruitment/example/1").id, "moka");
@@ -10,8 +9,6 @@ test("public ATS hosts select explicit adapters", () => {
   assert.equal(getSiteAdapter("https://we.zyt.com/form?jobAdId=1").id, "beisen");
   assert.equal(getSiteAdapter("https://jobs.bytedance.com/experienced/resume/1/apply").id, "bytedance");
   assert.equal(getSiteAdapter("https://joinbytedance.com/search/7245221408137414973").id, "bytedance");
-  assert.equal(applicationWriteAllowed(getSiteAdapter("https://we.zyt.com/form?jobAdId=1").id), false);
-  assert.equal(applicationWriteAllowed(getSiteAdapter("https://app.mokahr.com/apply/example/1").id), true);
 });
 
 test("ATS adapters declare repeat and dynamic-choice boundaries", () => {

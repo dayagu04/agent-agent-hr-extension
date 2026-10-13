@@ -13,6 +13,7 @@ export interface FieldOption {
 
 export interface FieldDescriptor {
   label?: string;
+  labelSource?: "associated" | "wrapping" | "nearby" | "container" | "adapter" | "none";
   ariaLabel?: string;
   placeholder?: string;
   name?: string;
@@ -36,6 +37,10 @@ export interface FieldDecision {
   value: string | string[] | null;
   sourceValue?: string;
   entrySource?: RepeatedFieldContext;
+}
+
+export interface MatchOptions {
+  allowExistingText?: boolean;
 }
 
 export interface RequiredCoverage {
@@ -65,6 +70,7 @@ interface FieldSpec {
 
 const TEXT = ["text", "textarea", "contenteditable"] as const;
 const CHOICE = ["select", "radio"] as const;
+const OVERWRITABLE_EXISTING_CONTROLS = new Set<FieldControl>(["text", "textarea", "email", "tel", "url", "date", "month", "number"]);
 
 const SPECS: FieldSpec[] = [
   { key: "fullName", aliases: ["姓名", "中文姓名", "真实姓名", "全名", "name", "full name", "legal name", "candidate name"], controls: new Set(TEXT) },
@@ -326,11 +332,16 @@ export function matchDescriptor(
   descriptor: FieldDescriptor,
   profile: ProfileData,
   explicitKey?: ProfileFieldKey,
+  options: MatchOptions = {},
 ): FieldDecision {
   if (descriptor.hidden || descriptor.controlType === "hidden") return { action: "skip", profileKey: null, confidence: 1, reason: "hidden_field", value: null };
   if (descriptor.disabled) return { action: "skip", profileKey: null, confidence: 1, reason: "disabled_field", value: null };
   if (descriptor.readOnly) return { action: "skip", profileKey: null, confidence: 1, reason: "readonly_field", value: null };
-  if (descriptor.hasValue) return { action: "skip", profileKey: null, confidence: 1, reason: "already_filled", value: null };
+  const overwritableExisting = descriptor.hasValue && options.allowExistingText === true
+    && OVERWRITABLE_EXISTING_CONTROLS.has(descriptor.controlType);
+  if (descriptor.hasValue && !overwritableExisting) {
+    return { action: "skip", profileKey: null, confidence: 1, reason: "already_filled", value: null };
+  }
   if (descriptor.controlType === "file") {
     return { action: "manual", profileKey: null, confidence: 1, reason: "attachment_user_required", value: null };
   }

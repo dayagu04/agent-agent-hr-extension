@@ -9,6 +9,7 @@ export interface ElementSnapshot {
   element: FillableElement;
   value: string;
   checked?: boolean;
+  selectedValues?: string[];
 }
 
 export interface ManualField {
@@ -347,26 +348,43 @@ function nearbySiblingLabel(element: FillableElement, adapter: SiteAdapter): str
   return "";
 }
 
-function describeFieldSemantics(element: FillableElement, adapter: SiteAdapter): Pick<FieldDescriptor, "label" | "ariaLabel" | "placeholder" | "name"> {
+function describeFieldSemantics(element: FillableElement, adapter: SiteAdapter): Pick<FieldDescriptor, "label" | "labelSource" | "ariaLabel" | "placeholder" | "name"> {
   const ownerDocument = element.ownerDocument;
   let label = "";
+  let labelSource: FieldDescriptor["labelSource"] = "none";
   if (element.id) {
     const associated = ownerDocument.querySelector<HTMLLabelElement>(`label[for="${cssEscape(element.id, ownerDocument)}"]`);
-    if (associated) label = cleanText(staticLabelTextOutsideControls(associated, element, adapter.dynamicChoiceSelectors));
+    if (associated) {
+      label = cleanText(staticLabelTextOutsideControls(associated, element, adapter.dynamicChoiceSelectors));
+      if (label) labelSource = "associated";
+    }
   }
   if (!label) {
     const wrappingLabel = element.closest("label");
-    if (wrappingLabel) label = cleanText(staticLabelTextOutsideControls(wrappingLabel as HTMLElement, element, adapter.dynamicChoiceSelectors));
+    if (wrappingLabel) {
+      label = cleanText(staticLabelTextOutsideControls(wrappingLabel as HTMLElement, element, adapter.dynamicChoiceSelectors));
+      if (label) labelSource = "wrapping";
+    }
   }
-  if (!label) label = nearbySiblingLabel(element, adapter);
+  if (!label) {
+    label = nearbySiblingLabel(element, adapter);
+    if (label) labelSource = "nearby";
+  }
   if (!label) {
     const container = element.closest("[class*='form-item'], [class*='field'], [class*='question'], .ant-form-item, .el-form-item");
     const explicit = container?.querySelector<HTMLElement>("label, [class*='label'], [class*='title']");
-    if (explicit && explicit !== element) label = cleanText(staticLabelTextOutsideControls(explicit, element, adapter.dynamicChoiceSelectors)).slice(0, 120);
+    if (explicit && explicit !== element) {
+      label = cleanText(staticLabelTextOutsideControls(explicit, element, adapter.dynamicChoiceSelectors)).slice(0, 120);
+      if (label) labelSource = "container";
+    }
   }
-  if (!label) label = adapterLabelCandidates(element, adapter).map(cleanText).find(Boolean)?.slice(0, 120) ?? "";
+  if (!label) {
+    label = adapterLabelCandidates(element, adapter).map(cleanText).find(Boolean)?.slice(0, 120) ?? "";
+    if (label) labelSource = "adapter";
+  }
   return {
     label,
+    labelSource,
     ariaLabel: cleanText(element.getAttribute("aria-label")),
     placeholder: cleanText(element.getAttribute("placeholder") ?? element.getAttribute("data-placeholder")),
     name: cleanText(element.getAttribute("name") ?? element.id),
@@ -659,7 +677,28 @@ export function snapshotTarget(target: FillTarget): ElementSnapshot[] {
       ? element.value
       : element.textContent ?? "",
     checked: isInputElement(element) && ["radio", "checkbox"].includes(element.type) ? element.checked : undefined,
+    selectedValues: isSelectElement(element)
+      ? Array.from(element.options).filter((option) => option.selected).map((option) => option.value) : undefined,
   }));
+}
+
+/** A native setter/event dispatch is only an attempt; the page may immediately revert it. */
+export function targetRetainsPlannedValue(target: FillTarget, value: string | string[]): boolean {
+  const requested = Array.isArray(value) ? value : [value];
+  if (!requested.length || new Set(requested).size !== requested.length) return false;
+  if (Array.isArray(target)) {
+    if (!target.length || target.some((element) => !element.isConnected)) return false;
+    const selected = target.filter((element) => element.checked).map((element) => element.value);
+    return selected.length === requested.length && requested.every((item) => selected.includes(item));
+  }
+  if (!target.isConnected) return false;
+  if (isSelectElement(target)) {
+    const selected = Array.from(target.options).filter((option) => option.selected).map((option) => option.value);
+    return selected.length === requested.length && requested.every((item) => selected.includes(item));
+  }
+  if (Array.isArray(value)) return false;
+  if (isInputElement(target) || isTextareaElement(target)) return target.value === value;
+  return target.textContent === value;
 }
 
 function targetMatchesSnapshot(target: FillTarget, snapshots: ElementSnapshot[]): boolean {
@@ -668,7 +707,8 @@ function targetMatchesSnapshot(target: FillTarget, snapshots: ElementSnapshot[])
   return elements.every((element, index) => {
     const snapshot = snapshots[index];
     const current = snapshotTarget(element)[0];
-    return snapshot.element === element && snapshot.value === current.value && snapshot.checked === current.checked;
+    return snapshot.element === element && snapshot.value === current.value && snapshot.checked === current.checked
+      && JSON.stringify(snapshot.selectedValues) === JSON.stringify(current.selectedValues);
   });
 }
 
@@ -691,6 +731,7 @@ function descriptorSnapshot(descriptor: FieldDescriptor): string {
     : null;
   return JSON.stringify({
     label: descriptor.label,
+    labelSource: descriptor.labelSource,
     ariaLabel: descriptor.ariaLabel,
     placeholder: descriptor.placeholder,
     name: descriptor.name,
@@ -826,15 +867,48 @@ export function fillTarget(target: FillTarget, value: string | string[]): boolea
 
 export function restoreElement(snapshot: ElementSnapshot): boolean {
   const { element, value, checked } = snapshot;
-  if (isInputElement(element) && checked !== undefined) {
-    setNativeProperty(element, "checked", checked);
-  } else if (isSelectElement(element)) element.value = value;
-  else if (isInputElement(element)) {
-    setNativeProperty(element, "value", value);
-  } else if (isTextareaElement(element)) {
-    setNativeProperty(element, "value", value);
-  } else element.textContent = value;
-  element.dispatchEvent(inputEventFor(element, value));
-  element.dispatchEvent(basicEventFor(element, "change"));
-  return true;
+  if (!element.isConnected) return false;
+  try {
+    if (isInputElement(element) && checked !== undefined) {
+      setNativeProperty(element, "checked", checked);
+    } else if (isSelectElement(element)) {
+      if (snapshot.selectedValues) {
+        const selected = new Set(snapshot.selectedValues);
+        for (const option of element.options) option.selected = selected.has(option.value);
+      } else element.value = value;
+    } else if (isInputElement(element) || isTextareaElement(element)) {
+      setNativeProperty(element, "value", value);
+    } else element.textContent = value;
+    element.dispatchEvent(inputEventFor(element, value));
+    element.dispatchEvent(basicEventFor(element, "change"));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export type VerifiedWriteOutcome = "retained" | "cleared" | "restored" | "reverted";
+
+/** A failed write is compensated against the exact original controls, never a replacement. */
+export async function writeAndVerifyTarget(
+  target: FillTarget,
+  value: string | string[],
+  wait: (milliseconds: number) => Promise<void> = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+): Promise<{ attempted: boolean; outcome: VerifiedWriteOutcome; before: ElementSnapshot[] }> {
+  const before = snapshotTarget(target);
+  const attempted = fillTarget(target, value);
+  if (attempted) {
+    await wait(180);
+    if (targetRetainsPlannedValue(target, value)) return { attempted, outcome: "retained", before };
+  }
+  const restored = before.every((snapshot) => restoreElement(snapshot));
+  if (restored) await wait(60);
+  const equal = restored && before.every((snapshot) => {
+    const current = snapshotTarget(snapshot.element)[0];
+    return snapshot.element.isConnected && snapshot.value === current.value && snapshot.checked === current.checked
+      && JSON.stringify(snapshot.selectedValues) === JSON.stringify(current.selectedValues);
+  });
+  const hadPriorValue = before.some((snapshot) => snapshot.value.trim() || snapshot.checked
+    || snapshot.selectedValues?.some((selected) => selected.trim()));
+  return { attempted, outcome: equal ? hadPriorValue ? "restored" : "cleared" : "reverted", before };
 }

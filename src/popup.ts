@@ -32,6 +32,6 @@ async function openAssistant() {
 
 startButton.addEventListener("click", openAssistant);
 
-status.textContent = "使用网站上已保存的网申资料；当前页只会生成预览，不会自动提交。";
+status.textContent = "使用网站上已保存的网申资料；打开后可一键扫描并填写，不会自动提交。";
 startButton.disabled = false;
 

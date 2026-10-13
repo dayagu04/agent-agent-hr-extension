@@ -7,9 +7,9 @@ import {
   deduplicateManualFields,
   describeField,
   describeSemanticField,
-  fillTarget,
   isEligible,
   isInputElement,
+  isSemanticInventoryCandidate,
   isSelectElement,
   isTextareaElement,
   optionLabel,
@@ -23,6 +23,7 @@ import {
   scopeNamedChoiceGroup,
   snapshotTarget,
   validateCachedFillTarget,
+  writeAndVerifyTarget,
   type ElementSnapshot,
   type FillableElement,
   type FillTarget,
@@ -32,16 +33,13 @@ import {
 import { isAiPolishAllowed, matchDescriptor, semanticProfileKey, type FieldDescriptor } from "./field-matcher";
 import { classifyRecruitmentPage } from "./page-classifier";
 import { profileEntry } from "./profile-entry";
-import {
-  normalizeProfileFillPlan,
-  publishedProfileRevision,
-  toRemoteDetectedField,
-  type RemoteProfileStatus,
-} from "./remote-autofill";
+import { type CachedProfileSnapshot } from "./profile-snapshot";
+import { type RemoteProfileStatus } from "./remote-autofill";
 import { inferStructuredEntryField, inferStructuredEntryKind, structuredEntryOptions, type StructuredEntryOption } from "./repeat-context.ts";
+import { canonicalProfileKey, hasSemanticConflict, signalProfileKey } from "./semantic-consistency";
 import { getSiteAdapter, isIgnoredByAdapter, staticLabelTextOutsideControls, type SiteAdapter } from "./site-adapters";
-import { applicationWriteAllowed } from "./write-policy";
-import { EMPTY_PROFILE, type FieldMatch, type ProfileData, type ProfileFieldKey, type RepeatedFieldContext, type StoredState, type StructuredEntryKind } from "./types";
+import { formatStructureReport, type StructureOutcome, type StructureRow } from "./structure-report";
+import { type FieldMatch, type ProfileData, type ProfileFieldKey, type RepeatedFieldContext, type StoredState, type StructuredEntryKind } from "./types";
 
 declare global {
   interface Window { __guguApplicationAssistantInstalled?: boolean; }
@@ -99,14 +97,14 @@ function installAssistant() {
     <button class="gugu-bubble gugu-hidden" title="打开谷谷网申助手" aria-label="打开谷谷网申助手">谷</button>
     <aside class="gugu-panel gugu-hidden" aria-label="谷谷网申助手">
       <header class="gugu-header">
-        <div class="gugu-brand"><span class="gugu-logo">谷</span><span class="gugu-title"><strong>谷谷网申助手</strong><small>先预览，再填写</small></span></div>
+        <div class="gugu-brand"><span class="gugu-logo">谷</span><span class="gugu-title"><strong>谷谷网申助手</strong><small>一键扫描并填写</small></span></div>
         <button class="gugu-icon-button" data-action="close" aria-label="关闭">×</button>
       </header>
-      <section class="gugu-summary"><div class="gugu-progress"><strong data-role="count">正在识别…</strong><span class="gugu-tier" data-role="tier">服务端资料</span></div><p>默认只处理空白且可见的字段；不会点击“提交”或同意协议。</p><p class="gugu-write-guard gugu-hidden" data-role="write-guard">北森表单现场发现字段错配，本版本已暂停写入。仍可查看预览与诊断；请手动核对已改动的页面字段，不要提交错误资料。</p><label class="gugu-overwrite"><input type="checkbox" data-action="overwrite-existing" />覆盖已有文字（仅普通文本框，写入前逐项预览，可撤销）</label></section>
+      <section class="gugu-summary"><div class="gugu-progress"><strong data-role="count">正在识别…</strong><span class="gugu-tier" data-role="tier">服务端资料</span></div><p>点击后逐项扫描、填写并核对；失败时恢复为空白或原值。不会点击“提交”或同意协议。</p><label class="gugu-overwrite"><input type="checkbox" data-action="overwrite-existing" />普通文本含已有内容也填写（默认开启，失败恢复原值）</label></section>
       <section class="gugu-source" data-role="source"></section>
       <div class="gugu-list" data-role="list"></div>
-      <details class="gugu-diagnostics" data-role="diagnostics"><summary>诊断日志</summary><p>仅保存在本机扩展会话中，不记录网址、表单内容或个人资料。</p><pre data-role="diagnostic-lines"></pre><div class="gugu-diagnostic-actions"><button type="button" data-action="copy-diagnostics">复制诊断</button><button type="button" data-action="clear-diagnostics">清空日志</button></div></details>
-      <footer class="gugu-footer"><p class="gugu-notice" data-role="notice"></p><div class="gugu-actions"><button class="gugu-button gugu-secondary" data-action="rescan">重新识别</button><button class="gugu-button gugu-secondary gugu-hidden" data-action="undo">撤销本轮</button><button class="gugu-button gugu-primary" data-action="fill">填写已选字段</button></div></footer>
+      <details class="gugu-diagnostics" data-role="diagnostics"><summary>诊断日志</summary><p>日志仅保存固定类别与数量；结构报告须手动复制，只有控件类型、标签来源和语义类别，没有网址、字段原文或填写值。</p><pre data-role="diagnostic-lines"></pre><div class="gugu-diagnostic-actions"><button type="button" data-action="copy-diagnostics">复制诊断</button><button type="button" data-action="copy-structure">复制脱敏结构</button><button type="button" data-action="clear-diagnostics">清空日志</button></div></details>
+      <footer class="gugu-footer"><p class="gugu-notice" data-role="notice"></p><div class="gugu-actions"><button class="gugu-button gugu-secondary" data-action="rescan">重新识别</button><button class="gugu-button gugu-secondary gugu-hidden" data-action="undo">撤销本轮</button><button class="gugu-button gugu-primary" data-action="fill">一键扫描并填写</button></div></footer>
     </aside>`;
   shadow.append(style, root);
   document.documentElement.append(host);
@@ -121,7 +119,6 @@ function installAssistant() {
   const fillButton = root.querySelector<HTMLButtonElement>("[data-action=fill]")!;
   const undoButton = root.querySelector<HTMLButtonElement>("[data-action=undo]")!;
   const overwriteCheckbox = root.querySelector<HTMLInputElement>("[data-action=overwrite-existing]")!;
-  const writeGuard = root.querySelector<HTMLElement>("[data-role=write-guard]")!;
   const diagnosticDetails = root.querySelector<HTMLDetailsElement>("[data-role=diagnostics]")!;
   const diagnosticLines = root.querySelector<HTMLElement>("[data-role=diagnostic-lines]")!;
   const elements = new Map<string, FillTarget>();
@@ -131,13 +128,12 @@ function installAssistant() {
   const repeatStructureNodeIds = new WeakMap<Element, string>();
   const adapter = getSiteAdapter();
   const diagnosticVendor = DIAGNOSTIC_VENDORS.find((vendor) => vendor === adapter.id) ?? "generic";
-  const writesAllowed = applicationWriteAllowed(adapter.id);
-  writeGuard.classList.toggle("gugu-hidden", writesAllowed);
   let state: StoredState | null = null;
   let dataSource: DataSourceMode = "remote";
   let authenticated = false;
   let accountDisplayName = "";
   let remoteProfileStatus: RemoteProfileStatus | null = null;
+  let cachedProfile: ProfileData | null = null;
   let profileErrorStatus: number | null = null;
   let baseStateLoaded = false;
   let emptyHint = "请选择资料来源后生成填写预览。";
@@ -148,9 +144,10 @@ function installAssistant() {
   const repeatBindings = new RepeatBindingStore();
   let savedMappings: Record<string, ProfileFieldKey> = {};
   let selectedIds = new Set<string>();
-  let hasRenderedOnce = false;
+  const explicitlyDeselectedIds = new Set<string>();
+  const lastWriteOutcomes = new WeakMap<Element, StructureOutcome>();
   let lastFill: ElementSnapshot[] = [];
-  let overwriteExisting = false;
+  let overwriteExisting = true;
   let previewOverwriteExisting = false;
   const previewOriginalValues = new Map<string, ElementSnapshot[]>();
   let panelOpen = false;
@@ -164,6 +161,8 @@ function installAssistant() {
   let previewGeneration = 0;
   let previewLocation = "";
   let refreshInProgress = false;
+  let autoFillInProgress = false;
+  let autoFillCancelled = false;
 
   function showNotice(message: string, error = false) {
     notice.textContent = message;
@@ -177,6 +176,48 @@ function installAssistant() {
         ? formatDiagnostics(boundedDiagnostics(response.result))
         : "暂时无法读取诊断日志。";
     } catch { diagnosticLines.textContent = "暂时无法读取诊断日志。"; }
+  }
+
+  function structuralReport(): string {
+    const scan = collectScanDocuments(document);
+    const planned = new Map<Element, string>();
+    for (const match of matches) {
+      const target = elements.get(match.id);
+      for (const element of target ? Array.isArray(target) ? target : [target] : []) planned.set(element, match.canonicalKey ?? "");
+    }
+    let controls = 0;
+    const rows: StructureRow[] = [];
+    for (const [documentIndex, scanDocument] of scan.documents.entries()) {
+      const candidates = collectCandidates(scanDocument, adapter);
+      controls += candidates.length;
+      for (const element of candidates) {
+        if (!isSemanticInventoryCandidate(element, adapter)) continue;
+        const descriptor = describeSemanticField(element, adapter);
+        const parent = element.parentElement;
+        const siblings = parent ? Array.from(parent.children) : [element];
+        const position = siblings.indexOf(element);
+        rows.push({
+          document: documentIndex,
+          tag: element.tagName,
+          inputType: isInputElement(element) ? element.type : element.tagName === "TEXTAREA" ? "textarea"
+            : element.tagName === "SELECT" ? "select" : "combobox",
+          parent: parent?.tagName ?? "other",
+          siblingPosition: siblings.length === 1 ? "only" : position === 0 ? "first"
+            : position === siblings.length - 1 ? "last" : "middle",
+          parentControls: parent?.querySelectorAll("input, textarea, select, [contenteditable=true]").length ?? 0,
+          labelSource: descriptor?.labelSource ?? "none",
+          semantic: descriptor ? semanticProfileKey(descriptor) ?? "unknown" : "unknown",
+          labelSemantic: signalProfileKey(descriptor?.label) ?? "unknown",
+          ariaSemantic: signalProfileKey(descriptor?.ariaLabel) ?? "unknown",
+          placeholderSemantic: signalProfileKey(descriptor?.placeholder) ?? "unknown",
+          nameSemantic: signalProfileKey(descriptor?.name) ?? "unknown",
+          planSemantic: canonicalProfileKey(planned.get(element)) ?? "unknown",
+          matched: planned.has(element),
+          outcome: lastWriteOutcomes.get(element) ?? "none",
+        });
+      }
+    }
+    return formatStructureReport(diagnosticVendor, scan.documents.length, controls, rows);
   }
 
   function logDiagnostic(event: DiagnosticEvent, outcome: DiagnosticOutcome, reason: DiagnosticReason = "none", counts: Partial<Record<DiagnosticCount, number>> = {}) {
@@ -205,9 +246,10 @@ function installAssistant() {
       return;
     }
     const entry = profileEntry(remoteProfileStatus, profileErrorStatus);
-    source.innerHTML = `<div class="gugu-source-copy"><strong>${escapeHtml(accountDisplayName || "已登录谷谷账号")}${escapeHtml(entry.statusLabel)}</strong><span>${escapeHtml(entry.guidance)}</span>${remoteProfileStatus?.publishedStatus === "active" && (remoteProfileStatus.hasPendingImport || remoteProfileStatus.hasUnpublishedDraft) ? "<span>网站有尚未写入或保存的更新，本次仍使用当前已保存版本。</span>" : ""}</div>
+    source.innerHTML = `<div class="gugu-source-copy"><strong>${escapeHtml(accountDisplayName || "已登录谷谷账号")}${escapeHtml(entry.statusLabel)}</strong><span>${escapeHtml(entry.guidance)}</span>${remoteProfileStatus?.publishedStatus === "active" ? "<span>资料已放入本次浏览器会话缓存；填写过程不再请求服务器。</span>" : ""}${remoteProfileStatus?.publishedStatus === "active" && (remoteProfileStatus.hasPendingImport || remoteProfileStatus.hasUnpublishedDraft) ? "<span>网站有尚未写入或保存的更新；需要时手动刷新资料缓存。</span>" : ""}</div>
       <div class="gugu-source-actions">
         <button class="gugu-inline-button gugu-accent" data-action="${entry.action}" type="button">${escapeHtml(entry.actionLabel)}</button>
+        <button class="gugu-inline-button" data-action="refresh-profile" type="button">刷新资料缓存</button>
         <button class="gugu-inline-button" data-action="logout" type="button">退出助手账号</button>
       </div>`;
   }
@@ -216,10 +258,10 @@ function installAssistant() {
     renderSource();
     overwriteCheckbox.checked = overwriteExisting;
     overwriteCheckbox.disabled = dataSource !== "remote" || !authenticated || !remoteProfileStatus?.publishedRevision;
-    count.textContent = `${writesAllowed ? "可填写" : "预览候选"} ${matches.length} 个 · 必填需人工 ${manualRequired.length} 个 · 其他需确认 ${manualAttention.length} 个 · ${adapter.name}`;
+    count.textContent = `可填写 ${matches.length} 个 · 必填需人工 ${manualRequired.length} 个 · 其他需确认 ${manualAttention.length} 个 · ${adapter.name}`;
     tier.textContent = remoteProfileStatus?.publishedRevision ? `服务端资料 v${remoteProfileStatus.publishedRevision}` : "服务端资料";
-    fillButton.disabled = !writesAllowed || matches.length === 0 || refreshInProgress || previewGeneration !== refreshGeneration || previewLocation !== location.href;
-    fillButton.textContent = writesAllowed ? "填写已选字段" : "北森写入暂停";
+    fillButton.disabled = autoFillInProgress || dataSource !== "remote" || !authenticated || !remoteProfileStatus?.publishedRevision || !cachedProfile;
+    fillButton.textContent = autoFillInProgress ? "正在扫描并填写…" : "一键扫描并填写";
     undoButton.classList.toggle("gugu-hidden", lastFill.length === 0);
     const repeatSummary = repeatGroups.length
       ? `<div class="gugu-manual"><strong>重复经历必须先绑定档案记录</strong>${repeatGroups.map((group) => `<label>${escapeHtml(group.groupLabel)}<select data-action="bind-entry" data-group-key="${escapeHtml(group.groupKey)}" data-scan-epoch="${repeatBindings.epoch}"><option value="">请选择，不会默认使用第一条</option>${group.options.map((option) => `<option value="${escapeHtml(option.id)}" ${option.id === group.selectedEntryId ? "selected" : ""}>${escapeHtml(option.label)}</option>`).join("")}</select></label>`).join("")}</div>`
@@ -264,7 +306,7 @@ function installAssistant() {
     baseStateLoaded = true;
   }
 
-  async function refreshAuthState() {
+  async function refreshAuthState(forceProfile = false) {
     const response = await chrome.runtime.sendMessage({ type: "GET_AUTOFILL_SESSION" }) as {
       ok?: boolean;
       result?: { authenticated?: boolean; displayName?: string };
@@ -275,26 +317,31 @@ function installAssistant() {
     accountDisplayName = response.result?.displayName ?? "";
     if (!authenticated) {
       remoteProfileStatus = null;
+      cachedProfile = null;
       profileErrorStatus = null;
       return;
     }
-    const status = await chrome.runtime.sendMessage({ type: "GET_PROFILE_STATUS" }) as {
+    const status = await chrome.runtime.sendMessage({ type: "GET_PROFILE_SNAPSHOT", ...(forceProfile ? { force: true } : {}) }) as {
       ok?: boolean;
-      result?: RemoteProfileStatus;
+      result?: CachedProfileSnapshot;
       error?: string;
       status?: number;
     };
     if (!status.ok) {
       remoteProfileStatus = null;
+      cachedProfile = null;
       profileErrorStatus = typeof status.status === "number" ? status.status : null;
       if (status.status === 401) {
         authenticated = false;
         accountDisplayName = "";
         remoteProfileStatus = null;
+        cachedProfile = null;
       }
       throw new Error(status.error || "无法读取网申资料状态。");
     }
     remoteProfileStatus = status.result ?? null;
+    cachedProfile = status.result?.profile ?? null;
+    accountDisplayName = status.result?.account.displayName || accountDisplayName;
     profileErrorStatus = null;
   }
 
@@ -321,21 +368,14 @@ function installAssistant() {
     manualAttention = [];
     repeatGroups = [];
     selectedIds.clear();
-    hasRenderedOnce = false;
+    explicitlyDeselectedIds.clear();
     emptyHint = hint;
     render();
   }
 
-  const remoteStructuralReasons = new Set([
-    "attachment_user_required", "dynamic_choice_requires_user_action", "repeated_group_unbound",
-    "repeated_group_target_missing", "unsupported_repeated_field", "cross_origin_iframe", "iframe_not_ready",
-    "ambiguous_choice_group_scope", "choice_group_has_existing_selection", "radio_group_crosses_repeat_roots",
-    "duplicate_semantic_requires_user_action",
-  ]);
-
   function installScanObservers(scan: ScanPageResult, generation: number) {
     observeDocuments(scan.documents, host, () => {
-      if (generation !== refreshGeneration) return;
+      if (generation !== refreshGeneration || autoFillInProgress) return;
       invalidateRepeatSnapshot();
       if (!panelOpen) return;
       const invalidatedGeneration = ++refreshGeneration;
@@ -348,7 +388,7 @@ function installAssistant() {
       }, 350);
     }, () => {
       if (generation !== refreshGeneration) return;
-      if (assistantWriteInProgress) return;
+      if (assistantWriteInProgress || autoFillInProgress) return;
       invalidateRepeatSnapshot();
       if (!panelOpen) return;
       const invalidatedGeneration = ++refreshGeneration;
@@ -360,7 +400,7 @@ function installAssistant() {
         void refresh().then(() => showNotice("页面字段发生输入或选择，预览已更新。"), (error) => showNotice(error instanceof Error ? error.message : "动态字段识别失败", true));
       }, 150);
     }, () => {
-      if (generation !== refreshGeneration) return;
+      if (generation !== refreshGeneration || autoFillInProgress) return;
       invalidateRepeatSnapshot();
       if (!panelOpen) return;
       const invalidatedGeneration = ++refreshGeneration;
@@ -378,16 +418,14 @@ function installAssistant() {
     const generation = ++refreshGeneration;
     const sourceAtStart = dataSource;
     const overwriteAtStart = sourceAtStart === "remote" && overwriteExisting;
-    const revisionAtStart = publishedProfileRevision(remoteProfileStatus);
-    const selectedAtStart = new Set(selectedIds);
-    const hadRenderedAtStart = hasRenderedOnce;
+    const revisionAtStart = remoteProfileStatus?.publishedRevision ?? 0;
     const localElements = new Map<string, FillTarget>();
     const localDescriptors = new Map<string, FieldDescriptor>();
     const isCurrent = () => (
       generation === refreshGeneration
       && dataSource === sourceAtStart
       && (sourceAtStart !== "remote" || overwriteExisting === overwriteAtStart)
-      && (sourceAtStart !== "remote" || publishedProfileRevision(remoteProfileStatus) === revisionAtStart)
+      && (sourceAtStart !== "remote" || remoteProfileStatus?.publishedRevision === revisionAtStart)
     );
     const commit = (
       nextMatches: FieldMatch[],
@@ -413,9 +451,8 @@ function installAssistant() {
       repeatGroups = nextRepeatGroups;
       emptyHint = nextEmptyHint;
       selectedIds = new Set(matches
-        .filter((match) => hadRenderedAtStart ? selectedAtStart.has(match.id) : match.confidence >= 0.78 && match.sensitivity !== "conditional")
+        .filter((match) => match.confidence >= 0.78 && match.sensitivity !== "conditional" && !explicitlyDeselectedIds.has(match.id))
         .map((match) => match.id));
-      hasRenderedOnce = true;
       previewGeneration = generation;
       previewLocation = location.href;
       refreshInProgress = false;
@@ -448,8 +485,13 @@ function installAssistant() {
         return;
       }
 
+      const profile = sourceAtStart === "remote" ? cachedProfile : state?.profile;
+      if (!profile) {
+        commit([], [], [], [], "资料缓存尚未就绪，请重新打开助手或手动刷新资料缓存。");
+        return;
+      }
       const scan = scanPage(
-        sourceAtStart === "remote" ? EMPTY_PROFILE : state!.profile,
+        profile,
         localElements,
         localDescriptors,
         adapter,
@@ -460,6 +502,7 @@ function installAssistant() {
         repeatStructureNodeIds,
         sourceAtStart === "remote" ? remoteProfileStatus?.recordOptions : undefined,
         overwriteAtStart,
+        sourceAtStart,
       );
       installScanObservers(scan, generation);
       const scanCounts: Partial<Record<DiagnosticCount, number>> = {
@@ -473,106 +516,24 @@ function installAssistant() {
         : scan.stats.semantic === 0 ? "no_semantics"
           : scan.manualRequired.length + scan.manualAttention.length > 0 ? "manual_only"
             : scan.stats.existing > 0 && !overwriteAtStart ? "existing_values" : "no_plan_match";
-      if (isCurrent()) logDiagnostic("scan", scan.inventory.length ? "ok" : "empty", scan.inventory.length ? "none" : emptyReason, scanCounts);
-
-      if (sourceAtStart === "remote") {
-        const fields = scan.inventory.flatMap((item) => {
-          const remote = toRemoteDetectedField(item.id, item.descriptor);
-          return remote ? [remote] : [];
+      if (isCurrent()) {
+        logDiagnostic("scan", scan.inventory.length ? "ok" : "empty", scan.inventory.length ? "none" : emptyReason, scanCounts);
+        logDiagnostic("plan", scan.matches.length ? "ok" : "empty", scan.matches.length ? "none" : emptyReason, {
+          ...scanCounts, fillable: scan.matches.length,
         });
-        if (!fields.length) {
-          if (isCurrent()) logDiagnostic("plan", "empty", emptyReason, scanCounts);
-          commit(
-            [],
-            scan.manualRequired.filter((item) => remoteStructuralReasons.has(item.reason)),
-            scan.manualAttention.filter((item) => remoteStructuralReasons.has(item.reason)),
-            [],
-            overwriteAtStart
-              ? "暂未找到账号资料可以安全匹配的文本字段。动态下拉、附件和重复经历会保留人工处理。"
-              : "暂未找到账号资料可以安全处理的空白字段。动态下拉、附件和重复经历会保留人工处理。",
-          );
-          return;
-        }
-
-        const response = await chrome.runtime.sendMessage({
-          type: "CREATE_PROFILE_PLAN",
-          revision: revisionAtStart,
-          vendor: adapter.id,
-          fields,
-          ...(overwriteAtStart ? { overwriteExisting: true } : {}),
-        }) as { ok?: boolean; result?: unknown; error?: string; status?: number };
-        if (!isCurrent()) return;
-        if (!response.ok) {
-          if (response.status === 401) {
-            authenticated = false;
-            accountDisplayName = "";
-            remoteProfileStatus = null;
-          }
-          throw new Error(response.error || "无法生成网申资料填写计划。");
-        }
-        const plan = normalizeProfileFillPlan(response.result, new Map(fields.map((field) => [field.fieldId, field])), revisionAtStart, adapter.id, overwriteAtStart);
-        const inventoryById = new Map(scan.inventory.map((item) => [item.id, item]));
-        const nextMatches = plan.decisions.flatMap((decision): FieldMatch[] => {
-          const item = inventoryById.get(decision.fieldId);
-          const target = localElements.get(decision.fieldId);
-          if (!item || !target || decision.action !== "fill" || decision.value === null) return [];
-          const anchor = Array.isArray(target) ? target[0] : target;
-          if (!anchor) return [];
-          const displayValue = Array.isArray(decision.value) ? decision.value.join("、") : decision.value;
-          return [{
-            id: decision.fieldId,
-            source: "remote",
-            canonicalKey: decision.canonicalKey ?? undefined,
-            label: (item.descriptor.label ?? item.descriptor.ariaLabel ?? item.descriptor.placeholder ?? "未命名字段").slice(0, 100),
-            value: displayValue,
-            resolvedValue: decision.value,
-            confidence: decision.confidence,
-            sensitivity: decision.sensitivity,
-            kind: elementKind(anchor),
-            mappingLocked: true,
-            aiPolishable: false,
-          }];
-        });
-        const planManual = plan.decisions.flatMap((decision): ManualField[] => {
-          const item = inventoryById.get(decision.fieldId);
-          if (!item || decision.action !== "manual") return [];
-          return [{
-            identity: decision.fieldId,
-            label: (item.descriptor.label ?? item.descriptor.ariaLabel ?? item.descriptor.placeholder ?? "未命名字段").slice(0, 100),
-            reason: decision.reason,
-            required: Boolean(item.descriptor.required),
-          }];
-        });
-        const structuralRequired = scan.manualRequired.filter((item) => remoteStructuralReasons.has(item.reason));
-        const structuralAttention = scan.manualAttention.filter((item) => remoteStructuralReasons.has(item.reason));
-        const nextManualRequired = deduplicateManualFields([...structuralRequired, ...planManual.filter((item) => item.required)]);
-        const nextManualAttention = deduplicateManualFields([...structuralAttention, ...planManual.filter((item) => !item.required)]);
-        const allManual = [...nextManualRequired, ...nextManualAttention];
-        if (isCurrent()) logDiagnostic("plan", nextMatches.length ? "ok" : "empty",
-          nextMatches.length ? "none" : allManual.length ? "manual_only" : scan.stats.existing > 0 && !overwriteAtStart ? "existing_values" : "no_plan_match",
-          { inventory: fields.length, fillable: nextMatches.length,
-            manualRequired: nextManualRequired.length,
-            manualOther: nextManualAttention.length,
-            ...manualDiagnosticCounts(allManual) });
-        commit(
-          nextMatches,
-          nextManualRequired,
-          nextManualAttention,
-          scan.repeatGroups,
-          "当前没有可直接填写的空白字段。页面已有文字默认跳过；可勾选上方普通文本覆盖后重新识别，动态下拉和附件仍需人工处理。",
-        );
-      } else {
-        commit(
-          scan.matches,
-          scan.manualRequired,
-          scan.manualAttention,
-          scan.repeatGroups,
-          "暂未找到能够可靠匹配的空白字段。可滚动页面让动态表单加载后，再重新识别。",
-        );
       }
+      commit(
+        scan.matches,
+        scan.manualRequired,
+        scan.manualAttention,
+        scan.repeatGroups,
+        overwriteAtStart
+          ? "缓存资料未能与当前控件可靠匹配。动态下拉、附件和歧义字段保留人工处理。"
+          : "暂未找到能够可靠匹配的空白字段。可滚动页面让动态表单加载后，再重新识别。",
+      );
     } catch (error) {
       if (isCurrent()) {
-        logDiagnostic("plan", "failed", error instanceof TypeError ? "network" : "server");
+        logDiagnostic("plan", "failed", "other");
         elements.clear();
         descriptors.clear();
         previewOriginalValues.clear();
@@ -581,7 +542,6 @@ function installAssistant() {
         manualAttention = [];
         repeatGroups = [];
         selectedIds.clear();
-        hasRenderedOnce = false;
         emptyHint = "本次预览未生成，请检查提示后重试。";
         previewGeneration = 0;
         render();
@@ -593,6 +553,7 @@ function installAssistant() {
   }
 
   async function open() {
+    overwriteExisting = true;
     clearPreview("正在检查登录状态和当前页面。 ");
     invalidateRepeatSnapshot();
     panelOpen = true;
@@ -611,7 +572,7 @@ function installAssistant() {
   }
 
   function close() {
-    overwriteExisting = false;
+    autoFillCancelled = true;
     previewOriginalValues.clear();
     previewOverwriteExisting = false;
     panelOpen = false;
@@ -619,16 +580,130 @@ function installAssistant() {
     updateAutomaticSurface();
   }
 
+  async function runOneClickFill() {
+    if (autoFillInProgress) return;
+    autoFillInProgress = true;
+    autoFillCancelled = false;
+    render();
+    let passes = 0;
+    let selected = 0;
+    let attempted = 0;
+    let retained = 0;
+    let cleared = 0;
+    let restored = 0;
+    let reverted = 0;
+    let skipped = 0;
+    const attemptedIds = new Set<string>();
+    const successfulSnapshots: ElementSnapshot[] = [];
+    let failure = "";
+    let refreshError = "";
+    try {
+      if (dataSource !== "remote") throw new Error("请先使用服务端网申资料。 ");
+      const profile = cachedProfile;
+      if (!authenticated || !remoteProfileStatus?.publishedRevision || !profile) {
+        throw new Error("请先登录并载入网申资料缓存。 ");
+      }
+      for (let round = 0; round < 4 && attemptedIds.size < 60 && !autoFillCancelled; round += 1) {
+        await refresh();
+        if (previewGeneration !== refreshGeneration || previewLocation !== location.href || previewOverwriteExisting !== overwriteExisting) {
+          throw new Error("页面在扫描期间发生变化，请重试。 ");
+        }
+        const batch = matches.filter((match) => selectedIds.has(match.id) && !attemptedIds.has(match.id))
+          .slice(0, 60 - attemptedIds.size);
+        if (!batch.length) break;
+        passes += 1;
+        selected += batch.length;
+        for (const match of batch) {
+          if (autoFillCancelled || previewGeneration !== refreshGeneration || previewLocation !== location.href) {
+            skipped += 1;
+            break;
+          }
+          attemptedIds.add(match.id);
+          const cachedTarget = elements.get(match.id);
+          const cachedDescriptor = descriptors.get(match.id);
+          if (!cachedTarget || !cachedDescriptor) { skipped += 1; continue; }
+          const currentElements = new Map<string, FillTarget>();
+          const currentDescriptors = new Map<string, FieldDescriptor>();
+          const currentScan = scanPage(
+            profile, currentElements, currentDescriptors, adapter, elementIds, savedMappings,
+            repeatBindings, repeatGroupIds, repeatStructureNodeIds, remoteProfileStatus?.recordOptions,
+            overwriteExisting,
+            "remote",
+          );
+          const currentTarget = currentElements.get(match.id);
+          const currentDescriptor = currentDescriptors.get(match.id);
+          if (!currentScan.inventory.some((item) => item.id === match.id) || !currentTarget || !currentDescriptor) {
+            skipped += 1;
+            continue;
+          }
+          const validation = validateCachedFillTarget(cachedTarget, currentTarget, cachedDescriptor, currentDescriptor, adapter, {
+            allowOverwriteExistingText: overwriteExisting,
+            expectedSnapshots: previewOriginalValues.get(match.id),
+          });
+          if (!validation.valid) {
+            skipped += 1;
+            for (const element of Array.isArray(currentTarget) ? currentTarget : [currentTarget]) lastWriteOutcomes.set(element, "stale");
+            continue;
+          }
+          const value = match.suggestedValue ?? match.resolvedValue;
+          assistantWriteInProgress = true;
+          let result: Awaited<ReturnType<typeof writeAndVerifyTarget>>;
+          try { result = await writeAndVerifyTarget(currentTarget, value); }
+          finally { assistantWriteInProgress = false; }
+          if (result.attempted) attempted += 1;
+          if (result.outcome === "retained") {
+            retained += 1;
+            successfulSnapshots.push(...result.before);
+          } else if (result.outcome === "cleared") cleared += 1;
+          else if (result.outcome === "restored") restored += 1;
+          else reverted += 1;
+          for (const element of Array.isArray(currentTarget) ? currentTarget : [currentTarget]) lastWriteOutcomes.set(element, result.outcome);
+          showNotice(`第 ${passes} 轮：已核对 ${attemptedIds.size} 项，页面即时保留 ${retained} 项；失败恢复 ${cleared + restored} 项。`);
+        }
+        // Overwrite is a one-pass request. Subsequent scans only discover blank
+        // fields revealed by the form; they must not rewrite prior values.
+        overwriteExisting = false;
+      }
+    } catch (error) {
+      failure = error instanceof Error ? error.message : "填写过程中发生错误。";
+    } finally {
+      assistantWriteInProgress = false;
+      autoFillInProgress = false;
+      lastFill = successfulSnapshots;
+      overwriteExisting = false;
+      invalidateRepeatSnapshot();
+      if (panelOpen) {
+        try { await refresh(); } catch (error) { refreshError = error instanceof Error ? error.message : "复扫失败"; }
+      }
+      logDiagnostic("fill", failure || reverted ? "failed" : retained ? "ok" : "empty",
+        reverted ? "write_unverified" : failure || skipped ? "stale_preview" : "none",
+        { passes, selected, attempted, retained, cleared, restored, unverified: reverted, skipped });
+      if (panelOpen) showNotice(
+        `扫描 ${passes} 轮，尝试 ${attempted} 项，页面即时保留 ${retained} 项；失败后置空 ${cleared} 项、恢复原值 ${restored} 项${reverted ? `；${reverted} 项无法确认恢复，请人工检查` : ""}${skipped ? `；跳过 ${skipped} 项` : ""}。${failure ? ` ${failure}` : ""}${refreshError ? ` 复扫失败：${refreshError}` : ""}请核对页面后自行决定是否提交。`,
+        Boolean(failure || refreshError || reverted || skipped),
+      );
+      render();
+    }
+  }
+
   root.addEventListener("click", async (event) => {
     const button = (event.target as HTMLElement).closest<HTMLButtonElement>("button");
     const action = button?.dataset.action;
     if (button === bubble) return open();
     if (action === "close") return close();
+    if (autoFillInProgress && !["copy-diagnostics", "copy-structure"].includes(action ?? "")) return;
     if (action === "copy-diagnostics") {
       try {
         await navigator.clipboard.writeText(diagnosticLines.textContent ?? "");
         showNotice("已复制不含表单内容的诊断日志。 ");
       } catch { showNotice("复制失败，请手动选中诊断文字复制。", true); }
+      return;
+    }
+    if (action === "copy-structure") {
+      try {
+        await navigator.clipboard.writeText(structuralReport());
+        showNotice("已复制脱敏 DOM 结构报告；不包含字段原文、网址或填写值。 ");
+      } catch { showNotice("复制结构报告失败，请稍后重试。", true); }
       return;
     }
     if (action === "clear-diagnostics") {
@@ -663,16 +738,27 @@ function installAssistant() {
       }
       return;
     }
+    if (action === "refresh-profile") {
+      try {
+        await refreshAuthState(true);
+        invalidateRepeatSnapshot();
+        await refresh();
+        showNotice(remoteProfileStatus?.publishedRevision
+          ? `已从服务器刷新资料缓存 v${remoteProfileStatus.publishedRevision}。`
+          : "服务器尚无可填写资料，请先建立个人信息。", !remoteProfileStatus?.publishedRevision);
+      } catch (error) {
+        showNotice(error instanceof Error ? error.message : "刷新资料缓存失败。", true);
+      }
+      return;
+    }
     if (action === "use-local") {
       dataSource = "local";
-      hasRenderedOnce = false;
       invalidateRepeatSnapshot();
       try { await refresh(); } catch (error) { showNotice(error instanceof Error ? error.message : "本地档案识别失败", true); }
       return;
     }
     if (action === "use-remote") {
       dataSource = "remote";
-      hasRenderedOnce = false;
       invalidateRepeatSnapshot();
       try { await refresh(); } catch (error) { showNotice(error instanceof Error ? error.message : "账号简历预览失败", true); }
       return;
@@ -692,6 +778,7 @@ function installAssistant() {
       authenticated = false;
       accountDisplayName = "";
       remoteProfileStatus = null;
+      cachedProfile = null;
       profileErrorStatus = null;
       dataSource = "remote";
       clearPreview("已退出助手账号。请重新登录。");
@@ -701,7 +788,6 @@ function installAssistant() {
     if (action === "rescan") {
       invalidateRepeatSnapshot();
       try {
-        if (dataSource === "remote") await refreshAuthState();
         await refresh();
       } catch (error) {
         clearPreview("无法载入网申资料，已停止识别与填写。");
@@ -726,99 +812,7 @@ function installAssistant() {
       showNotice(`已撤销 ${restored} 项填写；重复经历需重新绑定。`);
       return;
     }
-    if (action === "fill") {
-      if (!writesAllowed) {
-        logDiagnostic("fill", "blocked", "vendor_write_paused");
-        showNotice("北森字段错配修复前已暂停写入，请手动核对页面资料。", true);
-        return;
-      }
-      if (refreshInProgress || previewGeneration !== refreshGeneration || previewLocation !== location.href || previewOverwriteExisting !== overwriteExisting) {
-        logDiagnostic("fill", "blocked", "stale_preview");
-        showNotice("页面正在重新识别，请等待当前预览生成后再填写。", true);
-        return;
-      }
-      const expectedRevision = remoteProfileStatus?.publishedRevision;
-      if (dataSource === "remote") {
-        const validation = await chrome.runtime.sendMessage({ type: "VALIDATE_PROFILE_REVISION", revision: expectedRevision }) as { ok?: boolean; result?: boolean; error?: string };
-        if (!validation.ok || validation.result !== true || previewGeneration !== refreshGeneration || previewLocation !== location.href) {
-          logDiagnostic("fill", "blocked", "stale_preview");
-          clearPreview("个人信息或页面已变化，请重新识别后再填写。");
-          showNotice(validation.error || "填写预览已过期，请重新识别。", true);
-          return;
-        }
-      }
-      let filled = 0;
-      let stale = 0;
-      const snapshots: ElementSnapshot[] = [];
-      const selectedMatchIds = Array.from(list.querySelectorAll<HTMLElement>(".gugu-row"))
-        .filter((row) => row.querySelector<HTMLInputElement>(".gugu-check")?.checked)
-        .map((row) => row.dataset.id)
-        .filter((id): id is string => Boolean(id));
-      assistantWriteInProgress = true;
-      try {
-        for (const id of selectedMatchIds) {
-          const cachedMatch = matches.find((item) => item.id === id);
-          const cachedTarget = elements.get(id);
-          const cachedDescriptor = descriptors.get(id);
-          if (!cachedMatch || !cachedTarget || !cachedDescriptor) {
-            stale += 1;
-            continue;
-          }
-
-          const currentElements = new Map<string, FillTarget>();
-          const currentDescriptors = new Map<string, FieldDescriptor>();
-          const currentScan = scanPage(
-            dataSource === "remote" ? EMPTY_PROFILE : state!.profile,
-            currentElements,
-            currentDescriptors,
-            adapter,
-            elementIds,
-            savedMappings,
-            repeatBindings,
-            repeatGroupIds,
-            repeatStructureNodeIds,
-            dataSource === "remote" ? remoteProfileStatus?.recordOptions : undefined,
-            dataSource === "remote" && overwriteExisting,
-          );
-          const currentMatch = currentScan.matches.find((item) => item.id === id);
-          const currentTarget = currentElements.get(id);
-          const currentDescriptor = currentDescriptors.get(id);
-          const remoteInventoryStillPresent = currentScan.inventory.some((item) => item.id === id);
-          if ((!currentMatch && cachedMatch.source !== "remote") || (cachedMatch.source === "remote" && !remoteInventoryStillPresent) || !currentTarget || !currentDescriptor) {
-            stale += 1;
-            continue;
-          }
-          const validation = validateCachedFillTarget(cachedTarget, currentTarget, cachedDescriptor, currentDescriptor, adapter, {
-            allowOverwriteExistingText: dataSource === "remote" && overwriteExisting,
-            expectedSnapshots: previewOriginalValues.get(id),
-          });
-          if (!validation.valid) {
-            stale += 1;
-            continue;
-          }
-          const before = snapshotTarget(currentTarget);
-          const fillValue = cachedMatch.suggestedValue ?? cachedMatch.resolvedValue;
-          if (fillTarget(currentTarget, fillValue)) {
-            snapshots.push(...before);
-            filled += 1;
-          }
-        }
-      } finally {
-        assistantWriteInProgress = false;
-      }
-      lastFill = snapshots;
-      logDiagnostic("fill", filled ? "ok" : "empty", stale ? "stale_preview" : "none",
-        { selected: selectedMatchIds.length, written: filled, skipped: stale });
-      overwriteExisting = false;
-      invalidateRepeatSnapshot();
-      let refreshError = "";
-      try { await refresh(); } catch (error) { refreshError = error instanceof Error ? error.message : "预览刷新失败"; }
-      showNotice(
-        `已填写 ${filled} 项${stale ? `，跳过 ${stale} 个扫描后已变化的过期项` : ""}。${refreshError ? `页面已经写入，但预览刷新失败：${refreshError}。` : "请逐项检查，确认无误后由你手动提交。"}`,
-        stale > 0 || Boolean(refreshError),
-      );
-      return;
-    }
+    if (action === "fill") return runOneClickFill();
     if (action === "polish" && button) {
       const row = button.closest<HTMLElement>(".gugu-row")!;
       const match = matches.find((item) => item.id === row.dataset.id);
@@ -850,7 +844,7 @@ function installAssistant() {
     if (input instanceof HTMLInputElement && input.dataset.action === "overwrite-existing") {
       const requestedOverwrite = input.checked;
       overwriteExisting = requestedOverwrite;
-      clearPreview("覆盖设置已变化，正在重新生成服务端填写预览。");
+      clearPreview("覆盖设置已变化，正在用缓存资料重新扫描页面。");
       void refresh().then(
         () => {
           if (overwriteExisting === requestedOverwrite) showNotice(requestedOverwrite
@@ -923,8 +917,13 @@ function installAssistant() {
       return;
     }
     if (!(input instanceof HTMLInputElement) || !input.classList.contains("gugu-check")) return;
-    if (input.checked) selectedIds.add(id);
-    else selectedIds.delete(id);
+    if (input.checked) {
+      selectedIds.add(id);
+      explicitlyDeselectedIds.delete(id);
+    } else {
+      selectedIds.delete(id);
+      explicitlyDeselectedIds.add(id);
+    }
   });
 
   chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
@@ -1132,6 +1131,7 @@ function scanPage(
   repeatStructureNodeIds: WeakMap<Element, string>,
   remoteRecordOptions?: RemoteProfileStatus["recordOptions"],
   allowOverwriteExistingText = false,
+  matchSource: DataSourceMode = "local",
 ): ScanPageResult {
   elements.clear();
   descriptors.clear();
@@ -1214,7 +1214,7 @@ function scanPage(
     const descriptor = semanticDescriptor ?? describeSemanticField(anchor, adapter);
     if (!descriptor) return undefined;
     descriptor.repeated = describeRepeatedContext(anchor, descriptor, adapter, repeatBindings, repeatGroupIds, repeatStructureNodeIds);
-    const explicitKey = descriptor.repeated ? undefined : mappings[descriptorMappingKey(descriptor)];
+    const explicitKey = matchSource === "local" && !descriptor.repeated ? mappings[descriptorMappingKey(descriptor)] : undefined;
     const profileKey = semanticProfileKey(descriptor, explicitKey);
     if (!profileKey) return undefined;
     const { manualIdentity } = candidateIdentity(anchor, descriptor);
@@ -1225,24 +1225,24 @@ function scanPage(
 
   const addMatch = (target: FillTarget, anchor: FillableElement, descriptor: FieldDescriptor, identityOverride?: string) => {
     const label = descriptor.label ?? "";
-    const explicitKey = descriptor.repeated ? undefined : mappings[descriptorMappingKey(descriptor)];
-    const decision = matchDescriptor(descriptor, profile, explicitKey);
+    const explicitKey = matchSource === "local" && !descriptor.repeated ? mappings[descriptorMappingKey(descriptor)] : undefined;
+    const matched = matchDescriptor(descriptor, profile, explicitKey, { allowExistingText: allowOverwriteExistingText });
+    const decision = matchSource === "remote" && matched.action === "fill" && hasSemanticConflict(descriptor, matched.profileKey)
+      ? { ...matched, action: "manual" as const, reason: "semantic_conflict_requires_user_action", value: null }
+      : matched;
     const { manualIdentity, matchId } = candidateIdentity(anchor, descriptor);
     const semanticIdentity = identityOverride ?? manualIdentity;
-    const remoteField = toRemoteDetectedField(matchId, descriptor);
-    if (remoteField) {
-      elements.set(matchId, target);
-      descriptors.set(matchId, descriptor);
-      inventory.push({ id: matchId, descriptor });
-    }
-    const candidateProfileKey = decision.profileKey ?? (remoteField ? semanticProfileKey(descriptor, explicitKey) : null);
+    elements.set(matchId, target);
+    descriptors.set(matchId, descriptor);
+    inventory.push({ id: matchId, descriptor });
+    const candidateProfileKey = decision.profileKey ?? semanticProfileKey(descriptor, explicitKey);
     if (candidateProfileKey) {
       recordSemanticCandidate(
         anchor,
         descriptor,
         candidateProfileKey,
         semanticIdentity,
-        decision.action === "fill" || remoteField ? matchId : undefined,
+        matchId,
         true,
       );
     }
@@ -1264,16 +1264,17 @@ function scanPage(
     descriptors.set(id, descriptor);
     matches.push({
       id,
-      source: "local",
+      source: matchSource,
+      ...(matchSource === "remote" ? { canonicalKey: decision.profileKey } : {}),
       label: label.slice(0, 100) || FIELD_LABELS[decision.profileKey],
       key: decision.profileKey,
       value: decision.sourceValue ?? profile[decision.profileKey],
       resolvedValue: decision.value,
       confidence: decision.confidence,
       kind: elementKind(anchor),
-      mappingLocked: Boolean(descriptor.repeated),
+      mappingLocked: matchSource === "remote" || Boolean(descriptor.repeated),
       recordLabel: descriptor.repeated?.groupLabel,
-      aiPolishable: isAiPolishAllowed(descriptor, decision.profileKey),
+      aiPolishable: matchSource === "local" && isAiPolishAllowed(descriptor, decision.profileKey),
     });
   };
 
@@ -1418,7 +1419,7 @@ function manualDiagnosticCounts(items: ManualField[]): Partial<Record<Diagnostic
     else if (item.reason === "dynamic_choice_requires_user_action") counts.manualDynamic += 1;
     else if (item.reason === "attachment_user_required") counts.manualAttachment += 1;
     else if (/^repeated_group_|^unsupported_repeated_field$/.test(item.reason)) counts.manualRepeat += 1;
-    else if (/^ambiguous_|^duplicate_semantic_|^choice_group_/.test(item.reason)) counts.manualAmbiguous += 1;
+    else if (/^ambiguous_|^duplicate_semantic_|^choice_group_|^semantic_conflict_/.test(item.reason)) counts.manualAmbiguous += 1;
   }
   return counts;
 }
@@ -1455,6 +1456,7 @@ function isAttentionReason(reason: string): boolean {
     "choice_group_has_existing_selection",
     "radio_group_crosses_repeat_roots",
     "duplicate_semantic_requires_user_action",
+    "semantic_conflict_requires_user_action",
   ].includes(reason);
 }
 
@@ -1463,6 +1465,7 @@ function manualReason(reason: string): string {
     unknown_semantics: "字段语义未知",
     low_confidence: "识别置信度不足",
     ambiguous_semantics: "多个字段语义冲突",
+    semantic_conflict_requires_user_action: "页面标签、控件名称与服务端映射不一致，保持人工核对",
     missing_profile_value: "个人档案缺少对应值",
     unsupported_control: "控件类型暂不支持",
     choice_not_found: "没有精确匹配的选项",

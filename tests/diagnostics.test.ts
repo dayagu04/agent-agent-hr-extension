@@ -19,6 +19,12 @@ test("diagnostics retain only closed-set stage counts in a bounded session log",
   assert.equal(sanitizeDiagnostic({ event: "scan", outcome: "ok", vendor: "https://example.invalid" }, now)?.vendor, "generic");
   assert.ok(!formatDiagnostics([record!]).includes("private"));
   assert.ok(!formatDiagnostics([record!]).includes("example.invalid"));
+  const writeResult = sanitizeDiagnostic({
+    event: "fill", outcome: "failed", reason: "write_unverified", vendor: "beisen",
+    counts: { selected: 3, attempted: 2, retained: 1, unverified: 1, value: "private" },
+  }, now);
+  assert.equal(formatDiagnostics([writeResult!]).includes("retained=1 unverified=1"), true);
+  assert.equal(formatDiagnostics([writeResult!]).includes("private"), false);
 
   const entries = Array.from({ length: 85 }, (_, index) => sanitizeDiagnostic({
     event: "scan", outcome: "ok", vendor: "beisen", counts: { controls: index },

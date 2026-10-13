@@ -21,7 +21,9 @@ import {
   scopeNamedChoiceGroup,
   selectHasCurrentValue,
   snapshotTarget,
+  targetRetainsPlannedValue,
   validateCachedFillTarget,
+  writeAndVerifyTarget,
   type RepeatGroupIdentity,
 } from "../src/dom-safety.ts";
 import { matchDescriptor, semanticProfileKey, type FieldDecision, type FieldDescriptor } from "../src/field-matcher.ts";
@@ -306,7 +308,51 @@ test("a same-origin iframe field enters matching and is filled with iframe-realm
   assert.equal(decision.profileKey, "fullName");
   assert.equal(fillTarget(asElement(nameInput), decision.value ?? ""), true);
   assert.equal(nameInput.value, "脱敏测试用户");
+  assert.equal(targetRetainsPlannedValue(asElement(nameInput), "脱敏测试用户"), true);
   assert.deepEqual(nameInput.events, ["input", "change", "blur"]);
+});
+
+test("write attempt is not accepted as a retained value after the page reverts or replaces a control", () => {
+  const document = new FakeDocument("https://careers.example.test/apply");
+  const input = new FakeElement("input", document);
+  const target = asElement(input);
+  assert.equal(fillTarget(target, "test@example.invalid"), true);
+  assert.equal(targetRetainsPlannedValue(target, "test@example.invalid"), true);
+  input.value = "";
+  assert.equal(targetRetainsPlannedValue(target, "test@example.invalid"), false);
+  input.value = "test@example.invalid";
+  input.isConnected = false;
+  assert.equal(targetRetainsPlannedValue(target, "test@example.invalid"), false);
+});
+
+test("one-click write verifies retention and compensates failed blank or overwritten controls", async () => {
+  const document = new FakeDocument("https://careers.example.test/apply");
+  const blank = new FakeElement("input", document);
+  const blankResult = await writeAndVerifyTarget(asInput(blank), "planned", async () => {
+    if (blank.value === "planned") blank.value = "page-reverted";
+  });
+  assert.equal(blankResult.attempted, true);
+  assert.equal(blankResult.outcome, "cleared");
+  assert.equal(blank.value, "");
+
+  const existing = new FakeElement("input", document);
+  existing.value = "prior";
+  const existingResult = await writeAndVerifyTarget(asInput(existing), "planned", async () => {
+    if (existing.value === "planned") existing.value = "page-reverted";
+  });
+  assert.equal(existingResult.outcome, "restored");
+  assert.equal(existing.value, "prior");
+
+  const stable = new FakeElement("input", document);
+  const retained = await writeAndVerifyTarget(asInput(stable), "planned", async () => undefined);
+  assert.equal(retained.outcome, "retained");
+  assert.equal(stable.value, "planned");
+
+  const replaced = new FakeElement("input", document);
+  const reverted = await writeAndVerifyTarget(asInput(replaced), "planned", async () => {
+    replaced.isConnected = false;
+  });
+  assert.equal(reverted.outcome, "reverted");
 });
 
 test("a cross-origin application iframe is not traversed and is reported manual", () => {
@@ -786,6 +832,14 @@ test("explicit overwrite applies only to unchanged ordinary text controls", () =
   assert.equal(isEligible(target, adapter, true), true);
   const original = snapshotTarget(target);
   const descriptor = describeField(target, adapter);
+  assert.equal(
+    matchDescriptor(descriptor, { ...EMPTY_PROFILE, fullName: "新文字" } as ProfileData).reason,
+    "already_filled",
+  );
+  assert.equal(
+    matchDescriptor(descriptor, { ...EMPTY_PROFILE, fullName: "新文字" } as ProfileData, undefined, { allowExistingText: true }).action,
+    "fill",
+  );
   const options = { allowOverwriteExistingText: true, expectedSnapshots: original };
   assert.deepEqual(validateCachedFillTarget(target, target, descriptor, describeField(target, adapter), adapter, options), { valid: true });
   assert.equal(fillTarget(target, "新文字"), true);
@@ -868,6 +922,10 @@ test("a non-empty first select option is already filled, while an empty placehol
   assert.equal(isEligible(asElement(select), adapter), false);
   assert.equal(filledDescriptor.hasValue, true);
   assert.equal(matchDescriptor(filledDescriptor, { ...EMPTY_PROFILE, degree: "本科" } as ProfileData).reason, "already_filled");
+  assert.equal(
+    matchDescriptor({ ...filledDescriptor, controlType: "select" }, { ...EMPTY_PROFILE, degree: "本科" } as ProfileData, undefined, { allowExistingText: true }).reason,
+    "already_filled",
+  );
   assert.deepEqual(
     validateCachedFillTarget(asElement(select), asElement(select), blankDescriptor, filledDescriptor, adapter),
     { valid: false, reason: "target_ineligible" },
@@ -1152,6 +1210,7 @@ test("semantic inventory reads zero input, textarea, select, or contenteditable 
     field.throwOnValueRead = true;
     const descriptor = describeSemanticField(asElement(field), beisenAdapter);
     assert.equal(descriptor?.label, caption);
+    assert.equal(descriptor?.labelSource, "nearby");
     assert.equal(descriptor && semanticProfileKey(descriptor), expectedKey);
     assert.equal(field.valueReadCount, 0);
   }

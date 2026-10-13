@@ -1,15 +1,18 @@
 import { canUsePendingAuthBridge, type PendingAuthBridge } from "./auth-security";
 import { boundedDiagnostics, sanitizeDiagnostic, type DiagnosticRecord } from "./diagnostics";
+import { normalizeProfileSnapshot, type CachedProfileSnapshot } from "./profile-snapshot";
 import type { RemoteDetectedField, RemoteProfileStatus, RemoteResumeSummary } from "./remote-autofill";
 import { getApiKey, loadState } from "./storage";
 import type { PolishRequest } from "./types";
 
 const AUTOFILL_ORIGIN = "https://gudaya.chat";
 const AUTOFILL_SESSION_KEY = "guguAutofillSession";
+const PROFILE_SNAPSHOT_KEY = "guguAutofillProfileSnapshot";
 const PENDING_AUTH_KEY = "guguPendingAutofillAuth";
 const AUTH_BRIDGE_TTL_MS = 10 * 60 * 1000;
 const DIAGNOSTICS_KEY = "guguAutofillDiagnostics";
 let diagnosticsWrite = Promise.resolve();
+let profileSnapshotLoad: { token: string; promise: Promise<CachedProfileSnapshot> } | null = null;
 
 function diagnosticSenderAllowed(sender: chrome.runtime.MessageSender): boolean {
   if (!Number.isInteger(sender.tab?.id) || !sender.url) return false;
@@ -110,7 +113,7 @@ async function getAutofillSession(): Promise<AutofillSession | null> {
 }
 
 async function clearAutofillSession(): Promise<void> {
-  await chrome.storage.session.remove(AUTOFILL_SESSION_KEY);
+  await chrome.storage.session.remove([AUTOFILL_SESSION_KEY, PROFILE_SNAPSHOT_KEY]);
 }
 
 async function getPendingAuth(): Promise<PendingAuthBridge | null> {
@@ -136,7 +139,12 @@ async function autofillApi(path: string, token: string, init: RequestInit = {}):
       ...(init.headers ?? {}),
     },
   });
-  if (response.status === 401) await clearAutofillSession();
+  if (response.status === 401) {
+    // A request from an older tab can finish after a new account has logged in.
+    // Never let that stale 401 clear the newer browser-session credentials.
+    const active = await getAutofillSession();
+    if (active?.token === token) await clearAutofillSession();
+  }
   if (!response.ok) {
     const message = response.status === 401
       ? "登录已失效，请重新登录。"
@@ -174,15 +182,14 @@ async function syncAutofillToken(token: unknown, sender: chrome.runtime.MessageS
   if (typeof token !== "string" || token.length < 20 || token.length > 8_192 || /[\r\n]/.test(token)) {
     throw new Error("登录凭据格式无效。 ");
   }
-  const profile = await autofillApi("/api/user/profile", token) as Record<string, unknown>;
-  const displayName = [profile.display_name, profile.username, profile.email]
-    .find((value) => typeof value === "string" && value.trim()) as string | undefined;
+  await clearAutofillSession();
+  const snapshot = normalizeProfileSnapshot(await autofillApi("/api/autofill/profile/snapshot", token));
   const session: AutofillSession = {
     token,
-    displayName: displayName?.slice(0, 120) || "谷谷用户",
-    ...(Number.isInteger(profile.id) ? { userId: Number(profile.id) } : {}),
+    displayName: snapshot.account.displayName,
+    userId: snapshot.account.userId,
   };
-  await chrome.storage.session.set({ [AUTOFILL_SESSION_KEY]: session });
+  await chrome.storage.session.set({ [AUTOFILL_SESSION_KEY]: session, [PROFILE_SNAPSHOT_KEY]: snapshot });
   await chrome.storage.session.remove(PENDING_AUTH_KEY);
   if (pending?.requestTabId !== undefined) {
     void chrome.tabs.sendMessage(pending.requestTabId, { type: "AUTOFILL_AUTH_CHANGED" }).catch(() => undefined);
@@ -194,6 +201,37 @@ async function requireAutofillSession(): Promise<AutofillSession> {
   const session = await getAutofillSession();
   if (!session) throw new Error("请先登录谷谷账号。 ");
   return session;
+}
+
+async function getProfileSnapshot(force = false): Promise<CachedProfileSnapshot> {
+  const session = await requireAutofillSession();
+  if (!force) {
+    const stored = await chrome.storage.session.get(PROFILE_SNAPSHOT_KEY);
+    try {
+      const cached = normalizeProfileSnapshot(stored[PROFILE_SNAPSHOT_KEY]);
+      if (!session.userId || cached.account.userId === session.userId) return cached;
+    } catch {
+      await chrome.storage.session.remove(PROFILE_SNAPSHOT_KEY);
+    }
+  }
+  if (profileSnapshotLoad?.token === session.token) return profileSnapshotLoad.promise;
+  const promise = (async () => {
+    const snapshot = normalizeProfileSnapshot(await autofillApi("/api/autofill/profile/snapshot", session.token));
+    const active = await getAutofillSession();
+    if (!active || active.token !== session.token) throw new Error("登录状态已变化，请重新打开助手。");
+    if (session.userId && snapshot.account.userId !== session.userId) {
+      await clearAutofillSession();
+      throw new Error("网申资料账号与登录账号不一致，请重新登录。");
+    }
+    await chrome.storage.session.set({ [PROFILE_SNAPSHOT_KEY]: snapshot });
+    return snapshot;
+  })();
+  profileSnapshotLoad = { token: session.token, promise };
+  try {
+    return await promise;
+  } finally {
+    if (profileSnapshotLoad?.promise === promise) profileSnapshotLoad = null;
+  }
 }
 
 async function listRemoteResumes(): Promise<RemoteResumeSummary[]> {
@@ -292,18 +330,6 @@ async function getProfileStatus(): Promise<RemoteProfileStatus> {
 }
 
 async function openProfilePage(sender: chrome.runtime.MessageSender): Promise<boolean> {
-  if (!await getAutofillSession()) {
-    await beginAutofillLogin(sender);
-    return true;
-  }
-  try {
-    // 避免在旧网站上打开尚不存在的路由并把用户送回首页。
-    await getProfileStatus();
-  } catch (error) {
-    if ((error as AutofillApiError).status !== 401) throw error;
-    await beginAutofillLogin(sender);
-    return true;
-  }
   // 先经过网站统一登录页：已有网站会话会直接回跳资料页，并让桥接刷新扩展身份；
   // 未登录网站则由用户扫码，避免网站账号与扩展账号不一致。
   await beginAutofillLogin(sender);
@@ -357,7 +383,7 @@ function reply<T>(promise: Promise<T>, sendResponse: (response: unknown) => void
 }
 
 chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) => {
-  const payload = message as { type?: string; request?: PolishRequest; token?: unknown; resumeId?: unknown; revision?: unknown; vendor?: unknown; fields?: unknown; overwriteExisting?: unknown; diagnostic?: unknown };
+  const payload = message as { type?: string; request?: PolishRequest; token?: unknown; resumeId?: unknown; revision?: unknown; vendor?: unknown; fields?: unknown; overwriteExisting?: unknown; diagnostic?: unknown; force?: unknown };
   if (["RECORD_DIAGNOSTIC", "GET_DIAGNOSTICS", "CLEAR_DIAGNOSTICS"].includes(payload.type ?? "")) {
     if (!diagnosticSenderAllowed(sender)) {
       sendResponse({ ok: false });
@@ -388,6 +414,7 @@ chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) =>
   if (payload.type === "GET_REMOTE_RESUMES") return reply(listRemoteResumes(), sendResponse);
   if (payload.type === "CREATE_REMOTE_PLAN") return reply(createRemotePlan(payload.resumeId, payload.vendor, payload.fields), sendResponse);
   if (payload.type === "GET_PROFILE_STATUS") return reply(getProfileStatus(), sendResponse);
+  if (payload.type === "GET_PROFILE_SNAPSHOT") return reply(getProfileSnapshot(payload.force === true), sendResponse);
   if (payload.type === "CREATE_PROFILE_PLAN") return reply(createProfilePlan(payload.revision, payload.vendor, payload.fields, payload.overwriteExisting), sendResponse);
   if (payload.type === "VALIDATE_PROFILE_REVISION") return reply(validateProfileRevision(payload.revision), sendResponse);
   if (payload.type === "OPEN_PROFILE_PAGE") return reply(openProfilePage(sender), sendResponse);
