@@ -325,25 +325,48 @@ export function isEligible(element: FillableElement, adapter: SiteAdapter, allow
   return true;
 }
 
+function nearbySiblingLabel(element: FillableElement, adapter: SiteAdapter): string {
+  if (adapter.id !== "beisen") return "";
+  // Some ATS layouts place a static label beside an input *wrapper* rather
+  // than associating it with the input. Stay inside a small field row: a
+  // section-level heading must not be borrowed by every control below it.
+  const controls = "input, textarea, select, [contenteditable=true], [role='combobox'], [role='textbox']";
+  let branch: HTMLElement = element;
+  for (let depth = 0; depth < 3; depth += 1) {
+    const parent = branch.parentElement;
+    if (!parent || ["FORM", "BODY", "HTML", "FIELDSET"].includes(parent.tagName)) break;
+    if (parent.querySelectorAll(controls).length > 2) break;
+    const sibling = branch.previousElementSibling as HTMLElement | null;
+    if (sibling && !sibling.matches(controls) && !sibling.querySelector(controls)) {
+      const value = cleanText(staticLabelTextOutsideControls(sibling, element, adapter.dynamicChoiceSelectors));
+      if (value.length > 0 && value.length <= 48 && /[\u3400-\u9fffA-Za-z]/u.test(value)
+        && !/@|https?:|1[3-9]\d{9}|^(请输入|请选择|中国大陆)/iu.test(value)) return value;
+    }
+    branch = parent;
+  }
+  return "";
+}
+
 function describeFieldSemantics(element: FillableElement, adapter: SiteAdapter): Pick<FieldDescriptor, "label" | "ariaLabel" | "placeholder" | "name"> {
-  const parts = new Set<string>();
   const ownerDocument = element.ownerDocument;
+  let label = "";
   if (element.id) {
-    const label = ownerDocument.querySelector<HTMLLabelElement>(`label[for="${cssEscape(element.id, ownerDocument)}"]`);
-    if (label) parts.add(cleanText(staticLabelTextOutsideControls(label, element, adapter.dynamicChoiceSelectors)));
+    const associated = ownerDocument.querySelector<HTMLLabelElement>(`label[for="${cssEscape(element.id, ownerDocument)}"]`);
+    if (associated) label = cleanText(staticLabelTextOutsideControls(associated, element, adapter.dynamicChoiceSelectors));
   }
-  const wrappingLabel = element.closest("label");
-  if (wrappingLabel) parts.add(cleanText(staticLabelTextOutsideControls(wrappingLabel as HTMLElement, element, adapter.dynamicChoiceSelectors)));
-  const container = element.closest("[class*='form-item'], [class*='field'], [class*='question'], .ant-form-item, .el-form-item");
-  if (container) {
-    const explicit = container.querySelector<HTMLElement>("label, [class*='label'], [class*='title']");
-    if (explicit && explicit !== element) parts.add(cleanText(staticLabelTextOutsideControls(explicit, element, adapter.dynamicChoiceSelectors)).slice(0, 120));
+  if (!label) {
+    const wrappingLabel = element.closest("label");
+    if (wrappingLabel) label = cleanText(staticLabelTextOutsideControls(wrappingLabel as HTMLElement, element, adapter.dynamicChoiceSelectors));
   }
-  const previous = element.previousElementSibling as HTMLElement | null;
-  if (previous) parts.add(cleanText(staticLabelTextOutsideControls(previous, element, adapter.dynamicChoiceSelectors)).slice(0, 100));
-  for (const candidate of adapterLabelCandidates(element, adapter)) parts.add(cleanText(candidate).slice(0, 120));
+  if (!label) label = nearbySiblingLabel(element, adapter);
+  if (!label) {
+    const container = element.closest("[class*='form-item'], [class*='field'], [class*='question'], .ant-form-item, .el-form-item");
+    const explicit = container?.querySelector<HTMLElement>("label, [class*='label'], [class*='title']");
+    if (explicit && explicit !== element) label = cleanText(staticLabelTextOutsideControls(explicit, element, adapter.dynamicChoiceSelectors)).slice(0, 120);
+  }
+  if (!label) label = adapterLabelCandidates(element, adapter).map(cleanText).find(Boolean)?.slice(0, 120) ?? "";
   return {
-    label: Array.from(parts).filter(Boolean).join(" | "),
+    label,
     ariaLabel: cleanText(element.getAttribute("aria-label")),
     placeholder: cleanText(element.getAttribute("placeholder") ?? element.getAttribute("data-placeholder")),
     name: cleanText(element.getAttribute("name") ?? element.id),

@@ -50,6 +50,12 @@
 .gugu-confidence.medium { color: #996514; background: #fff1cc; }
 .gugu-ai { grid-column: 2 / -1; justify-self: start; border: 1px solid #cad5f5; border-radius: 8px; padding: 6px 9px; color: #3158d8; background: #f6f8ff; font-size: 11px; font-weight: 750; cursor: pointer; }
 .gugu-ai:disabled { opacity: .55; cursor: wait; }
+.gugu-diagnostics { flex: none; border-top: 1px solid #e1e6ef; background: #f9fbff; padding: 7px 16px; color: #536178; font-size: 11px; }
+.gugu-diagnostics summary { cursor: pointer; font-weight: 750; color: #46546c; }
+.gugu-diagnostics p { margin: 7px 0; line-height: 1.45; }
+.gugu-diagnostics pre { max-height: 150px; overflow: auto; margin: 6px 0; padding: 8px; border-radius: 7px; background: #eef2f9; color: #334155; font: 11px/1.5 ui-monospace, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+.gugu-diagnostic-actions { display: flex; gap: 8px; padding-bottom: 3px; }
+.gugu-diagnostic-actions button { border: 1px solid #d3dbe9; border-radius: 7px; padding: 5px 8px; color: #46546c; background: #fff; font-size: 11px; cursor: pointer; }
 .gugu-footer { padding: 12px 16px 16px; border-top: 1px solid #e1e6ef; background: #fff; }
 .gugu-notice { min-height: 18px; margin: 0 0 9px; color: #66758c; font-size: 12px; line-height: 1.45; }
 .gugu-notice.error { color: #ac3939; }

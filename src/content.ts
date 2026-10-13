@@ -1,4 +1,5 @@
 import panelCss from "./content.css?inline";
+import { boundedDiagnostics, DIAGNOSTIC_VENDORS, formatDiagnostics, type DiagnosticCount, type DiagnosticEvent, type DiagnosticOutcome, type DiagnosticReason } from "./diagnostics";
 import {
   collectCandidates,
   collectSemanticInventory,
@@ -65,6 +66,7 @@ interface ScanPageResult {
   repeatGroups: RepeatGroupPrompt[];
   documents: Document[];
   inventory: SafeFieldInventoryItem[];
+  stats: { documents: number; controls: number; semantic: number; recognized: number; existing: number };
 }
 
 type DataSourceMode = "remote" | "local";
@@ -102,6 +104,7 @@ function installAssistant() {
       <section class="gugu-summary"><div class="gugu-progress"><strong data-role="count">正在识别…</strong><span class="gugu-tier" data-role="tier">服务端资料</span></div><p>默认只处理空白且可见的字段；不会点击“提交”或同意协议。</p><label class="gugu-overwrite"><input type="checkbox" data-action="overwrite-existing" />覆盖已有文字（仅普通文本框，写入前逐项预览，可撤销）</label></section>
       <section class="gugu-source" data-role="source"></section>
       <div class="gugu-list" data-role="list"></div>
+      <details class="gugu-diagnostics" data-role="diagnostics"><summary>诊断日志</summary><p>仅保存在本机扩展会话中，不记录网址、表单内容或个人资料。</p><pre data-role="diagnostic-lines"></pre><div class="gugu-diagnostic-actions"><button type="button" data-action="copy-diagnostics">复制诊断</button><button type="button" data-action="clear-diagnostics">清空日志</button></div></details>
       <footer class="gugu-footer"><p class="gugu-notice" data-role="notice"></p><div class="gugu-actions"><button class="gugu-button gugu-secondary" data-action="rescan">重新识别</button><button class="gugu-button gugu-secondary gugu-hidden" data-action="undo">撤销本轮</button><button class="gugu-button gugu-primary" data-action="fill">填写已选字段</button></div></footer>
     </aside>`;
   shadow.append(style, root);
@@ -117,12 +120,15 @@ function installAssistant() {
   const fillButton = root.querySelector<HTMLButtonElement>("[data-action=fill]")!;
   const undoButton = root.querySelector<HTMLButtonElement>("[data-action=undo]")!;
   const overwriteCheckbox = root.querySelector<HTMLInputElement>("[data-action=overwrite-existing]")!;
+  const diagnosticDetails = root.querySelector<HTMLDetailsElement>("[data-role=diagnostics]")!;
+  const diagnosticLines = root.querySelector<HTMLElement>("[data-role=diagnostic-lines]")!;
   const elements = new Map<string, FillTarget>();
   const descriptors = new Map<string, FieldDescriptor>();
   const elementIds = new WeakMap<FillableElement, string>();
   const repeatGroupIds = new WeakMap<Element, RepeatGroupIdentity>();
   const repeatStructureNodeIds = new WeakMap<Element, string>();
   const adapter = getSiteAdapter();
+  const diagnosticVendor = DIAGNOSTIC_VENDORS.find((vendor) => vendor === adapter.id) ?? "generic";
   let state: StoredState | null = null;
   let dataSource: DataSourceMode = "remote";
   let authenticated = false;
@@ -159,6 +165,23 @@ function installAssistant() {
     notice.textContent = message;
     notice.classList.toggle("error", error);
   }
+
+  async function loadDiagnostics() {
+    try {
+      const response = await chrome.runtime.sendMessage({ type: "GET_DIAGNOSTICS" }) as { ok?: boolean; result?: unknown };
+      diagnosticLines.textContent = response.ok
+        ? formatDiagnostics(boundedDiagnostics(response.result))
+        : "暂时无法读取诊断日志。";
+    } catch { diagnosticLines.textContent = "暂时无法读取诊断日志。"; }
+  }
+
+  function logDiagnostic(event: DiagnosticEvent, outcome: DiagnosticOutcome, reason: DiagnosticReason = "none", counts: Partial<Record<DiagnosticCount, number>> = {}) {
+    void chrome.runtime.sendMessage({
+      type: "RECORD_DIAGNOSTIC", diagnostic: { event, outcome, reason, vendor: diagnosticVendor, counts },
+    }).then(() => { if (diagnosticDetails.open) void loadDiagnostics(); }).catch(() => undefined);
+  }
+
+  diagnosticDetails.addEventListener("toggle", () => { if (diagnosticDetails.open) void loadDiagnostics(); });
 
   function escapeHtml(value: string) {
     return value.replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[character]!);
@@ -434,6 +457,18 @@ function installAssistant() {
         overwriteAtStart,
       );
       installScanObservers(scan, generation);
+      const scanCounts: Partial<Record<DiagnosticCount, number>> = {
+        ...scan.stats,
+        inventory: scan.inventory.length,
+        manualRequired: scan.manualRequired.length,
+        manualOther: scan.manualAttention.length,
+        ...manualDiagnosticCounts([...scan.manualRequired, ...scan.manualAttention]),
+      };
+      const emptyReason: DiagnosticReason = scan.stats.controls === 0 ? "no_controls"
+        : scan.stats.semantic === 0 ? "no_semantics"
+          : scan.stats.existing > 0 && !overwriteAtStart ? "existing_values"
+            : scan.manualRequired.length + scan.manualAttention.length > 0 ? "manual_only" : "no_plan_match";
+      if (isCurrent()) logDiagnostic("scan", scan.inventory.length ? "ok" : "empty", scan.inventory.length ? "none" : emptyReason, scanCounts);
 
       if (sourceAtStart === "remote") {
         const fields = scan.inventory.flatMap((item) => {
@@ -441,6 +476,7 @@ function installAssistant() {
           return remote ? [remote] : [];
         });
         if (!fields.length) {
+          if (isCurrent()) logDiagnostic("plan", "empty", emptyReason, scanCounts);
           commit(
             [],
             scan.manualRequired.filter((item) => remoteStructuralReasons.has(item.reason)),
@@ -504,12 +540,19 @@ function installAssistant() {
         });
         const structuralRequired = scan.manualRequired.filter((item) => remoteStructuralReasons.has(item.reason));
         const structuralAttention = scan.manualAttention.filter((item) => remoteStructuralReasons.has(item.reason));
+        const allManual = [...structuralRequired, ...structuralAttention, ...planManual];
+        if (isCurrent()) logDiagnostic("plan", nextMatches.length ? "ok" : "empty",
+          nextMatches.length ? "none" : scan.stats.existing > 0 && !overwriteAtStart ? "existing_values" : allManual.length ? "manual_only" : "no_plan_match",
+          { inventory: fields.length, fillable: nextMatches.length,
+            manualRequired: allManual.filter((item) => item.required).length,
+            manualOther: allManual.filter((item) => !item.required).length,
+            ...manualDiagnosticCounts(allManual) });
         commit(
           nextMatches,
           deduplicateManualFields([...structuralRequired, ...planManual.filter((item) => item.required)]),
           deduplicateManualFields([...structuralAttention, ...planManual.filter((item) => !item.required)]),
           scan.repeatGroups,
-          "已保存资料没有可可靠匹配的字段；请查看下方人工处理项。",
+          "当前没有可直接填写的空白字段。页面已有文字默认跳过；可勾选上方普通文本覆盖后重新识别，动态下拉和附件仍需人工处理。",
         );
       } else {
         commit(
@@ -522,6 +565,7 @@ function installAssistant() {
       }
     } catch (error) {
       if (isCurrent()) {
+        logDiagnostic("plan", "failed", error instanceof TypeError ? "network" : "server");
         elements.clear();
         descriptors.clear();
         previewOriginalValues.clear();
@@ -549,8 +593,11 @@ function installAssistant() {
     bubble.classList.add("gugu-hidden");
     try {
       await refreshAuthState();
+      logDiagnostic("auth", authenticated ? remoteProfileStatus?.publishedRevision ? "ok" : "empty" : "blocked",
+        authenticated ? remoteProfileStatus?.publishedRevision ? "none" : "profile_missing" : "login_required");
       await refresh();
     } catch (error) {
+      logDiagnostic("auth", "failed", authenticated ? "profile_unavailable" : "login_required");
       clearPreview("无法载入网申资料，已停止识别与填写。");
       showNotice(error instanceof Error ? error.message : "识别失败", true);
     }
@@ -570,6 +617,21 @@ function installAssistant() {
     const action = button?.dataset.action;
     if (button === bubble) return open();
     if (action === "close") return close();
+    if (action === "copy-diagnostics") {
+      try {
+        await navigator.clipboard.writeText(diagnosticLines.textContent ?? "");
+        showNotice("已复制不含表单内容的诊断日志。 ");
+      } catch { showNotice("复制失败，请手动选中诊断文字复制。", true); }
+      return;
+    }
+    if (action === "clear-diagnostics") {
+      try {
+        await chrome.runtime.sendMessage({ type: "CLEAR_DIAGNOSTICS" });
+        await loadDiagnostics();
+        showNotice("本机诊断日志已清空。 ");
+      } catch { showNotice("暂时无法清空诊断日志。", true); }
+      return;
+    }
     if (action === "login") {
       dataSource = "remote";
       clearPreview("正在打开谷谷登录页；登录完成后会重新载入网申资料。");
@@ -651,6 +713,7 @@ function installAssistant() {
         assistantWriteInProgress = false;
       }
       lastFill = [];
+      logDiagnostic("undo", "ok", "none", { written: restored });
       invalidateRepeatSnapshot();
       try { await refresh(); } catch (error) { showNotice(error instanceof Error ? error.message : "撤销后重新识别失败", true); return; }
       showNotice(`已撤销 ${restored} 项填写；重复经历需重新绑定。`);
@@ -658,6 +721,7 @@ function installAssistant() {
     }
     if (action === "fill") {
       if (refreshInProgress || previewGeneration !== refreshGeneration || previewLocation !== location.href || previewOverwriteExisting !== overwriteExisting) {
+        logDiagnostic("fill", "blocked", "stale_preview");
         showNotice("页面正在重新识别，请等待当前预览生成后再填写。", true);
         return;
       }
@@ -665,6 +729,7 @@ function installAssistant() {
       if (dataSource === "remote") {
         const validation = await chrome.runtime.sendMessage({ type: "VALIDATE_PROFILE_REVISION", revision: expectedRevision }) as { ok?: boolean; result?: boolean; error?: string };
         if (!validation.ok || validation.result !== true || previewGeneration !== refreshGeneration || previewLocation !== location.href) {
+          logDiagnostic("fill", "blocked", "stale_preview");
           clearPreview("个人信息或页面已变化，请重新识别后再填写。");
           showNotice(validation.error || "填写预览已过期，请重新识别。", true);
           return;
@@ -730,6 +795,8 @@ function installAssistant() {
         assistantWriteInProgress = false;
       }
       lastFill = snapshots;
+      logDiagnostic("fill", filled ? "ok" : "empty", stale ? "stale_preview" : "none",
+        { selected: selectedMatchIds.length, written: filled, skipped: stale });
       overwriteExisting = false;
       invalidateRepeatSnapshot();
       let refreshError = "";
@@ -870,6 +937,7 @@ function installAssistant() {
   function updateAutomaticSurface() {
     const detection = classifyRecruitmentPage({ url: location.href, title: document.title });
     lastSurfaceLocation = `${location.href}\n${document.title}`;
+    logDiagnostic("surface", detection.detected ? "ok" : "empty", detection.detected ? "none" : "not_form");
     if (panelOpen) return;
     bubble.classList.toggle("gugu-hidden", !manualSurface && !detection.detected);
   }
@@ -1057,6 +1125,10 @@ function scanPage(
   descriptors.clear();
   const frameScan = collectScanDocuments(document);
   const candidates = frameScan.documents.flatMap((scanDocument) => collectCandidates(scanDocument, adapter));
+  const semanticInventory = collectSemanticInventory(candidates, adapter);
+  const existing = semanticInventory.filter(({ element }) => (
+    isEligible(element, adapter, true) && !isEligible(element, adapter, false)
+  )).length;
   const matches: FieldMatch[] = [];
   const inventory: SafeFieldInventoryItem[] = [];
   const manualRequired: ManualField[] = [];
@@ -1197,7 +1269,7 @@ function scanPage(
   // never reads value/selection/body state. The later write pass merges by
   // identity, so an eligible field does not appear twice. Named choices are
   // inventoried once per safe scope in their group branch below.
-  for (const { element, descriptor } of collectSemanticInventory(candidates, adapter)) {
+  for (const { element, descriptor } of semanticInventory) {
     addSemanticSentinel(element, undefined, descriptor);
   }
 
@@ -1321,7 +1393,22 @@ function scanPage(
     repeatGroups: [...repeatGroupMap.values()],
     documents: frameScan.documents,
     inventory: inventory.filter((item) => !duplicateMatchIds.has(item.id)),
+    stats: { documents: frameScan.documents.length, controls: candidates.length,
+      semantic: semanticInventory.length, recognized: semanticCandidatesByIdentity.size, existing },
   };
+}
+
+function manualDiagnosticCounts(items: ManualField[]): Partial<Record<DiagnosticCount, number>> {
+  const counts = { manualUnknown: 0, manualMissing: 0, manualDynamic: 0, manualAttachment: 0, manualRepeat: 0, manualAmbiguous: 0 };
+  for (const item of items) {
+    if (item.reason === "unknown_semantics" || item.reason === "low_confidence") counts.manualUnknown += 1;
+    else if (item.reason === "missing_profile_value") counts.manualMissing += 1;
+    else if (item.reason === "dynamic_choice_requires_user_action") counts.manualDynamic += 1;
+    else if (item.reason === "attachment_user_required") counts.manualAttachment += 1;
+    else if (/^repeated_group_|^unsupported_repeated_field$/.test(item.reason)) counts.manualRepeat += 1;
+    else if (/^ambiguous_|^duplicate_semantic_|^choice_group_/.test(item.reason)) counts.manualAmbiguous += 1;
+  }
+  return counts;
 }
 
 function registerRepeatGroup(

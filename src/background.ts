@@ -1,4 +1,5 @@
 import { canUsePendingAuthBridge, type PendingAuthBridge } from "./auth-security";
+import { boundedDiagnostics, sanitizeDiagnostic, type DiagnosticRecord } from "./diagnostics";
 import type { RemoteDetectedField, RemoteProfileStatus, RemoteResumeSummary } from "./remote-autofill";
 import { getApiKey, loadState } from "./storage";
 import type { PolishRequest } from "./types";
@@ -7,6 +8,42 @@ const AUTOFILL_ORIGIN = "https://gudaya.chat";
 const AUTOFILL_SESSION_KEY = "guguAutofillSession";
 const PENDING_AUTH_KEY = "guguPendingAutofillAuth";
 const AUTH_BRIDGE_TTL_MS = 10 * 60 * 1000;
+const DIAGNOSTICS_KEY = "guguAutofillDiagnostics";
+let diagnosticsWrite = Promise.resolve();
+
+function diagnosticSenderAllowed(sender: chrome.runtime.MessageSender): boolean {
+  if (!Number.isInteger(sender.tab?.id) || !sender.url) return false;
+  try {
+    const url = new URL(sender.url);
+    return url.protocol === "https:" && /(^|\.)(mokahr\.com|zhiye\.com|jobs\.bytedance\.com|joinbytedance\.com)$|^(we\.zyt\.com|join\.qq\.com|campus\.tencent\.com|talent\.alibaba\.com|campus\.alibaba\.com)$/i.test(url.hostname);
+  } catch { return false; }
+}
+
+function enqueueDiagnostic<T>(operation: () => Promise<T>): Promise<T> {
+  const result = diagnosticsWrite.then(operation);
+  diagnosticsWrite = result.then(() => undefined, () => undefined);
+  return result;
+}
+
+async function readDiagnostics(): Promise<DiagnosticRecord[]> {
+  const stored = await chrome.storage.session.get(DIAGNOSTICS_KEY);
+  return boundedDiagnostics(stored[DIAGNOSTICS_KEY]);
+}
+
+function recordDiagnostic(input: unknown): Promise<boolean> {
+  const record = sanitizeDiagnostic(input);
+  if (!record) return Promise.resolve(false);
+  return enqueueDiagnostic(async () => {
+    const prior = await readDiagnostics();
+    const previous = prior.at(-1);
+    if (previous && record.at - previous.at < 2_000
+      && previous.event === record.event && previous.outcome === record.outcome
+      && previous.reason === record.reason && previous.vendor === record.vendor
+      && JSON.stringify(previous.counts) === JSON.stringify(record.counts)) return true;
+    await chrome.storage.session.set({ [DIAGNOSTICS_KEY]: boundedDiagnostics(prior, record) });
+    return true;
+  });
+}
 
 interface AutofillSession {
   token: string;
@@ -320,7 +357,16 @@ function reply<T>(promise: Promise<T>, sendResponse: (response: unknown) => void
 }
 
 chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) => {
-  const payload = message as { type?: string; request?: PolishRequest; token?: unknown; resumeId?: unknown; revision?: unknown; vendor?: unknown; fields?: unknown; overwriteExisting?: unknown };
+  const payload = message as { type?: string; request?: PolishRequest; token?: unknown; resumeId?: unknown; revision?: unknown; vendor?: unknown; fields?: unknown; overwriteExisting?: unknown; diagnostic?: unknown };
+  if (["RECORD_DIAGNOSTIC", "GET_DIAGNOSTICS", "CLEAR_DIAGNOSTICS"].includes(payload.type ?? "")) {
+    if (!diagnosticSenderAllowed(sender)) {
+      sendResponse({ ok: false });
+      return false;
+    }
+    if (payload.type === "RECORD_DIAGNOSTIC") return reply(recordDiagnostic(payload.diagnostic), sendResponse);
+    if (payload.type === "GET_DIAGNOSTICS") return reply(enqueueDiagnostic(readDiagnostics), sendResponse);
+    return reply(enqueueDiagnostic(async () => { await chrome.storage.session.remove(DIAGNOSTICS_KEY); return true; }), sendResponse);
+  }
   if (payload.type === "GET_ASSISTANT_STATE") {
     loadState().then((state) => {
       const { apiKey: _secret, ...safeState } = state;

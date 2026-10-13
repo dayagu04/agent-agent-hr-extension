@@ -1135,6 +1135,26 @@ test("semantic inventory reads zero input, textarea, select, or contenteditable 
   assert.equal(textarea.innerTextReadCount, 0);
   assert.equal(nestedDynamicChoice.textContentReadCount, 0);
   assert.equal(nestedDynamicChoice.innerTextReadCount, 0);
+
+  // Beisen-style two-column rows put a static label beside an input wrapper,
+  // not on the input or its immediate sibling. It remains value-blind.
+  const beisenDocument = new FakeDocument("https://we.zyt.com/form?jobAdId=example");
+  const beisenAdapter = getSiteAdapter(beisenDocument.location.href);
+  for (const [caption, expectedKey] of [["姓名", "fullName"], ["手机号码", "phone"], ["邮箱", "email"]] as const) {
+    const row = new FakeElement("div", beisenDocument);
+    const label = new FakeElement("span", beisenDocument);
+    label.innerText = caption;
+    const inputWrapper = new FakeElement("div", beisenDocument);
+    inputWrapper.previousElementSibling = label;
+    inputWrapper.parentElement = row;
+    const field = new FakeElement("input", beisenDocument);
+    field.parentElement = inputWrapper;
+    field.throwOnValueRead = true;
+    const descriptor = describeSemanticField(asElement(field), beisenAdapter);
+    assert.equal(descriptor?.label, caption);
+    assert.equal(descriptor && semanticProfileKey(descriptor), expectedKey);
+    assert.equal(field.valueReadCount, 0);
+  }
 });
 
 test("ignored OTP text controls are rejected before any value or text read", () => {
