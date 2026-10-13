@@ -4,7 +4,7 @@ export const DIAGNOSTIC_OUTCOMES = ["ok", "empty", "blocked", "failed"] as const
 export const DIAGNOSTIC_REASONS = [
   "none", "not_form", "login_required", "profile_missing", "profile_unavailable",
   "no_controls", "no_semantics", "existing_values", "manual_only", "no_plan_match",
-  "stale_preview", "network", "server", "invalid_response", "other",
+  "stale_preview", "vendor_write_paused", "network", "server", "invalid_response", "other",
 ] as const;
 export const DIAGNOSTIC_VENDORS = ["generic", "moka", "beisen", "bytedance", "tencent", "alibaba"] as const;
 export const DIAGNOSTIC_COUNTS = [

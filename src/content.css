@@ -13,6 +13,7 @@
 .gugu-icon-button { width: 34px; height: 34px; border: 0; border-radius: 9px; color: #fff; background: #ffffff20; font-size: 20px; cursor: pointer; }
 .gugu-summary { padding: 15px 18px 12px; border-bottom: 1px solid #e2e7f0; background: #fff; }
 .gugu-summary p { margin: 0; color: #536178; font-size: 13px; line-height: 1.55; }
+.gugu-summary .gugu-write-guard { margin-top: 9px; padding: 9px 10px; border: 1px solid #f1c97d; border-radius: 8px; background: #fff7e8; color: #80500d; font-size: 12px; }
 .gugu-overwrite { display: flex; align-items: flex-start; gap: 7px; margin-top: 8px; color: #536178; font-size: 12px; line-height: 1.4; cursor: pointer; }
 .gugu-overwrite input { flex: none; margin: 2px 0 0; accent-color: #3b63f3; }
 .gugu-overwrite:has(input:disabled) { opacity: .55; cursor: not-allowed; }

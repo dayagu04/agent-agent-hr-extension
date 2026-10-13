@@ -40,6 +40,7 @@ import {
 } from "./remote-autofill";
 import { inferStructuredEntryField, inferStructuredEntryKind, structuredEntryOptions, type StructuredEntryOption } from "./repeat-context.ts";
 import { getSiteAdapter, isIgnoredByAdapter, staticLabelTextOutsideControls, type SiteAdapter } from "./site-adapters";
+import { applicationWriteAllowed } from "./write-policy";
 import { EMPTY_PROFILE, type FieldMatch, type ProfileData, type ProfileFieldKey, type RepeatedFieldContext, type StoredState, type StructuredEntryKind } from "./types";
 
 declare global {
@@ -101,7 +102,7 @@ function installAssistant() {
         <div class="gugu-brand"><span class="gugu-logo">谷</span><span class="gugu-title"><strong>谷谷网申助手</strong><small>先预览，再填写</small></span></div>
         <button class="gugu-icon-button" data-action="close" aria-label="关闭">×</button>
       </header>
-      <section class="gugu-summary"><div class="gugu-progress"><strong data-role="count">正在识别…</strong><span class="gugu-tier" data-role="tier">服务端资料</span></div><p>默认只处理空白且可见的字段；不会点击“提交”或同意协议。</p><label class="gugu-overwrite"><input type="checkbox" data-action="overwrite-existing" />覆盖已有文字（仅普通文本框，写入前逐项预览，可撤销）</label></section>
+      <section class="gugu-summary"><div class="gugu-progress"><strong data-role="count">正在识别…</strong><span class="gugu-tier" data-role="tier">服务端资料</span></div><p>默认只处理空白且可见的字段；不会点击“提交”或同意协议。</p><p class="gugu-write-guard gugu-hidden" data-role="write-guard">北森表单现场发现字段错配，本版本已暂停写入。仍可查看预览与诊断；请手动核对已改动的页面字段，不要提交错误资料。</p><label class="gugu-overwrite"><input type="checkbox" data-action="overwrite-existing" />覆盖已有文字（仅普通文本框，写入前逐项预览，可撤销）</label></section>
       <section class="gugu-source" data-role="source"></section>
       <div class="gugu-list" data-role="list"></div>
       <details class="gugu-diagnostics" data-role="diagnostics"><summary>诊断日志</summary><p>仅保存在本机扩展会话中，不记录网址、表单内容或个人资料。</p><pre data-role="diagnostic-lines"></pre><div class="gugu-diagnostic-actions"><button type="button" data-action="copy-diagnostics">复制诊断</button><button type="button" data-action="clear-diagnostics">清空日志</button></div></details>
@@ -120,6 +121,7 @@ function installAssistant() {
   const fillButton = root.querySelector<HTMLButtonElement>("[data-action=fill]")!;
   const undoButton = root.querySelector<HTMLButtonElement>("[data-action=undo]")!;
   const overwriteCheckbox = root.querySelector<HTMLInputElement>("[data-action=overwrite-existing]")!;
+  const writeGuard = root.querySelector<HTMLElement>("[data-role=write-guard]")!;
   const diagnosticDetails = root.querySelector<HTMLDetailsElement>("[data-role=diagnostics]")!;
   const diagnosticLines = root.querySelector<HTMLElement>("[data-role=diagnostic-lines]")!;
   const elements = new Map<string, FillTarget>();
@@ -129,6 +131,8 @@ function installAssistant() {
   const repeatStructureNodeIds = new WeakMap<Element, string>();
   const adapter = getSiteAdapter();
   const diagnosticVendor = DIAGNOSTIC_VENDORS.find((vendor) => vendor === adapter.id) ?? "generic";
+  const writesAllowed = applicationWriteAllowed(adapter.id);
+  writeGuard.classList.toggle("gugu-hidden", writesAllowed);
   let state: StoredState | null = null;
   let dataSource: DataSourceMode = "remote";
   let authenticated = false;
@@ -212,9 +216,10 @@ function installAssistant() {
     renderSource();
     overwriteCheckbox.checked = overwriteExisting;
     overwriteCheckbox.disabled = dataSource !== "remote" || !authenticated || !remoteProfileStatus?.publishedRevision;
-    count.textContent = `可填写 ${matches.length} 个 · 必填需人工 ${manualRequired.length} 个 · 其他需确认 ${manualAttention.length} 个 · ${adapter.name}`;
+    count.textContent = `${writesAllowed ? "可填写" : "预览候选"} ${matches.length} 个 · 必填需人工 ${manualRequired.length} 个 · 其他需确认 ${manualAttention.length} 个 · ${adapter.name}`;
     tier.textContent = remoteProfileStatus?.publishedRevision ? `服务端资料 v${remoteProfileStatus.publishedRevision}` : "服务端资料";
-    fillButton.disabled = matches.length === 0 || refreshInProgress || previewGeneration !== refreshGeneration || previewLocation !== location.href;
+    fillButton.disabled = !writesAllowed || matches.length === 0 || refreshInProgress || previewGeneration !== refreshGeneration || previewLocation !== location.href;
+    fillButton.textContent = writesAllowed ? "填写已选字段" : "北森写入暂停";
     undoButton.classList.toggle("gugu-hidden", lastFill.length === 0);
     const repeatSummary = repeatGroups.length
       ? `<div class="gugu-manual"><strong>重复经历必须先绑定档案记录</strong>${repeatGroups.map((group) => `<label>${escapeHtml(group.groupLabel)}<select data-action="bind-entry" data-group-key="${escapeHtml(group.groupKey)}" data-scan-epoch="${repeatBindings.epoch}"><option value="">请选择，不会默认使用第一条</option>${group.options.map((option) => `<option value="${escapeHtml(option.id)}" ${option.id === group.selectedEntryId ? "selected" : ""}>${escapeHtml(option.label)}</option>`).join("")}</select></label>`).join("")}</div>`
@@ -466,8 +471,8 @@ function installAssistant() {
       };
       const emptyReason: DiagnosticReason = scan.stats.controls === 0 ? "no_controls"
         : scan.stats.semantic === 0 ? "no_semantics"
-          : scan.stats.existing > 0 && !overwriteAtStart ? "existing_values"
-            : scan.manualRequired.length + scan.manualAttention.length > 0 ? "manual_only" : "no_plan_match";
+          : scan.manualRequired.length + scan.manualAttention.length > 0 ? "manual_only"
+            : scan.stats.existing > 0 && !overwriteAtStart ? "existing_values" : "no_plan_match";
       if (isCurrent()) logDiagnostic("scan", scan.inventory.length ? "ok" : "empty", scan.inventory.length ? "none" : emptyReason, scanCounts);
 
       if (sourceAtStart === "remote") {
@@ -540,17 +545,19 @@ function installAssistant() {
         });
         const structuralRequired = scan.manualRequired.filter((item) => remoteStructuralReasons.has(item.reason));
         const structuralAttention = scan.manualAttention.filter((item) => remoteStructuralReasons.has(item.reason));
-        const allManual = [...structuralRequired, ...structuralAttention, ...planManual];
+        const nextManualRequired = deduplicateManualFields([...structuralRequired, ...planManual.filter((item) => item.required)]);
+        const nextManualAttention = deduplicateManualFields([...structuralAttention, ...planManual.filter((item) => !item.required)]);
+        const allManual = [...nextManualRequired, ...nextManualAttention];
         if (isCurrent()) logDiagnostic("plan", nextMatches.length ? "ok" : "empty",
-          nextMatches.length ? "none" : scan.stats.existing > 0 && !overwriteAtStart ? "existing_values" : allManual.length ? "manual_only" : "no_plan_match",
+          nextMatches.length ? "none" : allManual.length ? "manual_only" : scan.stats.existing > 0 && !overwriteAtStart ? "existing_values" : "no_plan_match",
           { inventory: fields.length, fillable: nextMatches.length,
-            manualRequired: allManual.filter((item) => item.required).length,
-            manualOther: allManual.filter((item) => !item.required).length,
+            manualRequired: nextManualRequired.length,
+            manualOther: nextManualAttention.length,
             ...manualDiagnosticCounts(allManual) });
         commit(
           nextMatches,
-          deduplicateManualFields([...structuralRequired, ...planManual.filter((item) => item.required)]),
-          deduplicateManualFields([...structuralAttention, ...planManual.filter((item) => !item.required)]),
+          nextManualRequired,
+          nextManualAttention,
           scan.repeatGroups,
           "当前没有可直接填写的空白字段。页面已有文字默认跳过；可勾选上方普通文本覆盖后重新识别，动态下拉和附件仍需人工处理。",
         );
@@ -720,6 +727,11 @@ function installAssistant() {
       return;
     }
     if (action === "fill") {
+      if (!writesAllowed) {
+        logDiagnostic("fill", "blocked", "vendor_write_paused");
+        showNotice("北森字段错配修复前已暂停写入，请手动核对页面资料。", true);
+        return;
+      }
       if (refreshInProgress || previewGeneration !== refreshGeneration || previewLocation !== location.href || previewOverwriteExisting !== overwriteExisting) {
         logDiagnostic("fill", "blocked", "stale_preview");
         showNotice("页面正在重新识别，请等待当前预览生成后再填写。", true);
