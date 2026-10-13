@@ -18,30 +18,38 @@ export function profileEntry(status: RemoteProfileStatus | null, errorStatus: nu
         }
       : {
           statusLabel: ' · 资料服务暂不可用',
-          guidance: '无法核对已发布资料，填写已停止；请检查下方错误提示。',
+          guidance: '无法核对已保存的个人信息，填写已停止；请检查下方错误提示。',
           action: 'rescan',
           actionLabel: '重新检查资料',
         };
   }
   if (status.publishedStatus === 'active') {
     return {
-      statusLabel: ` · 正在使用已发布 v${status.publishedRevision}`,
-      guidance: '只向服务端发送当前页的字段描述；资料草稿不会用于填写。',
+      statusLabel: ` · 正在使用个人信息 v${status.publishedRevision}`,
+      guidance: '只向服务端发送当前页的字段描述；未写入的简历解析结果不会用于填写。',
       action: 'edit-profile',
       actionLabel: '编辑网申资料',
     };
   }
-  if (status.hasPendingImport || status.hasUnpublishedDraft) {
+  if (status.hasPendingImport) {
     return {
-      statusLabel: ' · 网申资料尚未发布',
-      guidance: '网站上已有待审核或待发布内容；完成确认并发布后即可生成填写预览。',
+      statusLabel: ' · 简历解析结果待写入',
+      guidance: '网站上已有解析预览，点击“一键写入个人信息”后即可生成填写预览。',
       action: 'edit-profile',
-      actionLabel: '继续整理并发布资料',
+      actionLabel: '查看并写入个人信息',
+    };
+  }
+  if (status.hasUnpublishedDraft) {
+    return {
+      statusLabel: ' · 个人信息待保存',
+      guidance: '网站上已有个人信息，点击“保存个人信息”后即可生成填写预览。',
+      action: 'edit-profile',
+      actionLabel: '保存个人信息',
     };
   }
   return {
     statusLabel: ' · 尚无网申资料',
-    guidance: '首次使用请在网站上传简历解析，或手工建立大简历并发布。',
+    guidance: '首次使用请在网站上传简历并一键写入，或手工建立大简历并保存。',
     action: 'edit-profile',
     actionLabel: '上传简历或手工建立资料',
   };

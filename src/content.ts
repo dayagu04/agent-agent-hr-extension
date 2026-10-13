@@ -178,7 +178,7 @@ function installAssistant() {
       return;
     }
     const entry = profileEntry(remoteProfileStatus, profileErrorStatus);
-    source.innerHTML = `<div class="gugu-source-copy"><strong>${escapeHtml(accountDisplayName || "已登录谷谷账号")}${escapeHtml(entry.statusLabel)}</strong><span>${escapeHtml(entry.guidance)}</span>${remoteProfileStatus?.publishedStatus === "active" && (remoteProfileStatus.hasPendingImport || remoteProfileStatus.hasUnpublishedDraft) ? "<span>网站有待审核或待发布更新，本次仍使用已发布版本。</span>" : ""}</div>
+    source.innerHTML = `<div class="gugu-source-copy"><strong>${escapeHtml(accountDisplayName || "已登录谷谷账号")}${escapeHtml(entry.statusLabel)}</strong><span>${escapeHtml(entry.guidance)}</span>${remoteProfileStatus?.publishedStatus === "active" && (remoteProfileStatus.hasPendingImport || remoteProfileStatus.hasUnpublishedDraft) ? "<span>网站有尚未写入或保存的更新，本次仍使用当前已保存版本。</span>" : ""}</div>
       <div class="gugu-source-actions">
         <button class="gugu-inline-button gugu-accent" data-action="${entry.action}" type="button">${escapeHtml(entry.actionLabel)}</button>
         <button class="gugu-inline-button" data-action="logout" type="button">退出助手账号</button>
@@ -212,7 +212,7 @@ function installAssistant() {
         : `<span class="gugu-field-value" title="${escapeHtml(displayValue)}">${escapeHtml(displayValue) || "档案中暂无该字段"}</span>`;
       const checked = selectedIds.has(match.id);
       const mappingControl = match.source === "remote"
-        ? `<span class="gugu-record-source">已发布资料${match.canonicalKey ? ` · ${escapeHtml(match.canonicalKey)}` : ""}${descriptors.get(match.id)?.hasValue ? " · 将覆盖已有文字" : ""}${match.sensitivity === "conditional" ? " · 条件信息，默认不选" : ""}</span>`
+        ? `<span class="gugu-record-source">已保存资料${match.canonicalKey ? ` · ${escapeHtml(match.canonicalKey)}` : ""}${descriptors.get(match.id)?.hasValue ? " · 将覆盖已有文字" : ""}${match.sensitivity === "conditional" ? " · 条件信息，默认不选" : ""}</span>`
         : match.mappingLocked
           ? `<span class="gugu-record-source">${escapeHtml(match.recordLabel ?? "已绑定结构化记录")}</span>`
           : match.key
@@ -412,7 +412,7 @@ function installAssistant() {
         return;
       }
       if (sourceAtStart === "remote" && !revisionAtStart) {
-        commit([], [], [], [], "尚无已发布的网申资料。请先在谷谷网站上传简历、审核或手工填写并发布。");
+        commit([], [], [], [], "尚无可用的网申资料。请先在谷谷网站上传简历并一键写入，或手工填写后保存。");
         return;
       }
       if (sourceAtStart === "local" && !hasLocalProfile()) {
@@ -509,7 +509,7 @@ function installAssistant() {
           deduplicateManualFields([...structuralRequired, ...planManual.filter((item) => item.required)]),
           deduplicateManualFields([...structuralAttention, ...planManual.filter((item) => !item.required)]),
           scan.repeatGroups,
-          "已发布资料没有可可靠匹配的字段；请查看下方人工处理项。",
+          "已保存资料没有可可靠匹配的字段；请查看下方人工处理项。",
         );
       } else {
         commit(
@@ -585,7 +585,7 @@ function installAssistant() {
         render();
         if (authenticated) {
           await refresh();
-          showNotice(remoteProfileStatus?.publishedRevision ? "登录状态已同步，填写预览已生成。" : "登录状态已同步，请先在网站建立并发布网申资料。");
+          showNotice(remoteProfileStatus?.publishedRevision ? "登录状态已同步，填写预览已生成。" : "登录状态已同步，请先在网站写入或保存网申资料。");
         }
         else showNotice("仍未检测到有效登录，请在刚打开的谷谷页面完成登录。", true);
       } catch (error) {
@@ -665,7 +665,7 @@ function installAssistant() {
       if (dataSource === "remote") {
         const validation = await chrome.runtime.sendMessage({ type: "VALIDATE_PROFILE_REVISION", revision: expectedRevision }) as { ok?: boolean; result?: boolean; error?: string };
         if (!validation.ok || validation.result !== true || previewGeneration !== refreshGeneration || previewLocation !== location.href) {
-          clearPreview("已发布资料或页面已变化，请重新识别后再填写。");
+          clearPreview("个人信息或页面已变化，请重新识别后再填写。");
           showNotice(validation.error || "填写预览已过期，请重新识别。", true);
           return;
         }

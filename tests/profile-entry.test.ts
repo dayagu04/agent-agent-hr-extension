@@ -25,9 +25,11 @@ test('first-time user is directed to upload or manually create the server profil
   assert.match(firstUse.actionLabel, /上传简历|手工建立/);
 });
 
-test('draft and published profiles show distinct next steps', () => {
+test('pending import, unsaved data, and active profiles show distinct next steps', () => {
+  const pending = profileEntry({ ...empty, hasPendingImport: true }, null);
+  assert.match(pending.actionLabel, /写入/);
   const draft = profileEntry({ ...empty, draftRevision: 1, hasUnpublishedDraft: true }, null);
-  assert.match(draft.actionLabel, /发布/);
+  assert.match(draft.actionLabel, /保存/);
   const published = profileEntry({ ...empty, publishedRevision: 2, publishedStatus: 'active' }, null);
   assert.match(published.statusLabel, /v2/);
   assert.equal(published.action, 'edit-profile');

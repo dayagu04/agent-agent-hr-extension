@@ -274,7 +274,7 @@ async function openProfilePage(sender: chrome.runtime.MessageSender): Promise<bo
 }
 
 async function createProfilePlan(revision: unknown, vendor: unknown, fields: unknown, overwriteExisting: unknown): Promise<unknown> {
-  if (!Number.isInteger(revision) || Number(revision) < 1) throw new Error("请先发布网申资料。");
+  if (!Number.isInteger(revision) || Number(revision) < 1) throw new Error("请先在网站写入或保存网申资料。");
   if (overwriteExisting !== undefined && typeof overwriteExisting !== "boolean") throw new Error("覆盖设置无效。");
   const safeVendor = typeof vendor === "string" && /^[A-Za-z0-9_.-]{1,40}$/.test(vendor) ? vendor : "generic";
   const safeFields = sanitizeRemoteFields(fields);
