@@ -160,14 +160,17 @@ describe('ApplyEngine 投递结果口径', () => {
     )
   })
 
-  it('确认成功（applied）计入投递进度', async () => {
+  it('确认成功计入进度，同批重复岗位只执行并记账一次', async () => {
     const platform = new FakePlatform()
-    platform.setJobs([job])
+    platform.setJobs([job, { ...job }])
     platform.setResult({ outcome: 'applied', message: '已发起沟通' })
 
     const progress = await runEngine(platform, makeConfig())
 
     expect(progress.applied).toBe(1)
+    expect(platform.applyCalls).toBe(1)
+    expect(recordApplication).toHaveBeenCalledTimes(1)
+    expect(progress.skipped).toBe(1)
     expect(progress.unknown).toBe(0)
     expect(progress.failed).toBe(0)
   })
