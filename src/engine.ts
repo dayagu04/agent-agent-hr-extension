@@ -243,6 +243,10 @@ export class ApplyEngine {
 
       // 3. 筛选推荐岗位（规则过滤 + 匹配阈值），跳过原因上报后端决策日志
       const recommended: Array<{ job: JobCard; score: number }> = []
+      // Re-rendered/overlapping cards may repeat a stable ID within one scan.
+      // Keep only its first entry before building the executable batch. Empty
+      // IDs are not equivalent identities and must not collapse into one job.
+      const seenJobIds = new Set<string>()
       let ruleBlocked = 0
       for (const job of jobs) {
         const r = scoreMap.get(job.platformJobId)
@@ -252,6 +256,13 @@ export class ApplyEngine {
           progress.skipped++
           continue
         }
+
+        if (job.platformJobId && seenJobIds.has(job.platformJobId)) {
+          progress.skipped++
+          this.platform.markCard(job, '#d1d5db')
+          continue
+        }
+        if (job.platformJobId) seenJobIds.add(job.platformJobId)
 
         // 规则过滤优先于分数（用户明确设的底线不该被高分绕过）
         const hitRule = this.matchBlockRule(job)
