@@ -121,7 +121,7 @@ export function contactChannelFromQuestion(question: string): ContactChannel | n
 
 /**
  * 判断本地策略是否允许点击联系方式卡片。
- * full_auto 只放行已配置渠道；明确 deny/ask/notify 仍不在插件端自动点。
+ * full_auto 只放行已配置渠道；旧通知模式在插件端安全暂停。
  */
 export function isContactExchangeAllowed(
   policy: AgentPolicy | null | undefined,
@@ -133,12 +133,8 @@ export function isContactExchangeAllowed(
     ? [`exchange_${channel}`, 'contact_exchange']
     : ['contact_exchange']
   const explicit = actionKeys.map((key) => p.actions?.[key]).find((v) => v !== undefined)
-  // Notifications are deliberately not approval gates.  Only an explicit
-  // deny/ask_once (or an un-overridden manual policy) may block the card.
-  // This mirrors the server evaluator so a guided policy does not silently
-  // turn into a skip merely because the browser is executing the card.
-  if (explicit === 'deny' || explicit === 'ask_once') return false
-  if (p.mode === 'manual' && explicit !== 'allow') return false
+  if (explicit === 'deny' || explicit === 'ask_once' || explicit === 'notify_before' || explicit === 'notify_after') return false
+  if ((p.mode === 'manual' || p.mode === 'guided' || p.mode === 'assisted') && explicit !== 'allow') return false
 
   const channels = p.contact?.channels || []
   // 没有明确渠道时无法证明用户允许交换哪种联系方式；未知问题必须人工处理。
@@ -147,8 +143,7 @@ export function isContactExchangeAllowed(
 }
 
 /**
- * 通用动作护栏。插件只负责执行后端已经允许的副作用；notify_* 仍继续，
- * 只有 deny/ask_once（以及 manual 未显式 allow）会在本地跳过。
+ * 通用动作护栏。旧通知模式失去通知通道后必须暂停，不能悄悄执行。
  */
 export function isAgentActionAllowed(
   policy: AgentPolicy | null | undefined,
@@ -156,8 +151,8 @@ export function isAgentActionAllowed(
 ): boolean {
   const p = policy || DEFAULT_AGENT_POLICY
   const explicit = p.actions?.[action]
-  if (explicit === 'deny' || explicit === 'ask_once') return false
-  if (p.mode === 'manual' && explicit !== 'allow') return false
+  if (explicit === 'deny' || explicit === 'ask_once' || explicit === 'notify_before' || explicit === 'notify_after') return false
+  if ((p.mode === 'manual' || p.mode === 'guided' || p.mode === 'assisted') && explicit !== 'allow') return false
   return true
 }
 

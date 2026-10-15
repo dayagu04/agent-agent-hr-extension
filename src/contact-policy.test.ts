@@ -56,9 +56,15 @@ describe('contact policy', () => {
     expect(contactChannelFromQuestion('方便交换联系方式吗')).toBeNull()
   })
 
-  it('blocks only deny/ask_once actions while guided notifications continue', () => {
+  it('pauses retired notification modes and guided defaults', () => {
     const guided = normalizeAgentPolicy({ mode: 'guided' }, { channels: [] })
-    expect(isAgentActionAllowed(guided, 'apply')).toBe(true)
+    expect(isAgentActionAllowed(guided, 'apply')).toBe(false)
+    const legacy = normalizeAgentPolicy(
+      { mode: 'full_auto', actions: { apply: 'notify_after', exchange_phone: 'notify_before' } },
+      { channels: ['phone'] },
+    )
+    expect(isAgentActionAllowed(legacy, 'apply')).toBe(false)
+    expect(isContactExchangeAllowed(legacy, 'phone')).toBe(false)
     const denied = normalizeAgentPolicy(
       { mode: 'full_auto', actions: { apply: 'deny', send_greeting: 'ask_once' } },
       { channels: [] },
