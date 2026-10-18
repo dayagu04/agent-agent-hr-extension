@@ -6,6 +6,7 @@ import {
   findResumeDialog,
   isActionCardAllowed,
   isContactCardAllowed,
+  listResumeOptions,
   resumeDialogKind,
   selectResumeInDialog,
 } from './boss-chat'
@@ -416,5 +417,68 @@ describe('BOSS resume picker DOM handling', () => {
     setRect(dialog, 0, 0)
 
     expect(findResumeDialog()).toBeNull()
+  })
+
+  it('lists picker rows once each, skipping titles, buttons and file metadata', () => {
+    document.body.innerHTML = `
+      <div role="dialog">
+        <div class="dialog-header">请选择要发送的简历</div>
+        <ul>
+          <li class="resume-item selected"><label><input type="radio" checked><span>后端工程师简历.pdf</span><em>2026.10.01</em></label></li>
+          <li class="resume-item"><label><input type="radio"><span>算法岗简历.pdf</span><em>320KB</em></label></li>
+        </ul>
+        <button type="button">上传简历</button>
+        <button type="button">发送</button>
+      </div>
+    `
+    const dialog = document.querySelector('[role="dialog"]') as HTMLElement
+    for (const el of Array.from(dialog.querySelectorAll('*'))) setRect(el, 120, 30)
+
+    const options = listResumeOptions(dialog)
+    expect(options.map((o) => o.name)).toEqual(['后端工程师简历.pdf', '算法岗简历.pdf'])
+    expect(options.map((o) => o.selected)).toEqual([true, false])
+  })
+
+  it('refuses to send BOSS\'s preselection when several resumes exist and none was chosen', async () => {
+    vi.useFakeTimers()
+    document.body.innerHTML = `
+      <div role="dialog">
+        <div>请选择要发送的简历</div>
+        <label class="resume-item selected"><span>后端工程师简历.pdf</span></label>
+        <label class="resume-item"><span>算法岗简历.pdf</span></label>
+        <button type="button"><span>发送</span></button>
+      </div>
+    `
+    const dialog = document.querySelector('[role="dialog"]') as HTMLElement
+    for (const el of Array.from(dialog.querySelectorAll('*')).concat(dialog)) setRect(el, 120, 30)
+    const sends = vi.fn()
+    dialog.querySelector('button')!.addEventListener('click', sends)
+
+    const result = completeResumeSend(null)
+    await vi.runAllTimersAsync()
+
+    await expect(result).resolves.toBe(false)
+    expect(sends).not.toHaveBeenCalled()
+  })
+
+  it('still sends without a configured name when the picker holds exactly one resume', async () => {
+    vi.useFakeTimers()
+    document.body.innerHTML = `
+      <div role="dialog">
+        <div>请选择要发送的简历</div>
+        <label class="resume-item selected"><span>后端工程师简历.pdf</span></label>
+        <button type="button"><span>发送</span></button>
+      </div>
+    `
+    const dialog = document.querySelector('[role="dialog"]') as HTMLElement
+    for (const el of Array.from(dialog.querySelectorAll('*')).concat(dialog)) setRect(el, 120, 30)
+    const sends = vi.fn(() => dialog.remove())
+    dialog.querySelector('button')!.addEventListener('click', sends)
+
+    const result = completeResumeSend(null)
+    await vi.runAllTimersAsync()
+
+    await expect(result).resolves.toBe(true)
+    expect(sends).toHaveBeenCalledTimes(1)
   })
 })

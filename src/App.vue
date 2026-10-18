@@ -7,16 +7,18 @@ import { detectPlatform } from './platforms/factory'
 import { diag } from './logger'
 import { detectNavUnread } from './nav-unread'
 import {
+  closeResumeDialog,
+  currentThreadId,
   currentThreadInfo,
   deleteThread,
   listThreads,
   onChatPage,
+  openResumePicker,
   openThread,
   readRowJobInfo,
   readMessages,
-  findResumeDialog,
-  resumeDialogKind,
-  findDialogButton,
+  sendResume,
+  type ResumeOption,
 } from './platforms/boss-chat'
 import { setPendingOpen, takePendingOpen } from './chat-store'
 import {
@@ -831,104 +833,160 @@ function updateOrchestratorStats() {
 // ---- 测试工具（聊天页原子操作）----
 const testToolsMsg = ref('')
 const testToolsRunning = ref(false)
+/** 读到的消息（只在面板显示，方便对照页面核对 HR/我方 分类；正文不进日志） */
+const testMessages = ref<Array<{ sender: 'hr' | 'me' | 'system'; content: string }>>([])
+/** BOSS 简历选择框里的候选（名字只在面板显示，不进日志） */
+const testResumeOptions = ref<ResumeOption[]>([])
+const testResumePick = ref<number>(-1)
+/** 发简历二次确认：第一次点击记下会话身份，第二次点击核对未切换才发 */
+const testSendArmed = ref<{ threadId: string; company: string; jobTitle: string; resume: string } | null>(null)
+let testSendArmTimer: number | undefined
+
+const SENDER_LABEL: Record<'hr' | 'me' | 'system', string> = { hr: 'HR', me: '我方', system: '系统' }
+
+/** 当前打开的会话身份；没打开会话时为空串（头部姓名和岗位都读不到） */
+function openThreadId(): string {
+  const id = currentThreadId()
+  return id === '|' ? '' : id
+}
 
 /** 测试工具：读取当前会话消息（只读） */
 async function testReadMessages(): Promise<void> {
   testToolsMsg.value = ''
+  testMessages.value = []
+  if (!isChatPage.value) {
+    testToolsMsg.value = '请先到聊天页'
+    return
+  }
+  if (!openThreadId()) {
+    testToolsMsg.value = '请先在左侧点开一个会话'
+    diag('TEST', 'read_messages status=no_thread')
+    return
+  }
   testToolsRunning.value = true
   try {
-    if (!isChatPage.value) {
-      testToolsMsg.value = '请先到聊天页'
-      return
-    }
-    const msgs = await readMessages()
-    const summary = {
-      total: msgs.length,
-      hr: msgs.filter((m) => m.sender === 'hr').length,
-      me: msgs.filter((m) => m.sender === 'me').length,
-      system: msgs.filter((m) => m.sender === 'system').length,
-    }
-    diag('TEST', '读取消息', summary)
-    // 前几条消息的 sender 和前 30 字（会被脱敏，但能看分类对不对）
-    msgs.slice(0, 5).forEach((m, i) => {
-      diag('TEST', `消息 ${i}`, { sender: m.sender, preview: m.content.slice(0, 30) })
-    })
-    testToolsMsg.value = `读取成功：共 ${msgs.length} 条（HR ${summary.hr} / 我方 ${summary.me} / 系统 ${summary.system}）`
+    // verbose：逐条记录判定依据（规则/气泡 class/横坐标/长度），不含正文
+    const msgs = await readMessages({ verbose: true })
+    testMessages.value = msgs
+    const hr = msgs.filter((m) => m.sender === 'hr').length
+    const me = msgs.filter((m) => m.sender === 'me').length
+    const system = msgs.filter((m) => m.sender === 'system').length
+    diag('TEST', `read_messages status=ok total=${msgs.length} hr=${hr} me=${me} system=${system}`)
+    testToolsMsg.value = `读到 ${msgs.length} 条：HR ${hr} / 我方 ${me} / 系统 ${system}。请对照右侧聊天记录核对下方分类。`
   } catch (e) {
     testToolsMsg.value = `读取失败：${(e as Error).message}`
-    diag('TEST', '读取消息失败', { error: (e as Error).message })
+    diag('TEST', `read_messages status=error error=${(e as Error).name || 'Error'}`)
   } finally {
     testToolsRunning.value = false
   }
 }
 
-/** 测试工具：列出 BOSS 附件简历（只读） */
+/** 测试工具：列出 BOSS 附件简历（只读：打开选择框 → 读列表 → 点取消） */
 async function testListResumes(): Promise<void> {
   testToolsMsg.value = ''
+  testResumeOptions.value = []
+  testResumePick.value = -1
+  disarmSendResume()
+  if (!isChatPage.value) {
+    testToolsMsg.value = '请先到聊天页'
+    return
+  }
+  if (!openThreadId()) {
+    testToolsMsg.value = '请先在左侧点开一个会话'
+    diag('TEST', 'list_resumes status=no_thread')
+    return
+  }
   testToolsRunning.value = true
   try {
-    if (!isChatPage.value) {
-      testToolsMsg.value = '请先到聊天页'
-      return
+    const r = await openResumePicker()
+    if (r.status === 'picker') {
+      testResumeOptions.value = r.options
+      const pre = r.options.findIndex((o) => o.selected && !o.disabled)
+      testResumePick.value = pre >= 0 ? pre : -1
+      const closed = await closeResumeDialog(r.dialog)
+      diag(
+        'TEST',
+        `list_resumes status=picker options=${r.options.length} preselected=${pre >= 0 ? pre : 'none'} closed=${closed}`,
+      )
+      testToolsMsg.value = r.options.length
+        ? `BOSS 里有 ${r.options.length} 份附件简历${closed ? '' : '（选择框没能自动关闭，请手动点取消）'}。选一份后可以测试发送。`
+        : '弹出了简历选择框，但没读到简历行，日志里已记录结构'
+    } else if (r.status === 'confirm') {
+      // 确认框（通常是只有一份简历）：读不到列表，绝不点「同意」
+      const closed = await closeResumeDialog(r.dialog)
+      diag('TEST', `list_resumes status=confirm closed=${closed}`)
+      testToolsMsg.value = `弹出的是「确认发送」框（通常是只有一份简历），没有点同意${closed ? '，已取消' : '，请手动点取消'}`
+    } else if (r.status === 'unknown') {
+      const closed = await closeResumeDialog(r.dialog)
+      diag('TEST', `list_resumes status=unknown closed=${closed}`)
+      testToolsMsg.value = `弹出了不认识的简历弹窗，未做任何操作${closed ? '，已关闭' : '，请手动关闭'}`
+    } else {
+      const reason = {
+        no_button: '没找到「发简历」按钮（这个会话的工具栏可能没有这个入口）',
+        button_disabled: '「发简历」按钮是灰的（BOSS 可能要求先回复过对方）',
+        no_dialog: '点了「发简历」，4 秒内没弹出选择框',
+      }[r.status]
+      diag('TEST', `list_resumes status=${r.status}`)
+      testToolsMsg.value = `读取失败：${reason}`
     }
-    const info = currentThreadInfo()
-    if (!info.company) {
-      testToolsMsg.value = '请先打开一个会话'
-      return
-    }
-
-    // 点发简历按钮
-    const sendResumeBtn = Array.from(document.querySelectorAll('button, [role="button"]')).find(
-      (el) => {
-        const txt = (el.textContent || '').trim()
-        return txt === '发简历' || txt === '发送简历' || txt === '附件简历'
-      },
-    )
-    if (!sendResumeBtn) {
-      testToolsMsg.value = '未找到「发简历」按钮'
-      return
-    }
-    ;(sendResumeBtn as HTMLElement).click()
-    await new Promise((r) => setTimeout(r, 800))
-
-    // 读弹窗
-    const dialog = findResumeDialog()
-    if (!dialog) {
-      testToolsMsg.value = '未弹出简历选择框'
-      return
-    }
-    const kind = resumeDialogKind(dialog)
-    if (kind === 'confirm') {
-      testToolsMsg.value = '弹出的是确认框（只有1份简历），未点「同意」'
-      // 点取消
-      const cancelBtn = findDialogButton(dialog, /取消|关闭/)
-      if (cancelBtn) (cancelBtn as HTMLElement).click()
-      diag('TEST', '附件简历', { count: 1, kind: 'confirm' })
-      return
-    }
-    if (kind === 'unknown') {
-      testToolsMsg.value = '弹出的是未知类型弹窗，未操作'
-      return
-    }
-
-    // 读列表
-    const rows = Array.from(dialog.querySelectorAll('[class*="resume"], .item, li')).filter((el) => {
-      const txt = (el.textContent || '').trim()
-      return txt.length > 2 && txt.length < 200
-    })
-    diag('TEST', '附件简历', { count: rows.length, kind: 'picker' })
-    rows.slice(0, 5).forEach((el, i) => {
-      const txt = (el.textContent || '').trim()
-      diag('TEST', `简历 ${i}`, { length: txt.length, preview: txt.slice(0, 40) })
-    })
-    testToolsMsg.value = `读取成功：共 ${rows.length} 份简历`
-
-    // 点取消
-    const cancelBtn = findDialogButton(dialog, /取消|关闭/)
-    if (cancelBtn) (cancelBtn as HTMLElement).click()
   } catch (e) {
     testToolsMsg.value = `读取失败：${(e as Error).message}`
-    diag('TEST', '列出简历失败', { error: (e as Error).message })
+    diag('TEST', `list_resumes status=error error=${(e as Error).name || 'Error'}`)
+  } finally {
+    testToolsRunning.value = false
+  }
+}
+
+function disarmSendResume(): void {
+  testSendArmed.value = null
+  if (testSendArmTimer !== undefined) clearTimeout(testSendArmTimer)
+  testSendArmTimer = undefined
+}
+
+/**
+ * 测试工具：发送选中的简历（不可撤回）。
+ *
+ * 第一次点击只「上膛」并显示要发给谁、发哪份；10 秒内再点一次才真正发送，
+ * 发送前再核对一次当前会话没被切换，防止发到别人那里。
+ */
+async function testSendResume(): Promise<void> {
+  const opt = testResumeOptions.value[testResumePick.value]
+  if (!opt) {
+    testToolsMsg.value = '先点「列出附件简历」并选一份'
+    return
+  }
+  const threadId = openThreadId()
+  if (!threadId) {
+    testToolsMsg.value = '请先在左侧点开一个会话'
+    return
+  }
+  if (!testSendArmed.value) {
+    const info = currentThreadInfo()
+    testSendArmed.value = { threadId, company: info.company, jobTitle: info.jobTitle, resume: opt.name }
+    testSendArmTimer = window.setTimeout(disarmSendResume, 10_000)
+    testToolsMsg.value = ''
+    return
+  }
+  const armed = testSendArmed.value
+  disarmSendResume()
+  if (armed.threadId !== threadId) {
+    testToolsMsg.value = '当前会话已切换，已取消发送。请重新确认。'
+    diag('TEST', 'send_resume status=thread_changed')
+    return
+  }
+  testToolsRunning.value = true
+  try {
+    const ok = await sendResume(armed.resume)
+    diag(
+      'TEST',
+      `send_resume status=${ok ? 'sent' : 'failed'} option=${testResumePick.value} options=${testResumeOptions.value.length}`,
+    )
+    testToolsMsg.value = ok
+      ? `已发送「${armed.resume}」给 ${armed.company || '当前会话'}，请在聊天记录里确认`
+      : '发送失败：简历没发出去，具体卡在哪一步已写进日志'
+  } catch (e) {
+    testToolsMsg.value = `发送失败：${(e as Error).message}`
+    diag('TEST', `send_resume status=error error=${(e as Error).name || 'Error'}`)
   } finally {
     testToolsRunning.value = false
   }
@@ -1084,6 +1142,52 @@ onMounted(() => {
 
           <div v-if="testToolsMsg" class="aah-test-result" :class="{ error: testToolsMsg.includes('失败') }">
             {{ testToolsMsg }}
+          </div>
+
+          <!-- 读到的消息：逐条显示判定结果，对照右侧聊天记录核对 -->
+          <div v-if="testMessages.length" class="aah-test-msgs">
+            <div
+              v-for="(m, i) in testMessages"
+              :key="i"
+              class="aah-test-msg"
+              :class="'sender-' + m.sender"
+            >
+              <span class="aah-test-msg-who">{{ SENDER_LABEL[m.sender] }}</span>
+              <span class="aah-test-msg-text">{{ m.content }}</span>
+            </div>
+          </div>
+
+          <!-- BOSS 附件简历：选一份 → 发送（二次确认） -->
+          <div v-if="testResumeOptions.length" class="aah-test-section">
+            <div class="aah-test-section-title">📎 选择要发送的简历</div>
+            <label
+              v-for="(o, i) in testResumeOptions"
+              :key="i"
+              class="aah-test-resume"
+              :class="{ disabled: o.disabled }"
+            >
+              <input
+                type="radio"
+                name="aah-test-resume"
+                :value="i"
+                v-model="testResumePick"
+                :disabled="o.disabled || testToolsRunning"
+                @change="disarmSendResume"
+              />
+              <span>{{ o.name }}</span>
+              <small v-if="o.selected">BOSS 当前选中</small>
+            </label>
+            <div v-if="testSendArmed" class="aah-test-confirm" role="alert">
+              ⚠️ 确认发送「{{ testSendArmed.resume }}」给
+              <b>{{ testSendArmed.company || '当前会话' }}</b>
+              <span v-if="testSendArmed.jobTitle">（{{ testSendArmed.jobTitle }}）</span>？
+              发出后无法撤回，10 秒内再点一次按钮确认。
+            </div>
+            <button
+              class="aah-btn-danger"
+              :disabled="testToolsRunning || testResumePick < 0"
+              @click="testSendResume"
+            >{{ testSendArmed ? '确认发送（不可撤回）' : '发送选中的简历' }}</button>
           </div>
 
           <p class="aah-test-footer">
@@ -1345,6 +1449,20 @@ onMounted(() => {
 .aah-test-result.error { background:#fef2f2; border-color:#fecaca; color:#991b1b; }
 .aah-test-footer { margin:0; font-size:11px; color:#9ca3af; }
 .aah-test-footer code { background:#f3f4f6; padding:1px 4px; border-radius:3px; }
+.aah-test-msgs { display:flex; flex-direction:column; gap:4px; max-height:260px; overflow-y:auto; padding:8px; background:#fff; border:1px solid #e5e7eb; border-radius:8px; }
+.aah-test-msg { display:flex; gap:8px; align-items:flex-start; font-size:12px; line-height:1.5; }
+.aah-test-msg-who { flex:0 0 36px; text-align:center; padding:1px 0; border-radius:4px; font-size:11px; font-weight:700; }
+.aah-test-msg-text { flex:1; min-width:0; word-break:break-all; color:#374151; }
+.aah-test-msg.sender-hr .aah-test-msg-who { background:#ede9fe; color:#5b21b6; }
+.aah-test-msg.sender-me { flex-direction:row-reverse; }
+.aah-test-msg.sender-me .aah-test-msg-who { background:#dbeafe; color:#1d4ed8; }
+.aah-test-msg.sender-me .aah-test-msg-text { text-align:right; }
+.aah-test-msg.sender-system .aah-test-msg-who { background:#f3f4f6; color:#6b7280; }
+.aah-test-msg.sender-system .aah-test-msg-text { color:#9ca3af; font-style:italic; }
+.aah-test-resume { display:flex; align-items:center; gap:8px; padding:6px 8px; background:#fff; border:1px solid #e5e7eb; border-radius:6px; cursor:pointer; font-size:12px; }
+.aah-test-resume small { margin-left:auto; color:#6b7280; font-size:11px; }
+.aah-test-resume.disabled { opacity:.5; cursor:not-allowed; }
+.aah-test-confirm { padding:8px 10px; background:#fef2f2; border:1px solid #fca5a5; border-radius:6px; color:#991b1b; font-size:12px; line-height:1.5; }
 .aah-icon-btn.active { background:rgba(255,255,255,.5); box-shadow:inset 0 0 0 1px #fff; }
 
 /* ---- Tab 布局：左导航 80px + 右内容 480px ---- */
