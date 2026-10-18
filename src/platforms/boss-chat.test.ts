@@ -2,11 +2,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   classifyCard,
   completeResumeSend,
+  countResumeSentMarks,
   findDialogButton,
   findResumeDialog,
   isActionCardAllowed,
   isContactCardAllowed,
   listResumeOptions,
+  readMessages,
   resumeDialogKind,
   selectResumeInDialog,
 } from './boss-chat'
@@ -480,5 +482,94 @@ describe('BOSS resume picker DOM handling', () => {
 
     await expect(result).resolves.toBe(true)
     expect(sends).toHaveBeenCalledTimes(1)
+  })
+
+  it('recognizes the 2026-10 picker that has no role, no active class and no send button', () => {
+    // 结构对应实测截图：标题 + 已上传附件 + 两行（文件名/更新时间/大小）+ 管理附件
+    document.body.innerHTML = `
+      <div class="boss-popup__wrapper">
+        <div class="boss-popup__content">
+          <h3 class="title">请选择要发送的简历</h3>
+          <p class="sub">已上传附件</p>
+          <div class="list">
+            <div class="row"><i class="icon"></i><div class="info"><p class="name">蔡韬的简历-agent.pdf</p><p class="meta"><span>更新于2026.10.18 22:03</span><span>263.7KB</span></p></div></div>
+            <div class="row"><i class="icon"></i><div class="info"><p class="name">261011.pdf</p><p class="meta"><span>更新于2026.10.11 20:29</span><span>313.2KB</span></p></div></div>
+          </div>
+          <span class="manage">管理附件</span>
+        </div>
+      </div>
+    `
+    for (const el of Array.from(document.querySelectorAll('*'))) setRect(el, 300, 30)
+
+    const dialog = findResumeDialog()
+    expect(dialog).not.toBeNull()
+    expect(dialog!.classList.contains('boss-popup__content')).toBe(true)
+    expect(resumeDialogKind(dialog!)).toBe('picker')
+    expect(listResumeOptions(dialog!).map((o) => o.name)).toEqual(['蔡韬的简历-agent.pdf', '261011.pdf'])
+  })
+
+  it('selects the whole attachment row, not just the file-name text', () => {
+    document.body.innerHTML = `
+      <div class="boss-popup__content">
+        <h3>请选择要发送的简历</h3>
+        <div class="row" id="a"><p class="name">蔡韬的简历-agent.pdf</p><span>263.7KB</span></div>
+        <div class="row" id="b"><p class="name">261011.pdf</p><span>313.2KB</span></div>
+      </div>
+    `
+    for (const el of Array.from(document.querySelectorAll('*'))) setRect(el, 300, 30)
+    const dialog = document.querySelector('.boss-popup__content') as HTMLElement
+    const rowClicks: string[] = []
+    for (const row of Array.from(dialog.querySelectorAll('.row'))) {
+      row.addEventListener('click', (e) => {
+        if (e.target === row) rowClicks.push(row.id)
+      })
+    }
+
+    expect(selectResumeInDialog(dialog, '261011.pdf')).toBe(true)
+    expect(rowClicks).toEqual(['b'])
+  })
+
+  it('treats a new "已发送给Boss" mark as success when BOSS sends a single attachment without any dialog', async () => {
+    vi.useFakeTimers()
+    document.body.innerHTML = `<div class="chat-conversation"><div class="item-system"><span>您的附件简历 旧的 已发送给Boss</span></div></div>`
+    const panel = document.querySelector('.chat-conversation') as HTMLElement
+    setRect(panel, 800, 800)
+    const baseline = countResumeSentMarks()
+    expect(baseline).toBe(1)
+
+    const result = completeResumeSend(null, false, baseline)
+    // BOSS 直接发出：没有任何弹窗，只是消息区多了一条系统提示
+    const mark = document.createElement('div')
+    mark.className = 'item-system'
+    mark.innerHTML = '<span>您的附件简历 261011 已发送给Boss</span>'
+    panel.appendChild(mark)
+    await vi.runAllTimersAsync()
+
+    await expect(result).resolves.toBe(true)
+  })
+})
+
+describe('BOSS message reading', () => {
+  it('includes HR interaction cards (no span.text-content) in page order', async () => {
+    Element.prototype.scrollTo = Element.prototype.scrollTo || (() => {})
+    document.body.innerHTML = `
+      <div class="chat-conversation">
+        <div class="item-myself"><span class="text-content">看到贵司的这个职位，觉得我挺合适</span></div>
+        <div class="item-friend"><span class="text-content">你好，方便发一份你的简历过来吗？</span></div>
+        <div class="item-friend"><div class="card"><p>我想要一份您的附件简历，您是否同意</p><span>拒绝</span><span>同意</span></div></div>
+      </div>
+    `
+    for (const el of Array.from(document.querySelectorAll('*'))) {
+      vi.spyOn(el, 'getBoundingClientRect').mockReturnValue({
+        x: 0, y: 0, top: 0, left: 0, right: 100, bottom: 30, width: 100, height: 30, toJSON: () => ({}),
+      })
+    }
+    vi.spyOn(document.querySelector('.chat-conversation')!, 'getBoundingClientRect').mockReturnValue({
+      x: 0, y: 0, top: 0, left: 0, right: 800, bottom: 800, width: 800, height: 800, toJSON: () => ({}),
+    })
+
+    const msgs = await readMessages()
+    expect(msgs.map((m) => `${m.sender}:${m.kind}`)).toEqual(['me:text', 'hr:text', 'hr:card'])
+    expect(msgs[2].content).toBe('我想要一份您的附件简历，您是否同意')
   })
 })
