@@ -753,7 +753,7 @@ export function openThread(company: string, jobTitle = ''): 'ok' | 'not-found' |
 
 /** 读当前打开会话的消息（区分 hr / me）。会先滚动到底部确保全部加载。 */
 /** BOSS 系统通知文本模式（不是 HR 说话，不能当 HR 消息回复/统计） */
-const SYSTEM_MSG_RE = /对方已(查看|同意|接受|拒绝)|附件简历已(发送|送达)|撤回了一条消息|已交换联系方式|职位(已下线|已关闭)|系统消息/
+const SYSTEM_MSG_RE = /^(对方已(查看|同意|接受|拒绝)|附件简历已(发送|送达)|撤回了一条消息|已交换联系方式|职位(已下线|已关闭)|系统消息)/
 
 /**
  * 会话已在 BOSS 端删除：同步标记后端记录（status=deleted，跨轮次不再残留）
@@ -786,7 +786,7 @@ async function afterConversationDeleted(
   }
 }
 
-async function readMessages(): Promise<Array<{ sender: 'hr' | 'me' | 'system'; content: string }>> {
+export async function readMessages(): Promise<Array<{ sender: 'hr' | 'me' | 'system'; content: string }>> {
   // 滚到消息区底部，确保读到最后一条。findChatPanel() 返回的容器不一定是
   // 可滚动节点，需从消息节点往上找真正可滚动的祖先。
   const panel = findChatPanel()
@@ -815,25 +815,27 @@ async function readMessages(): Promise<Array<{ sender: 'hr' | 'me' | 'system'; c
     const r = el.getBoundingClientRect()
     if (r.width === 0) continue
 
-    // 收发方判断：优先用 BOSS 自己的语义标记，几何位置只作最后兜底
-    // （我方气泡中心仅比中线右移十几像素，纯几何判断会误判）。
-    const bubble = el.closest('.item-friend, .item-myself, [class*="item-"]') || el.parentElement
+    // 收发方判断：精确匹配 class token，避免模糊匹配导致误判
+    const bubble = el.closest('.item-friend, .item-myself, .item-system') || el.parentElement
     const scope = (bubble || el) as HTMLElement
-    const cls = String((scope as HTMLElement).className || '')
-    let isMe: boolean
+    const clsList = Array.from((scope as Element).classList || [])
+    let isMe: boolean | null = null
     const hasStatus = !!scope.querySelector('.message-status')
     const hasAvatar = !!scope.querySelector('.image-circle')
-    if (/item-myself|myself/.test(cls)) isMe = true
-    else if (/item-friend|friend/.test(cls)) isMe = false
+
+    // 精确匹配 item-myself/item-friend/item-system
+    if (clsList.includes('item-myself')) isMe = true
+    else if (clsList.includes('item-friend')) isMe = false
+    else if (clsList.includes('item-system')) isMe = null // system message
     else if (hasStatus) isMe = true
     else if (hasAvatar) isMe = false
     else isMe = r.left > mid
-    // 系统通知单独归类：优先用 BOSS 的 item-system 类（2026-08 实测 DOM），
-    // 再退回文本模式（对方已查看/同意发送/撤回消息等）
-    const isSystem = /item-system|system/.test(cls) || (!isMe && SYSTEM_MSG_RE.test(content))
-    const sender = isMe ? 'me' : isSystem ? 'system' : 'hr'
+
+    // 系统通知单独归类：优先用精确class匹配，无法判断时才用文本特征
+    const isSystem = clsList.includes('item-system') || (isMe === null && SYSTEM_MSG_RE.test(content))
+    const sender = isSystem ? 'system' : isMe ? 'me' : 'hr'
     out.push({ sender, content })
-    dbg.push(`${isMe ? 'ME' : isSystem ? 'SYS' : 'HR'}|cls=${cls.slice(0, 24)}|st=${hasStatus ? 1 : 0}|av=${hasAvatar ? 1 : 0}|x=${Math.round(r.left)}`)
+    dbg.push(`${isMe ? 'ME' : isSystem ? 'SYS' : 'HR'}|cls=${clsList.join(' ').slice(0, 30)}|st=${hasStatus ? 1 : 0}|av=${hasAvatar ? 1 : 0}|x=${Math.round(r.left)}`)
   }
   if (dbg.length) diag("CHAT", "消息判定 mid=" + Math.round(mid), dbg.slice(0, 8))
   return out
@@ -1828,7 +1830,7 @@ export async function completeResumeSend(
 }
 
 /** 点「发简历」（HR 要简历时用）→ 确认 + 选择默认简历 + 发送 */
-async function sendResume(): Promise<boolean> {
+export async function sendResume(): Promise<boolean> {
   // 按可见文本定位（"发简历" 这类文案比 class 稳定得多）
   const btn = findByText(/^(发简历|发送简历|附件简历)$/, { clickable: true })
   if (!btn) {

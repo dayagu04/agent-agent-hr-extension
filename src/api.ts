@@ -613,6 +613,16 @@ export async function recordApplication(
     timeout: DEFAULT_TIMEOUT,
   })
   if (resp.status !== 200) {
+    // 引擎的 log() 只进面板，不上报；这里补一条 diag，否则台账记不进去时
+    // 服务端日志里只有 access 400，看不到原因（如「请先创建 Agent」）。
+    let detail = ''
+    try {
+      const d = JSON.parse(resp.responseText)?.detail
+      detail = typeof d === 'string' ? d.slice(0, 80) : ''
+    } catch {
+      /* ignore */
+    }
+    diag('API', `plugin/record 失败 HTTP ${resp.status} outcome=${outcome} 原因=${detail || '-'}`)
     throw new Error(`记录投递失败 (${resp.status})`)
   }
   return JSON.parse(resp.responseText)

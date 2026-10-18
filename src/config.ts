@@ -5,9 +5,10 @@ import { DEFAULT_AGENT_POLICY, normalizeAgentPolicy } from './contact-policy'
 const CONFIG_KEY = 'aah_plugin_config'
 
 /**
- * 服务器地址构建期固定：不需要用户填写。
+ * 服务器地址默认由构建期决定，也可在面板「连接与设置」里手工改（本地联调/切环境）。
  * - 生产构建：VITE_API_BASE 留空 → https://gudaya.chat
  * - 本地测试构建：npm run build:local（默认 http://127.0.0.1:8010；也可先设置 VITE_API_BASE）
+ * - 用户在设置里填过地址后，以用户填的为准（见 loadConfig）。
  */
 const BUILTIN_API_BASE: string = import.meta.env.VITE_API_BASE || 'https://gudaya.chat'
 
@@ -45,8 +46,11 @@ export function loadConfig(): PluginConfig {
     if (!raw) return { ...DEFAULT_CONFIG }
     const parsed = JSON.parse(raw as string)
     const cfg = { ...DEFAULT_CONFIG, ...parsed }
-    // 服务器地址固定由构建期决定,旧配置/用户手工改的值一律覆盖回内置地址
-    cfg.apiBase = BUILTIN_API_BASE
+    // 服务器地址默认由构建期决定；用户在设置里手工填过则以用户的为准（本地联调/切环境用）。
+    // 仅当存量配置里没有有效 apiBase 时，才回落到内置地址。
+    if (typeof parsed.apiBase !== 'string' || !parsed.apiBase.trim()) {
+      cfg.apiBase = BUILTIN_API_BASE
+    }
     // 兼容旧配置：无 applyIntervalSeconds 时从旧的 delayMax / minIntervalSeconds 推导一次
     if (typeof parsed.applyIntervalSeconds !== 'number') {
       const oldSec = Math.max(

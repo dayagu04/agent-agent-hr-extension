@@ -1,12 +1,11 @@
 <script setup lang="ts">
-import { ref, reactive, onMounted, onUnmounted, computed, nextTick, watch } from 'vue'
-import type { PluginConfig, ApplyProgress, TabKey, TabItem, HRMessageSummary } from './types'
+import { ref, reactive, onMounted, onUnmounted, computed } from 'vue'
+import type { PluginConfig, ApplyProgress, HRMessageSummary } from './types'
 import { loadConfig, saveConfig, isConfigReady, applyPluginPreferences } from './config'
 import { fetchPluginConfig, login } from './api'
 import { detectPlatform } from './platforms/factory'
-import { onJobListPage } from './orchestrator'
-import { ApplyEngine } from './engine'
-import { diag, hhmmss } from './logger'
+import { diag } from './logger'
+import { detectNavUnread } from './nav-unread'
 import {
   currentThreadInfo,
   deleteThread,
@@ -14,12 +13,12 @@ import {
   onChatPage,
   openThread,
   readRowJobInfo,
-  requestStopChatRound,
-  runChatAudit,
-  runChatRound,
+  readMessages,
+  findResumeDialog,
+  resumeDialogKind,
+  findDialogButton,
 } from './platforms/boss-chat'
-import { probeChatPage } from './platforms/boss-probe'
-import { clearChatStore, setPendingOpen, takePendingOpen } from './chat-store'
+import { setPendingOpen, takePendingOpen } from './chat-store'
 import {
   flushConversationDeletedMarks,
   lookupCachedJob,
@@ -30,24 +29,9 @@ import {
   updateMirrorJobTitle,
   upsertMirrorFromDom,
 } from './ledger'
-import { dumpStructure, findEditable, findByText, findChatPanel } from './domprobe'
 import { getOrchestrator, resumeOrchestrator } from './orchestrator'
 import { storage } from './platform-bridge'
-import { collectAndLogDom } from './dom-collector'
-import { startDebugCapture } from './debug'
-import { probeChatStore } from './chat-store-probe'
 import { VERSION_LABEL } from './version'
-import {
-  collectListDom,
-  getScrollListenerHit,
-  loadProbeState,
-  startProbe,
-  startScrollListener,
-  stopScrollListener,
-  stopProbe,
-  type ProbeState,
-  type ScrollListenerHit,
-} from './pagination-probe'
 
 const platform = detectPlatform()
 const config = reactive<PluginConfig>(loadConfig())
@@ -119,8 +103,6 @@ onUnmounted(() => {
   window.removeEventListener('resize', onWindowResize)
   if (resizeTimer !== undefined) clearTimeout(resizeTimer)
   if (statsTimer !== undefined) clearInterval(statsTimer)
-  if (probeTimer !== undefined) clearInterval(probeTimer)
-  stopScrollListener()
   if (hrTimer !== null) clearInterval(hrTimer)
   window.removeEventListener('aah:config-reload', onRemoteConfigReload)
   window.removeEventListener('aah:chat-mirror-changed', onMirrorChanged)
@@ -169,40 +151,27 @@ async function resetBallPosition() {
   await storage.set('aah_panel_position', ballPosition.value)
 }
 
-// ---- Tab 状态 ----
-const activeTab = ref<TabKey>('apply')
+// ---- 面板状态 ----
+// 单流引导式面板：登录→选简历→开始投递全部一屏呈现，不再有 Tab 切换。
+// 「连接/设置」（环境、简历选择、匹配开关、退出）折叠在底部，默认收起。
+const showSettings = ref(false)
 
-/** 左侧竖排导航项。顺序即展示顺序 */
-const tabs: TabItem[] = [
-  { key: 'apply', label: '投递' },
-  { key: 'chat', label: '会话' },
-  { key: 'settings', label: '连接' },
-  { key: 'logs', label: '调试' },
-]
-
-/** 未配置时从各处跳去设置页（取代原来的 showSettings = true） */
+/** 展开并滚动到底部的设置区（标题栏 ⚙ 与未配置引导共用） */
 function gotoSettings(): void {
-  activeTab.value = 'settings'
-}
-
-/**
- * 键盘导航：ArrowUp/Down 在 tab 间移动，Home/End 跳首尾（WAI-ARIA tablist 规范）。
- * 本组件是竖排导航，故用上下键而非左右键。越界时循环：-1 → 末尾，末尾+1 → 0。
- */
-function focusTab(index: number): void {
-  const wrapped = (index + tabs.length) % tabs.length
-  activeTab.value = tabs[wrapped].key
-  // 下一帧 DOM 更新后新 tab 的 tabindex 变成 0，手动聚焦它
-  nextTick(() => {
-    const nav = document.querySelector('.aah-tab-nav')
-    const target = nav?.children[wrapped] as HTMLElement | undefined
-    target?.focus()
-  })
+  showSettings.value = true
 }
 
 const resumes = ref<Array<{ id: number; name: string; skills_count: number }>>([])
 const configError = ref('')
 const loadingConfig = ref(false)
+
+// 投递用关键词：优先网页端求职偏好的 keyword，其次简历提取的 suggested_keywords。
+// 「开始投递」直接用它启动编排器（插件内闭环，不必去网页端点）。
+const applyKeywords = ref<string[]>([])
+// 投递城市编码（BOSS 数字 city code；来自网页端偏好）。为空则沿用当前页 URL 城市。
+const applyCityCode = ref('')
+// 「开始投递」的即时反馈（校验失败/启动提示）
+const startMsg = ref('')
 
 // 插件内登录（省去手动复制 Token）
 const loginEmail = ref('')
@@ -211,141 +180,6 @@ const loggingIn = ref(false)
 const loginMsg = ref('')
 // 是否已从网站同步到求职偏好（用于界面提示配置来源）
 const prefsSynced = ref(false)
-
-/** DOM 采集区独立缓冲（与行为日志分开，见日志 Tab） */
-const domLines = ref<string[]>([])
-const domCopyMsg = ref('')
-
-/** 采集当前页真实 DOM 结构（岗位卡片/分页/聊天列表，见 dom-collector.ts） */
-function collectPageDom() {
-  domLines.value = collectAndLogDom()
-  diag('DOM', `已采集当前页结构，共 ${domLines.value.length} 行（详见 DOM 采集区）`)
-}
-
-/** 手动调试：采集当前 DOM + 30s 内操作记录（DBG 标签进日志，供开发者适配） */
-const debugCapturing = ref(false)
-function startDebug() {
-  if (debugCapturing.value) return
-  debugCapturing.value = true
-  startDebugCapture()
-  window.setTimeout(() => {
-    debugCapturing.value = false
-  }, 31000)
-}
-
-function copyDom() {
-  const text = domLines.value.join('\n')
-  if (!text) {
-    domCopyMsg.value = '暂无内容'
-    setTimeout(() => (domCopyMsg.value = ''), 2000)
-    return
-  }
-  try {
-    void navigator.clipboard.writeText(text).then(
-      () => {
-        domCopyMsg.value = '已复制'
-        setTimeout(() => (domCopyMsg.value = ''), 2000)
-      },
-      () => {
-        domCopyMsg.value = '复制失败，请手动全选复制'
-        setTimeout(() => (domCopyMsg.value = ''), 2000)
-      },
-    )
-  } catch {
-    domCopyMsg.value = '复制失败，请手动全选复制'
-    setTimeout(() => (domCopyMsg.value = ''), 2000)
-  }
-}
-
-function wipeDom() {
-  domLines.value = []
-}
-
-/** 方案 C 探测：读 BOSS 聊天页内存里的完整会话列表数据结构（零滚动可行性验证） */
-function probeChatStoreData() {
-  try {
-    domCopyMsg.value = probeChatStore()
-  } catch (e) {
-    domCopyMsg.value = `探测失败：${(e as Error).message}`
-  }
-  setTimeout(() => (domCopyMsg.value = ''), 8000)
-}
-
-/** 只读会话审计：采集并区分 系统/HR/我方 三类消息，不回复不删除（测试阶段核对用） */
-const auditRunning = ref(false)
-async function runChatAuditNow() {
-  if (auditRunning.value) return
-  auditRunning.value = true
-  try {
-    await runChatAudit(config, (m) => diag('AUDIT', m), {})
-    domCopyMsg.value = '审计完成，结果已上报（只读，未做任何回复/删除）'
-  } catch (e) {
-    domCopyMsg.value = `审计失败：${(e as Error).message}`
-  } finally {
-    auditRunning.value = false
-  }
-  setTimeout(() => (domCopyMsg.value = ''), 8000)
-}
-
-/**
- * 清空会话记录（chat-store 里的判重 hash、失败计数、已答卡片等），
- * 让下次托管重新处理所有会话。用于排查「明明是新消息却被跳过」的问题。
- */
-async function wipeChatStore() {
-  if (!confirm('确定清空会话记录吗？\n\n清空后，下次托管会重新处理所有会话（包括之前已回复过的）。')) {
-    return
-  }
-  try {
-    await clearChatStore()
-    domCopyMsg.value = '已清空，下次托管会重新处理'
-    setTimeout(() => (domCopyMsg.value = ''), 3000)
-  } catch (e) {
-    domCopyMsg.value = `清空失败：${(e as Error).message}`
-    setTimeout(() => (domCopyMsg.value = ''), 3000)
-  }
-}
-
-/**
- * 导出当前页面真实结构。
- *
- * 用途：替代「猜 class 选择器」——反复猜已证明不可行，直接看真实 DOM。
- * 请在【手动点开一个会话、右侧已显示消息】的状态下点此按钮。
- */
-async function dumpDom() {
-  // 聊天页额外跑一遍专用采集：滚动容器、悬浮/右键菜单、头部结构。
-  // 这三处是「翻不到底」「删不掉」「公司名为 -」的根源所在，
-  // 而原有的 dumpStructure 只打印聊天面板子树，采不到它们。
-  if (onChatPage()) {
-    domCopyMsg.value = '采集中...'
-    try {
-      await probeChatPage()
-    } catch (e) {
-      diag('DOM', '采集异常', { errorType: (e as Error).name || 'Error' })
-    }
-  }
-
-  const panel = findChatPanel()
-  diag('DOM', `聊天面板: ${panel ? panel.tagName + '.' + String(panel.className).slice(0, 50) : '未找到'}`)
-
-  const editable = findEditable()
-  diag('DOM', `可输入元素: ${editable ? editable.tagName + '.' + String(editable.className).slice(0, 40) : '无'}`)
-
-  for (const kw of ['发简历', '发送简历', '换电话', '换微信']) {
-    const el = findByText(kw, { clickable: true })
-    diag('DOM', `按钮"${kw}": ${el ? el.tagName + '.' + String(el.className).slice(0, 40) : '未找到'}`)
-  }
-
-  const nodes = dumpStructure(panel || document.body, 70)
-  diag('DOM', `结构 dump（${nodes.length} 节点）`)
-  nodes.forEach((n) =>
-    diag(
-      'DOM',
-      `  ${'·'.repeat(Math.min(n.depth, 8))}${n.tag}.${n.cls} [${n.rect}] textLength=${n.text.length}`,
-    ),
-  )
-  domCopyMsg.value = '结构已记录，请点复制'
-  setTimeout(() => (domCopyMsg.value = ''), 3000)
-}
 
 // ---- 会话托管（BOSS 聊天页）----
 /**
@@ -357,11 +191,37 @@ async function dumpDom() {
  * 改由下方 setInterval 里的 syncRouteState() 每秒重算。
  */
 const isChatPage = ref(onChatPage())
-const chatRunning = ref(false)
+
+/** BOSS 导航「消息」未读角标数（feedback #1：不点进去也能知道有无新消息）。
+ * -1 = 未读到角标元素（可能本页无导航/选择器变了），>=0 = 实际未读数。 */
+const navUnread = ref(-1)
+/** 导航角标上报去重：同一页面路径只报一次结论，之后只报数值变化。 */
+let navLastKey = ''
+/** 当前路径已稳定几秒：导航是异步渲染的，刚换页就探测会误报「未命中」。 */
+let navPathTicks = 0
+let navPath = ''
 
 /** 每秒同步一次「跟路由/存储走」的状态（SPA 换页不重新挂载，只能轮询） */
 function syncRouteState(): void {
   isChatPage.value = onChatPage()
+  const r = detectNavUnread()
+  navUnread.value = r.count
+
+  // BOSS 页开 DevTools 会被风控关页，只能靠自动上报核对：
+  //  - 换页后等 3 秒再报，给导航渲染时间；
+  //  - 每个路径报一次结论（含命中路径和脱敏结构），数值变化再报；
+  //  - 未命中也报，否则日志里没有任何线索。
+  const path = location.pathname
+  if (path !== navPath) {
+    navPath = path
+    navPathTicks = 0
+  }
+  navPathTicks++
+  if (navPathTicks < 3) return
+  const key = `${path}|${r.count}|${r.via}`
+  if (key === navLastKey) return
+  navLastKey = key
+  diag('NAV_UNREAD', `导航未读角标=${r.count} via=${r.via} path=${path} probe=${r.probe}`)
 }
 
 // ---- HR 最近消息（会话 Tab）----
@@ -628,7 +488,7 @@ async function deleteHRThread(msg: HRMessageSummary, event: Event): Promise<void
 
   // 会话托管期间禁止删除：托管正按索引遍历会话列表，删除会改变列表结构，
   // 让正在处理的那一条对不上号（resolveThread 会因此判定失败并跳过）。
-  if (chatRunning.value || orchestratorRunning.value) {
+  if (orchestratorRunning.value) {
     openThreadMsg.value = '⚠ 会话托管运行中，请先停止再删除会话'
     return
   }
@@ -670,15 +530,13 @@ async function consumePendingOpen(): Promise<void> {
   for (let i = 0; i < 24; i++) {
     const r = openThread(pending.company, pending.jobTitle)
     if (r === 'ok') {
-      activeTab.value = 'chat'
       openThreadMsg.value = `已打开「${pending.company}」的会话`
       return
     }
     if (r === 'failed') break
     await new Promise((res) => setTimeout(res, 500))
   }
-  activeTab.value = 'chat'
-  openThreadMsg.value = `未能自动打开「${pending.company}」，请在左侧会话列表手动选择`
+  openThreadMsg.value = `未能自动打开「${pending.company}」，请在会话列表手动选择`
   diag('UI', '跨页打开会话失败')
 }
 
@@ -691,10 +549,6 @@ async function consumePendingOpen(): Promise<void> {
  */
 function gotoChatPage(): void {
   if (platform?.chatUrl) window.location.href = platform.chatUrl
-}
-
-function gotoJobListPage(): void {
-  window.location.href = 'https://www.zhipin.com/web/geek/job'
 }
 
 /** 相对时间文案（占位数据 timestamp=0 时不显示时间） */
@@ -720,138 +574,9 @@ const orchestratorStats = reactive({
   goalTarget: 0,
 })
 
-/** 已请求停止但当前会话还在收尾 —— 按钮据此显示「停止中」，避免用户重复点 */
-const chatStopping = ref(false)
-
-/**
- * 停止手动会话托管。
- *
- * 只置停止标志，不强杀：正在发送的那一条必须走完（半途中断会留下
- * 「发出去了但没记进判重」的状态，下轮会重复发给同一个 HR）。
- */
-function stopChat(): void {
-  if (!chatRunning.value || chatStopping.value) return
-  chatStopping.value = true
-  requestStopChatRound()
-  progress.logs.unshift(`[${hhmmss()}] 已请求停止，等当前会话处理完毕...`)
-}
-
-async function startChat() {
-  if (chatRunning.value) return
-  if (!ready.value) {
-    gotoSettings()
-    return
-  }
-  chatRunning.value = true
-  const log = (m: string) => {
-    // 与 diag 用同一套格式（固定 24 小时制），两个日志区才能对照着看
-    progress.logs.unshift(`[${hhmmss()}] ${m}`)
-    if (progress.logs.length > 50) progress.logs.pop()
-  }
-  try {
-    log('开始会话托管...')
-    const r = await runChatRound(config, 5, log)
-    log(
-      `会话托管完成：处理 ${r.handled} 个会话，发送 ${r.replied} 条`,
-    )
-    // 托管轮内可能更新了镜像，立即重渲染会话列表
-    recentHRMessages.value = await renderableMirror()
-  } catch (e) {
-    log(`会话托管出错: ${(e as Error).message}`)
-  } finally {
-    chatRunning.value = false
-    chatStopping.value = false
-  }
-}
-
 const progress = reactive<ApplyProgress>({
   scanned: 0, scanComplete: false, matched: 0, applied: 0, skipped: 0, failed: 0, unknown: 0,
   running: false, logs: [], currentJob: null,
-})
-
-// currentJob 的响应式副本（从 progress 中提取，便于模板引用）
-const currentJob = computed(() => progress.currentJob)
-
-// ---- 深度翻页测试（滚动加载方案，调试工具，手动控制）----
-const probeState = ref<ProbeState | null>(null)
-const probeMaxSteps = ref(20)
-const probeBusy = ref(false)
-const probeMsg = ref('')
-
-async function refreshProbe(): Promise<void> {
-  probeState.value = await loadProbeState()
-}
-
-async function doStartProbe(): Promise<void> {
-  if (orchestratorRunning.value) {
-    probeMsg.value = '智能编排运行中，请先停止编排再测翻页'
-    return
-  }
-  probeBusy.value = true
-  probeMsg.value = ''
-  try {
-    const result = await startProbe(config, '', probeMaxSteps.value)
-    if (!result.ok) probeMsg.value = result.message
-  } finally {
-    probeBusy.value = false
-  }
-}
-
-async function doStopProbe(): Promise<void> {
-  await stopProbe()
-  await refreshProbe()
-}
-
-// ---- 列表 DOM 结构采集 / 滚动容器监听（定位滚动加载可行性）----
-const listDomText = ref('')
-const scrollHit = ref<ScrollListenerHit | null>(null)
-const listeningScroll = ref(false)
-
-function doCollectListDom(): void {
-  listDomText.value = collectListDom()
-  diag('PROBE', 'LISTDOM 已在本地采集', { textLength: listDomText.value.length })
-}
-
-function doToggleScrollListener(): void {
-  if (listeningScroll.value) {
-    stopScrollListener()
-    listeningScroll.value = false
-  } else {
-    scrollHit.value = null
-    startScrollListener()
-    listeningScroll.value = true
-  }
-}
-
-const probeTotalFresh = computed(() => {
-  const steps = probeState.value?.steps
-  return steps && steps.length ? steps.reduce((s, p) => s + p.fresh, 0) : 0
-})
-
-const probeLastCount = computed(() => {
-  const steps = probeState.value?.steps
-  return steps && steps.length ? steps[steps.length - 1].cardCount : 0
-})
-
-const probeDomText = computed(() => {
-  const c = probeState.value?.container
-  if (!c || !c.found) return ''
-  return [
-    `<${c.tag} class="${c.className}">`,
-    `  overflow-y: ${c.overflowY} | scrollHeight: ${c.scrollHeight} | clientHeight: ${c.clientHeight}`,
-    `  children: ${c.children.join('  ') || '(空)'}`,
-    `  tail: ${c.tail.join('  ') || '(空)'}`,
-  ].join('\n')
-})
-
-const scrollHitText = computed(() => {
-  const h = scrollHit.value
-  if (!h) return ''
-  return (
-    `<${h.tag}${h.id ? '#' + h.id : ''} class="${h.className}">\n` +
-    `  overflow-y: ${h.overflowY} | scrollTop: ${h.scrollTop} | ` +
-    `scrollHeight: ${h.scrollHeight} | clientHeight: ${h.clientHeight}`
-  )
 })
 
 /**
@@ -889,14 +614,9 @@ const applyProgressPct = computed<number | null>(() => {
   return Math.min(100, Math.max(0, (progressApplied.value / target) * 100))
 })
 
-let engine: ApplyEngine | null = null
-
 const ready = computed(() => isConfigReady(config))
 const platformName = computed(() => platform?.name || '不支持的页面')
 const loggedIn = computed(() => !!config.token)
-
-/** 当前页面是否适用本插件（职位列表 or 聊天页） */
-const pageSupported = computed(() => onJobListPage() || onChatPage())
 
 async function doLogin() {
   if (!config.apiBase) {
@@ -960,7 +680,20 @@ async function loadRemoteConfig(silent = false) {
       if (typeof p.apply_limit === 'number') config.maxApply = p.apply_limit
       // 期望城市：用于会话里判断 HR 发来的工作地点卡片能否接受
       if (p.city) config.prefCity = p.city
+      // 投递关键词：网页端偏好的 keyword 优先（可含多个，按空格/逗号拆）
+      if (typeof p.keyword === 'string' && p.keyword.trim()) {
+        applyKeywords.value = p.keyword.split(/[\s,，]+/).map((s) => s.trim()).filter(Boolean)
+      }
+      // 城市编码：仅接受 BOSS 数字编码，城市名不污染 ?city= 参数
+      const cityRaw = (p as { city_code?: unknown }).city_code
+      if (typeof cityRaw === 'string' && /^\d+$/.test(cityRaw.trim())) {
+        applyCityCode.value = cityRaw.trim()
+      }
       prefsSynced.value = true
+    }
+    // 关键词兜底：网页端没配 keyword 时，用简历提取的 top 技能
+    if (!applyKeywords.value.length && Array.isArray(data.suggested_keywords)) {
+      applyKeywords.value = data.suggested_keywords.filter(Boolean).slice(0, 5)
     }
     // 网页端插件偏好（回复模式等）覆盖本地设置：网页端为唯一真相源
     if (data.plugin_preferences) {
@@ -990,25 +723,22 @@ function persist() {
   saveConfig(config)
 }
 
+/** 手工改后端地址：规范化（去尾斜杠）、存盘，并提示重新登录。 */
+function onApiBaseChange() {
+  config.apiBase = (config.apiBase || '').trim().replace(/\/+$/, '')
+  // 切环境后旧 token 不再对应新后端，清掉强制重新登录，避免拿旧 token 打新后端报错。
+  if (config.token) {
+    config.token = ''
+    loginMsg.value = '后端地址已更改，请重新登录'
+  }
+  saveConfig(config)
+}
+
 /** 手动粘贴 Token 后立即存盘并试拉配置（验证 Token 是否可用） */
 async function onTokenPaste() {
   config.token = (config.token || '').trim()
   saveConfig(config)
   if (config.token) await loadRemoteConfig()
-}
-
-async function start() {
-  if (!platform) return
-  if (!ready.value) {
-    gotoSettings()
-    return
-  }
-  engine = new ApplyEngine(platform, config, (p) => Object.assign(progress, p))
-  await engine.run()
-}
-
-function stop() {
-  engine?.abort()
 }
 
 async function stopOrchestrator() {
@@ -1018,10 +748,55 @@ async function stopOrchestrator() {
   diag('APP', '编排器已停止')
 }
 
+/**
+ * 插件内一键开始自动投递（闭环入口）。
+ *
+ * 直接启动编排器：若当前不在 BOSS 职位列表页，编排器会自己导航过去再跑，
+ * 因此主页/聊天页都能点。关键词取自网页端求职偏好或简历技能，无需用户手填。
+ * 投递额度等策略仍以网页端配置为准（start 内部读 config.maxApply 等）。
+ */
+async function startApply(): Promise<void> {
+  startMsg.value = ''
+  if (!ready.value) {
+    startMsg.value = '请先登录并选择简历'
+    return
+  }
+  if (!applyKeywords.value.length) {
+    startMsg.value = '没有可用关键词，请在网页端「个人设置」填写期望职位，或上传简历后点「同步」'
+    return
+  }
+  if (orchestratorRunning.value) {
+    startMsg.value = '已在投递中'
+    return
+  }
+  try {
+    const orch = getOrchestrator(config)
+    await orch.start(
+      { type: 'apply_count', target: config.maxApply || 20 },
+      applyKeywords.value,
+      applyCityCode.value || undefined,
+      undefined,
+      'legacy',
+      false,
+      {
+        chatInterval: config.chatCheckInterval,
+        applyIntervalSeconds: config.applyIntervalSeconds,
+        maxReplies: config.maxRepliesPerRound,
+        maxPagesPerKeyword: config.maxPagesPerKeyword,
+        minReplyScore: config.minReplyScore,
+        replyScope: config.replyScope,
+      },
+    )
+    orchestratorRunning.value = true
+    diag('APP', `已启动自动投递：关键词=${applyKeywords.value.join('/')} 目标=${config.maxApply}`)
+  } catch (e) {
+    startMsg.value = `启动失败：${(e as Error).message}`
+    diag('APP', `启动自动投递失败：${(e as Error).message}`)
+  }
+}
+
 /** 状态轮询 timer（onUnmounted 需清掉，否则组件销毁后仍在跑） */
 let statsTimer: number | undefined
-/** 深度翻页测试状态轮询（滚动采集在当前页内进行，需实时刷新面板） */
-let probeTimer: number | undefined
 /** 配置周期刷新 timer（网页端改偏好后 60s 内兜底同步） */
 let configTimer: number | undefined
 
@@ -1040,6 +815,113 @@ function updateOrchestratorStats() {
     orchestratorStats.goalType = state.goal?.type || ''
     orchestratorStats.goalTarget = state.goal?.target || 0
     orchestratorRunning.value = orch.isRunning()
+  }
+}
+
+// ---- 测试工具（聊天页原子操作）----
+const showTestTools = ref(false)
+const testToolsMsg = ref('')
+const testToolsRunning = ref(false)
+
+/** 测试工具：读取当前会话消息（只读） */
+async function testReadMessages(): Promise<void> {
+  testToolsMsg.value = ''
+  testToolsRunning.value = true
+  try {
+    if (!isChatPage.value) {
+      testToolsMsg.value = '请先到聊天页'
+      return
+    }
+    const msgs = await readMessages()
+    const summary = {
+      total: msgs.length,
+      hr: msgs.filter((m) => m.sender === 'hr').length,
+      me: msgs.filter((m) => m.sender === 'me').length,
+      system: msgs.filter((m) => m.sender === 'system').length,
+    }
+    diag('TEST', '读取消息', summary)
+    // 前几条消息的 sender 和前 30 字（会被脱敏，但能看分类对不对）
+    msgs.slice(0, 5).forEach((m, i) => {
+      diag('TEST', `消息 ${i}`, { sender: m.sender, preview: m.content.slice(0, 30) })
+    })
+    testToolsMsg.value = `读取成功：共 ${msgs.length} 条（HR ${summary.hr} / 我方 ${summary.me} / 系统 ${summary.system}）`
+  } catch (e) {
+    testToolsMsg.value = `读取失败：${(e as Error).message}`
+    diag('TEST', '读取消息失败', { error: (e as Error).message })
+  } finally {
+    testToolsRunning.value = false
+  }
+}
+
+/** 测试工具：列出 BOSS 附件简历（只读） */
+async function testListResumes(): Promise<void> {
+  testToolsMsg.value = ''
+  testToolsRunning.value = true
+  try {
+    if (!isChatPage.value) {
+      testToolsMsg.value = '请先到聊天页'
+      return
+    }
+    const info = currentThreadInfo()
+    if (!info.company) {
+      testToolsMsg.value = '请先打开一个会话'
+      return
+    }
+
+    // 点发简历按钮
+    const sendResumeBtn = Array.from(document.querySelectorAll('button, [role="button"]')).find(
+      (el) => {
+        const txt = (el.textContent || '').trim()
+        return txt === '发简历' || txt === '发送简历' || txt === '附件简历'
+      },
+    )
+    if (!sendResumeBtn) {
+      testToolsMsg.value = '未找到「发简历」按钮'
+      return
+    }
+    ;(sendResumeBtn as HTMLElement).click()
+    await new Promise((r) => setTimeout(r, 800))
+
+    // 读弹窗
+    const dialog = findResumeDialog()
+    if (!dialog) {
+      testToolsMsg.value = '未弹出简历选择框'
+      return
+    }
+    const kind = resumeDialogKind(dialog)
+    if (kind === 'confirm') {
+      testToolsMsg.value = '弹出的是确认框（只有1份简历），未点「同意」'
+      // 点取消
+      const cancelBtn = findDialogButton(dialog, /取消|关闭/)
+      if (cancelBtn) (cancelBtn as HTMLElement).click()
+      diag('TEST', '附件简历', { count: 1, kind: 'confirm' })
+      return
+    }
+    if (kind === 'unknown') {
+      testToolsMsg.value = '弹出的是未知类型弹窗，未操作'
+      return
+    }
+
+    // 读列表
+    const rows = Array.from(dialog.querySelectorAll('[class*="resume"], .item, li')).filter((el) => {
+      const txt = (el.textContent || '').trim()
+      return txt.length > 2 && txt.length < 200
+    })
+    diag('TEST', '附件简历', { count: rows.length, kind: 'picker' })
+    rows.slice(0, 5).forEach((el, i) => {
+      const txt = (el.textContent || '').trim()
+      diag('TEST', `简历 ${i}`, { length: txt.length, preview: txt.slice(0, 40) })
+    })
+    testToolsMsg.value = `读取成功：共 ${rows.length} 份简历`
+
+    // 点取消
+    const cancelBtn = findDialogButton(dialog, /取消|关闭/)
+    if (cancelBtn) (cancelBtn as HTMLElement).click()
+  } catch (e) {
+    testToolsMsg.value = `读取失败：${(e as Error).message}`
+    diag('TEST', '列出简历失败', { error: (e as Error).message })
+  } finally {
+    testToolsRunning.value = false
   }
 }
 
@@ -1063,19 +945,6 @@ onMounted(() => {
     syncRouteState()
   }, 1000)
 
-  // 深度翻页测试：展示历史结果；滚动采集进行中时每 500ms 刷新面板
-  refreshProbe()
-  probeTimer = window.setInterval(() => {
-    if (probeState.value?.active) refreshProbe()
-    if (listeningScroll.value) {
-      const hit = getScrollListenerHit()
-      if (hit) {
-        scrollHit.value = hit
-        diag('PROBE', `滚动监听命中: ${hit.tag}#${hit.id} class=${hit.className} overflow=${hit.overflowY} ${hit.scrollTop}/${hit.scrollHeight}`)
-      }
-    }
-  }, 300)
-
   // HR 消息：立刻拉一次（本地镜像先渲染，再增量刷服务器），之后每 60s 一次；
   // 只在会话 Tab 可见时刷新，配合 since 增量参数，未变化时几乎零开销。
   // 定时器无条件建立、在回调里判断是否已配置 —— 若改成「已配置才建」，
@@ -1085,9 +954,7 @@ onMounted(() => {
     if (!ready.value) return
     // 收起时不拉：面板收起时没人看这些卡片，请求纯属白打
     if (collapsed.value) return
-    // 非会话 Tab 不拉：投递页不看会话卡片
-    if (activeTab.value !== 'chat') return
-    // 20s 节流：切 Tab 刚刷过就不重复拉
+    // 20s 节流：刚刷过就不重复拉
     if (Date.now() - lastChatRefreshAt < 20_000) return
     // 非聊天页降频：投递页不看会话卡片，3 分钟一次够了
     if (!isChatPage.value && Date.now() - lastHRFetchAt < HR_IDLE_INTERVAL_MS) return
@@ -1111,14 +978,6 @@ onMounted(() => {
   // 聊天页：延迟后台静默回填岗位名（列表项无岗位名，需短暂打开会话读头部）
   if (onChatPage()) {
     window.setTimeout(() => void backfillChatJobTitles(), 4000)
-  }
-})
-
-// 切到会话 Tab 时立即刷新一次（去重：20s 内已刷过则跳过）
-watch(activeTab, (tab) => {
-  if (tab === 'chat' && ready.value && Date.now() - lastChatRefreshAt > 20_000) {
-    lastChatRefreshAt = Date.now()
-    void loadHRMessages()
   }
 })
 </script>
@@ -1153,14 +1012,13 @@ watch(activeTab, (tab) => {
       >
         <span class="aah-title">智能投递 · {{ platformName }} <small style="opacity:0.6;font-size:11px">{{ VERSION_LABEL }}</small></span>
         <div class="aah-header-btns">
-          <!-- ⚙ 是通用 UI 语言，首次打开时用户本能会点它找设置；
-               与左侧 Tab 并存不冲突，仅作快捷入口（不再是开关） -->
+          <!-- ⚙ 快捷入口：展开底部「连接与设置」折叠区 -->
           <button
             v-if="platform"
             class="aah-icon-btn"
-            :class="{ active: activeTab === 'settings' }"
+            :class="{ active: showSettings }"
             @click="gotoSettings"
-            title="设置"
+            title="连接与设置"
           >⚙</button>
           <button class="aah-icon-btn" @click="collapsed = true" title="收起">─</button>
         </div>
@@ -1168,531 +1026,245 @@ watch(activeTab, (tab) => {
 
       <!-- 平台未识别（factory 返回 null）—— 理论上不会出现（@match 已限定域名） -->
       <div v-if="!platform" class="aah-body">
-        <p class="aah-tip">当前页面不支持。请在 BOSS/智联/猎聘/51 的职位搜索列表页使用。</p>
+        <p class="aah-tip">当前页面不支持。请在 BOSS 直聘的任意页面使用。</p>
       </div>
 
-      <!-- Tab 容器：左侧导航 80px + 右侧内容区（独立滚动）。
-           非适用页（如 BOSS 首页）也渲染——首页即智能编排的入口：
-           编排器启动后会自动前往职位搜索列表开始投递，并在投递与会话托管间切换。 -->
-      <div v-else class="aah-tabs-container">
-        <div v-if="!pageSupported" class="aah-body" style="border-bottom:1px solid #e5e7eb;border-radius:0">
-          <p class="aah-tip">
-            当前在「{{ platformName }}」的非列表页（如首页）。可直接在「投递」Tab 启动
-            <b>智能编排</b>：编排器会自动前往职位搜索列表开始投递，并在投递与会话托管间
-            自动切换，跨页持续运行直到目标达成。城市将按账号的默认期望城市筛选。
-          </p>
-          <button class="aah-btn-secondary" @click="gotoJobListPage">前往职位搜索列表（手动）</button>
-        </div>
-        <div class="aah-tab-nav" role="tablist" aria-orientation="vertical">
-          <div
-            v-for="(tab, idx) in tabs"
-            :key="tab.key"
-            class="aah-tab"
-            :class="{ active: activeTab === tab.key }"
-            role="tab"
-            :tabindex="activeTab === tab.key ? 0 : -1"
-            :aria-selected="activeTab === tab.key"
-            @click="activeTab = tab.key"
-            @keydown.up.prevent="focusTab(idx - 1)"
-            @keydown.down.prevent="focusTab(idx + 1)"
-            @keydown.home.prevent="focusTab(0)"
-            @keydown.end.prevent="focusTab(tabs.length - 1)"
-          >
-            {{ tab.label }}
-          </div>
+      <!-- 单流引导式面板：一屏呈现「登录 → 选简历 → 开始投递」，主页也能用。
+           会话列表常驻下方；连接与设置折叠在最底部。 -->
+      <div v-else class="aah-flow">
+
+        <!-- 步骤 1：未登录 → 登录卡片（最显眼，先引导登录） -->
+        <div v-if="!loggedIn" class="aah-step-card">
+          <div class="aah-step-title">① 登录账号</div>
+          <label class="aah-field aah-field-wide">
+            <span>邮箱</span>
+            <input v-model="loginEmail" placeholder="登录后端的邮箱" autocomplete="username" />
+          </label>
+          <label class="aah-field aah-field-wide">
+            <span>密码</span>
+            <input v-model="loginPassword" type="password" placeholder="密码"
+              autocomplete="current-password" @keyup.enter="doLogin" />
+          </label>
+          <button class="aah-btn-primary" :disabled="loggingIn" @click="doLogin">
+            {{ loggingIn ? '登录中...' : '登录' }}
+          </button>
+          <p v-if="loginMsg" class="aah-error">{{ loginMsg }}</p>
+          <details class="aah-advanced">
+            <summary>登录不了？粘贴网页端 Token</summary>
+            <label class="aah-field aah-field-wide">
+              <span>Token（网页端 localStorage.token）</span>
+              <input v-model="config.token" placeholder="eyJhbGciOi..." @change="onTokenPaste" />
+            </label>
+          </details>
         </div>
 
-        <!-- 内容区：各 pane 用 v-if 互斥，切走即销毁（隐藏 Tab 不参与渲染）。
-             mode="out-in"：旧 pane 先淡出再淡入新的。不用默认的同时进出 ——
-             两个 pane 高度不同，重叠期会把内容区撑成两者之和，看着抖一下。
-             每个 pane 带 :key，否则 Vue 认为是同一个 <div> 只改内容，不触发过渡。 -->
-        <div class="aah-tab-content">
-        <Transition name="aah-fade" mode="out-in">
-          <!-- ===== Tab: 设置 ===== -->
-          <!-- 两列栅格：简单字段并排，复合/长字段用 .aah-field-wide 跨整行。
-               button / p / .aah-loggedin 在 CSS 里默认跨整行，不用逐个标。 -->
-          <div v-if="activeTab === 'settings'" key="settings" class="aah-tab-pane aah-form-grid">
-            <!-- 服务器地址构建期固定,无需用户填写；本地联调通过 build:local 切换 -->
+        <!-- 已登录：引导流 + 会话列表 -->
+        <template v-else>
+          <!-- 步骤 2：选简历（未选简历时高亮引导） -->
+          <div class="aah-step-card" :class="{ 'aah-step-todo': !config.resumeId }">
+            <div class="aah-step-row">
+              <span class="aah-step-title">② 投递简历</span>
+              <button class="aah-link-btn" :disabled="loadingConfig" @click="loadRemoteConfig()">
+                {{ loadingConfig ? '同步中...' : '↻ 同步' }}
+              </button>
+            </div>
+            <label class="aah-field aah-field-wide" v-if="resumes.length">
+              <select v-model="config.resumeId" @change="persist">
+                <option v-for="r in resumes" :key="r.id" :value="r.id">
+                  {{ r.name }}（{{ r.skills_count }} 技能）
+                </option>
+              </select>
+            </label>
+            <p v-if="resumes.length === 0 && !loadingConfig" class="aah-tip">
+              暂无简历，请先在网页端上传简历，再点上方「↻ 同步」。
+            </p>
+          </div>
+
+          <!-- 步骤 3：开始投递（闭环入口；编排器自动跳列表页并跨页运行） -->
+          <div class="aah-step-card">
+            <div class="aah-step-title">③ 自动投递</div>
+
+            <!-- 运行中：显示实时状态 + 停止 -->
+            <div v-if="orchestratorRunning" class="aah-orchestrator-status">
+              <div class="aah-phase-badge" :class="'phase-' + orchestratorStats.phase">
+                {{ orchestratorStats.phase === 'chat' ? '🤖 会话托管中' : orchestratorStats.phase === 'apply' ? '🎯 投递中' : '运行中' }}
+              </div>
+              <div
+                v-if="applyProgressPct !== null"
+                class="aah-job-progress-text"
+                style="margin:6px 0"
+              >整轮进度 {{ progressApplied }}/{{ progressTarget }}</div>
+              <div class="aah-stats">
+                <div class="aah-stat aah-ok"><b>{{ orchestratorStats.appliedTotal }}</b><span>已投</span></div>
+                <div class="aah-stat"><b>{{ orchestratorStats.hrRepliesTotal }}</b><span>HR回复</span></div>
+                <div class="aah-stat"><b>{{ orchestratorStats.chatRoundsTotal }}</b><span>会话轮</span></div>
+              </div>
+              <p v-if="navUnread > 0" class="aah-nav-unread" style="margin:4px 0">
+                🔴 导航未读 {{ navUnread }} 条
+              </p>
+              <button class="aah-btn-danger" @click="stopOrchestrator">停止投递</button>
+            </div>
+
+            <!-- 未运行：一键开始 -->
+            <template v-else>
+              <button class="aah-btn-primary aah-btn-start" :disabled="!ready" @click="startApply">
+                ▶ 开始自动投递
+              </button>
+              <p v-if="!ready" class="aah-tip">请先完成上面的登录与选简历。</p>
+              <p v-else-if="applyKeywords.length" class="aah-tip">
+                投递关键词：{{ applyKeywords.join(' / ') }}
+                <span class="aah-hint">（来自网页端求职偏好 / 简历技能，可在网页端「个人设置」修改）</span>
+              </p>
+              <p v-else class="aah-tip">
+                暂无关键词。请在网页端「个人设置」填写期望职位，或上传简历后点「↻ 同步」。
+              </p>
+              <p v-if="startMsg" class="aah-error">{{ startMsg }}</p>
+              <p class="aah-hint">
+                点击后自动打开职位列表并持续投递，期间自动托管 HR 会话（回复/发简历/答薪资面试），
+                刷新页面也会自动恢复。
+              </p>
+            </template>
+          </div>
+
+          <!-- 会话列表（HR 最近消息；常驻，便于随时查看与手动介入） -->
+          <div class="aah-hr-conversations">
+            <div class="aah-diag-head">
+              <span>
+                会话（{{ recentHRMessages.length }}）
+                <span v-if="navUnread > 0" class="aah-nav-unread" title="BOSS 导航「消息」未读数">
+                  🔴 {{ navUnread }} 条未读
+                </span>
+              </span>
+              <span class="aah-head-right">
+                <span v-if="hrMessagesLoading">加载中...</span>
+                <button
+                  v-if="!isChatPage && platform?.chatUrl"
+                  class="aah-link-btn"
+                  @click="gotoChatPage"
+                >去聊天页</button>
+              </span>
+            </div>
+
+            <p v-if="hrMessagesError" class="aah-error">{{ hrMessagesError }}</p>
+
+            <!-- 点击卡片 → 打开对应会话（跨页时先落盘再跳转） -->
+            <div
+              v-for="msg in recentHRMessages"
+              :key="msg.id"
+              class="aah-hr-message"
+              :class="{ unread: msg.unread, 'low-score': !!skipInfo(msg) }"
+              role="button"
+              tabindex="0"
+              :title="`打开与「${msg.company}」的会话`"
+              @click="openHRThread(msg)"
+              @keydown.enter="openHRThread(msg)"
+              @keydown.space.prevent="openHRThread(msg)"
+            >
+              <div class="aah-hr-header">
+                <span class="aah-hr-company">
+                  <span v-if="msg.hrName" class="aah-hr-name">{{ msg.hrName }}</span>{{ msg.company }}
+                </span>
+                <div class="aah-hr-actions">
+                  <span
+                    v-if="skipInfo(msg)"
+                    class="aah-skip-badge"
+                    :title="skipInfo(msg)!.title"
+                  >⊘ {{ skipInfo(msg)!.label }}</span>
+                  <span class="aah-hr-time">{{ relativeTime(msg.timestamp) }}</span>
+                  <button
+                    v-if="isChatPage"
+                    class="aah-delete-btn"
+                    :disabled="deletingThread !== null || orchestratorRunning"
+                    :title="orchestratorRunning ? '投递运行中，无法删除' : '删除此会话（不可恢复）'"
+                    @click="deleteHRThread(msg, $event)"
+                  >{{ deletingThread === msg.id ? '⏳' : '🗑️' }}</button>
+                </div>
+              </div>
+              <div class="aah-hr-meta">
+                <span v-if="msg.jobTitle" class="aah-hr-job">{{ msg.jobTitle }}</span>
+                <span v-else class="aah-hr-job aah-hr-job-empty">岗位未知</span>
+                <span v-if="msg.salary" class="aah-hr-salary">{{ msg.salary }}</span>
+              </div>
+              <div class="aah-hr-content">{{ msg.content }}</div>
+            </div>
+
+            <p v-if="openThreadMsg" class="aah-hint">{{ openThreadMsg }}</p>
+            <p
+              v-if="!recentHRMessages.length && hrMessagesLoaded && !hrMessagesError"
+              class="aah-hint"
+            >暂无 HR 消息</p>
+          </div>
+        </template>
+
+        <!-- 连接与设置（折叠；⚙ 或下方标题展开） -->
+        <div class="aah-settings-section">
+          <button class="aah-settings-toggle" @click="showSettings = !showSettings">
+            {{ showSettings ? '▾' : '▸' }} 连接与设置
+          </button>
+          <div v-if="showSettings" class="aah-settings-body aah-form-grid">
             <div class="aah-field aah-field-wide">
               <span>连接环境</span>
               <span class="aah-env-badge" :class="{ local: apiEnvironmentLabel === '本地联调' }">
                 {{ apiEnvironmentLabel }}
               </span>
-              <code class="aah-static-value">{{ config.apiBase }}</code>
+              <input
+                v-model.trim="config.apiBase"
+                class="aah-field-wide"
+                placeholder="后端地址，如 http://127.0.0.1:8010"
+                autocomplete="off"
+                spellcheck="false"
+                @change="onApiBaseChange"
+              />
+              <p class="aah-tip">改地址后需重新登录。本地联调填 http://127.0.0.1:8010</p>
             </div>
-
-            <!-- 未登录：显示登录表单。整块单列不拆 —— 邮箱/密码并排会被当成
-                 两个无关字段，且密码管理器的自动填充在拆开后容易认错列。 -->
-            <template v-if="!loggedIn">
-              <label class="aah-field aah-field-wide">
-                <span>邮箱</span>
-                <input v-model="loginEmail" placeholder="登录后端的邮箱" autocomplete="username" />
-              </label>
-              <label class="aah-field aah-field-wide">
-                <span>密码</span>
-                <input v-model="loginPassword" type="password" placeholder="密码" autocomplete="current-password"
-                  @keyup.enter="doLogin" />
-              </label>
-              <button class="aah-btn-primary" :disabled="loggingIn" @click="doLogin">
-                {{ loggingIn ? '登录中...' : '登录' }}
-              </button>
-              <p v-if="loginMsg" class="aah-error">{{ loginMsg }}</p>
-              <!-- 兜底：登录接口不通时可直接粘贴网页端 Token -->
-              <label class="aah-field aah-field-wide">
-                <span>或直接粘贴 Token（网页端 localStorage.token）</span>
-                <input v-model="config.token" placeholder="eyJhbGciOi..." @change="onTokenPaste" />
-              </label>
-            </template>
-
-            <!-- 已登录：显示简历选择 + 退出 -->
-            <template v-else>
-              <div class="aah-loggedin">
-                <span class="aah-ok-text">✓ 已登录</span>
-                <button class="aah-link-btn" @click="logout">退出</button>
-              </div>
-              <button class="aah-btn-secondary" :disabled="loadingConfig" @click="loadRemoteConfig()">
-                {{ loadingConfig ? '加载中...' : '从网站同步配置（简历 + 求职偏好）' }}
-              </button>
-              <p v-if="prefsSynced" class="aah-tip">
-                已同步网站「个人设置」的求职偏好，改配置请在网页端改后点上方同步。
-              </p>
-              <!-- 简历文件名长（含"-张三.pdf"后缀），单列会截断 → 整行 -->
-              <label class="aah-field aah-field-wide" v-if="resumes.length">
-                <span>选择简历</span>
-                <select v-model="config.resumeId" @change="persist">
-                  <option v-for="r in resumes" :key="r.id" :value="r.id">
-                    {{ r.name }}（{{ r.skills_count }} 技能）
-                  </option>
-                </select>
-              </label>
-              <p v-if="resumes.length === 0 && !loadingConfig" class="aah-tip">
-                暂无简历，请先在网页端上传简历
-              </p>
-            </template>
-
-            <!-- 匹配开关：默认按阈值筛选；关闭后跳过匹配接口，规则过滤通过即全部投递 -->
+            <div v-if="loggedIn" class="aah-loggedin">
+              <span class="aah-ok-text">✓ 已登录</span>
+              <button class="aah-link-btn" @click="logout">退出登录</button>
+            </div>
+            <p v-if="prefsSynced" class="aah-tip">
+              已同步网页端「个人设置」的求职偏好；改配置请在网页端修改后点上方「↻ 同步」。
+            </p>
             <label class="aah-field aah-field-wide">
               <span>投递筛选</span>
-              <div class="aah-row">
-                <label class="aah-row" style="gap:6px">
-                  <input
-                    type="checkbox"
-                    v-model="config.matchEnabled"
-                    @change="persist"
-                  />
-                  启用匹配度计算（按阈值筛选）
-                </label>
-              </div>
+              <label class="aah-row" style="gap:6px">
+                <input type="checkbox" v-model="config.matchEnabled" @change="persist" />
+                启用匹配度计算（按阈值筛选）
+              </label>
               <span class="aah-hint">
                 关闭后跳过后端匹配接口，扫描到的岗位全部投递（黑名单/最低薪资规则仍生效）
               </span>
             </label>
-
-            <!-- 投递/回复策略已收归网页端「我的助手」管理，插件不再提供本地输入。
-                 改策略请在网页端操作，保存后点上方「从网站同步配置」生效。 -->
             <p class="aah-tip">
-              投递额度、投递间隔、投递节奏、回复预算、翻页上限、最低回复分、
-              会话清理等策略已收归网页端「我的助手」管理，插件只负责执行。
+              投递额度、投递间隔、投递节奏、回复预算、翻页上限、最低回复分、会话清理等策略
+              已收归网页端「我的助手」管理，插件只负责执行。
             </p>
-
             <p v-if="configError" class="aah-error">{{ configError }}</p>
           </div>
-
-          <!-- ===== Tab: 投递 ===== -->
-          <div v-else-if="activeTab === 'apply'" key="apply" class="aah-tab-pane">
-            <div v-if="!ready" class="aah-config-notice">
-              ⚠ 请先在「设置」Tab 配置：填后端地址 → 登录 → 选简历
-            </div>
-            <template v-else>
-              <!-- 首页/非列表页：五格统计无意义（没有可扫描的职位卡片），只保留编排入口；
-                   编排器启动后会自动跳去列表页，统计在那边才真实。 -->
-              <div v-if="onJobListPage()" class="aah-stats">
-                <div class="aah-stat"><b>{{ progress.scanned }}</b><span>扫描</span></div>
-                <div class="aah-stat"><b>{{ progress.matched }}</b><span>匹配</span></div>
-                <div class="aah-stat aah-ok"><b>{{ progress.applied }}</b><span>已投</span></div>
-                <div class="aah-stat aah-skip"><b>{{ progress.skipped }}</b><span>跳过</span></div>
-                <div class="aah-stat aah-fail"><b>{{ progress.failed }}</b><span>失败</span></div>
-              </div>
-
-              <!-- 当前投递岗位卡片（实时显示）。左侧 4px 竖条 = 整轮真实进度，
-                   自下而上填充。不用无限转圈：投递间隔较长时转久了会被当成卡死。 -->
-              <div v-if="currentJob" class="aah-current-job">
-                <div
-                  v-if="applyProgressPct !== null"
-                  class="aah-job-progress"
-                  role="progressbar"
-                  :aria-valuenow="progressApplied"
-                  aria-valuemin="0"
-                  :aria-valuemax="progressTarget"
-                  :aria-label="`整轮投递进度 ${progressApplied}/${progressTarget}`"
-                >
-                  <div class="aah-job-progress-fill" :style="{ height: applyProgressPct + '%' }" />
-                </div>
-                <div class="aah-current-job-body">
-                  <div class="aah-current-job-title">
-                    正在投递
-                    <span v-if="applyProgressPct !== null" class="aah-job-progress-text">
-                      {{ progressApplied }}/{{ progressTarget }}
-                    </span>
-                  </div>
-                  <div class="aah-current-job-content">
-                    <div class="aah-job-name">{{ currentJob.title }}</div>
-                    <div class="aah-job-company">@ {{ currentJob.company }}</div>
-                    <div class="aah-job-score">匹配分 {{ currentJob.score }}</div>
-                  </div>
-                </div>
-              </div>
-
-              <!-- 聊天页：投递编排要在搜索页启动，此处只显示状态并引导 -->
-              <template v-if="isChatPage">
-                <div v-if="orchestratorRunning" class="aah-orchestrator-running-notice">
-                  <div class="aah-phase-badge" :class="'phase-' + orchestratorStats.phase">
-                    {{ orchestratorStats.phase === 'chat' ? '🤖 会话托管运行中（编排器自动执行）' : '🎯 投递编排运行中' }}
-                  </div>
-                  <div class="aah-stats">
-                    <div class="aah-stat aah-ok"><b>{{ orchestratorStats.appliedTotal }}</b><span>已投</span></div>
-                    <div class="aah-stat"><b>{{ orchestratorStats.hrRepliesTotal }}</b><span>HR回复</span></div>
-                    <div class="aah-stat"><b>{{ orchestratorStats.chatRoundsTotal }}</b><span>会话轮</span></div>
-                  </div>
-                  <p class="aah-tip">
-                    编排器正在自动处理会话，请勿手动点击会话列表或发送消息。
-                  </p>
-                  <button class="aah-btn-danger" @click="stopOrchestrator">停止编排</button>
-                </div>
-                <p v-else class="aah-tip">
-                  当前在聊天页。投递编排需在职位搜索列表页启动；会话托管请切到「会话」Tab。
-                </p>
-              </template>
-
-              <template v-else>
-                <!-- 编排器面板（智能投递 + 自动会话托管） -->
-                <div class="aah-orchestrator-section">
-                  <h3 class="aah-section-title">🎯 智能编排模式（Beta）</h3>
-                  <p class="aah-tip">
-                    自动投递 + 自动回复 HR，跨页持续运行直到目标达成。刷新页面会自动恢复。
-                  </p>
-
-                  <div v-if="orchestratorRunning" class="aah-orchestrator-status">
-                    <div class="aah-phase-badge" :class="'phase-' + orchestratorStats.phase">
-                      {{ orchestratorStats.phase === 'chat' ? '会话托管中' : orchestratorStats.phase === 'apply' ? '投递中' : orchestratorStats.phase }}
-                    </div>
-                    <div class="aah-stats">
-                      <div class="aah-stat aah-ok"><b>{{ orchestratorStats.appliedTotal }}</b><span>已投</span></div>
-                      <div class="aah-stat"><b>{{ orchestratorStats.hrRepliesTotal }}</b><span>HR回复</span></div>
-                      <div class="aah-stat"><b>{{ orchestratorStats.chatRoundsTotal }}</b><span>会话轮</span></div>
-                    </div>
-                    <button class="aah-btn-danger" @click="stopOrchestrator">停止编排</button>
-                  </div>
-
-                  <div v-else class="aah-orchestrator-config">
-                    <div class="aah-config-notice">
-                      投递策略（关键词、城市、额度、投递间隔、投递节奏、回复预算、
-                      最低回复分等）已全部收归网页端「我的助手」管理。
-                    </div>
-                    <p class="aah-tip">
-                      请打开网页端「我的助手」配置好策略后点「开始自动投递」，
-                      插件会在下次心跳时自动执行，无需在本面板配置任何参数。
-                    </p>
-                    <p class="aah-tip">
-                      编排器由网页端跨页托管：投递 ↔ 会话回复自动切换，
-                      刷新页面自动恢复；本面板只负责展示实时状态与紧急停止。
-                    </p>
-                    <button class="aah-btn-secondary" @click="gotoJobListPage">
-                      前往职位搜索列表
-                    </button>
-                  </div>
-                </div>
-              </template>
-
-              <!-- 本批被质量拦截的岗位（岗位级判定，含原因，可复核） -->
-              <div
-                v-if="progress.blockedByQuality && progress.blockedByQuality.length"
-                class="aah-quality-blocked"
-              >
-                <div class="aah-quality-blocked-title">
-                  本批被质量拦截 {{ progress.blockedByQuality.length }} 个
-                  <span class="aah-hint">（岗位级判定，可在网页端复核）</span>
-                </div>
-                <div
-                  v-for="(b, i) in progress.blockedByQuality.slice(-8)"
-                  :key="i"
-                  class="aah-quality-blocked-item"
-                >
-                  <b>{{ b.company }}</b> · {{ b.title }}
-                  <span class="aah-quality-blocked-reason">{{ b.reason }}</span>
-                </div>
-              </div>
-
-              <div class="aah-logs">
-                <div v-if="!progress.logs.length" class="aah-log-line">暂无日志</div>
-                <div v-for="(line, i) in progress.logs" :key="i" class="aah-log-line">{{ line }}</div>
-              </div>
-            </template>
-          </div>
-
-          <!-- ===== Tab: 会话 ===== -->
-          <!-- aah-pane-fill：让本 Tab 纵向铺满，会话列表吃掉剩余高度 -->
-          <div v-else-if="activeTab === 'chat'" key="chat" class="aah-tab-pane aah-pane-fill">
-            <div v-if="!ready" class="aah-config-notice">
-              ⚠ 请先在「设置」Tab 配置：填后端地址 → 登录 → 选简历
-            </div>
-            <template v-else>
-              <!-- 编排器运行中：不显示手动托管按钮，避免两条链路同时操作会话 -->
-              <div v-if="orchestratorRunning" class="aah-orchestrator-running-notice">
-                <div class="aah-phase-badge" :class="'phase-' + orchestratorStats.phase">
-                  {{ orchestratorStats.phase === 'chat' ? '🤖 会话托管运行中' : '🎯 投递编排运行中' }}
-                </div>
-                <div class="aah-stats">
-                  <div class="aah-stat"><b>{{ orchestratorStats.hrRepliesTotal }}</b><span>HR回复</span></div>
-                  <div class="aah-stat"><b>{{ orchestratorStats.chatRoundsTotal }}</b><span>会话轮</span></div>
-                </div>
-                <p class="aah-tip">
-                  编排器正在自动处理会话，请勿手动点击会话列表或发送消息。
-                </p>
-                <button class="aah-btn-danger" @click="stopOrchestrator">停止编排</button>
-              </div>
-
-              <!-- 编排器未运行：手动托管入口 -->
-              <template v-else>
-                <template v-if="isChatPage">
-                  <button v-if="!chatRunning" class="aah-btn-primary" @click="startChat">
-                    开始会话托管（自动回复 HR）
-                  </button>
-                  <button v-else class="aah-btn-danger" @click="stopChat">
-                    {{ chatStopping ? '停止中（等当前会话收尾）...' : '停止会话托管' }}
-                  </button>
-                  <button
-                    class="aah-btn-secondary"
-                    style="margin-top: 8px"
-                    @click="wipeChatStore"
-                    :disabled="chatRunning"
-                    :title="chatRunning ? '托管运行中，停止后才能清空' : '清空本地会话记录（判重hash、失败计数），下次托管会重新处理所有会话'"
-                  >
-                    清空会话记录
-                  </button>
-                  <p class="aah-tip">
-                    自动回复不可撤回；全过程记录在网页端「会话」页，可事后评判优化话术。
-                  </p>
-                </template>
-                <template v-else>
-                  <p class="aah-tip">会话托管需在 {{ platform?.name || '招聘平台' }} 聊天页使用。</p>
-                  <!-- 无 chatUrl 的平台（如尚未支持聊天页的）不显示按钮，避免点了没反应 -->
-                  <button
-                    v-if="platform?.chatUrl"
-                    class="aah-btn-secondary"
-                    @click="gotoChatPage"
-                  >
-                    跳转到聊天页
-                  </button>
-                </template>
-              </template>
-
-              <div class="aah-divider"></div>
-
-              <!-- HR 最近消息（数据来自 /api/conversations/list 的 last_hr_message） -->
-              <div class="aah-hr-conversations">
-                <div class="aah-diag-head">
-                  <span>会话列表（{{ recentHRMessages.length }}）</span>
-                  <span class="aah-head-right">
-                    <span v-if="hrMessagesLoading">加载中...</span>
-                  </span>
-                </div>
-
-                <p v-if="hrMessagesError" class="aah-error">{{ hrMessagesError }}</p>
-
-                <!-- 点击卡片 → 打开对应会话（跨页时先落盘再跳转） -->
-                <div
-                  v-for="msg in recentHRMessages"
-                  :key="msg.id"
-                  class="aah-hr-message"
-                  :class="{ unread: msg.unread, 'low-score': !!skipInfo(msg) }"
-                  role="button"
-                  tabindex="0"
-                  :title="`打开与「${msg.company}」的会话`"
-                  @click="openHRThread(msg)"
-                  @keydown.enter="openHRThread(msg)"
-                  @keydown.space.prevent="openHRThread(msg)"
-                >
-                  <div class="aah-hr-header">
-                    <span class="aah-hr-company">
-                      <span v-if="msg.hrName" class="aah-hr-name">{{ msg.hrName }}</span>{{ msg.company }}
-                    </span>
-                    <div class="aah-hr-actions">
-                      <!-- 低分/无分标记：跳过是个决策，必须在界面上可见而不只在日志里。
-                           title 里写清为什么跳过 + 在哪改，避免用户只看到一个红标不知所措。 -->
-                      <span
-                        v-if="skipInfo(msg)"
-                        class="aah-skip-badge"
-                        :title="skipInfo(msg)!.title"
-                      >
-                        ⊘ {{ skipInfo(msg)!.label }}
-                      </span>
-                      <span class="aah-hr-time">{{ relativeTime(msg.timestamp) }}</span>
-                      <button
-                        v-if="isChatPage"
-                        class="aah-delete-btn"
-                        :disabled="deletingThread !== null || chatRunning || orchestratorRunning"
-                        :title="chatRunning || orchestratorRunning
-                          ? '会话托管运行中，无法删除'
-                          : '删除此会话（不可恢复）'"
-                        @click="deleteHRThread(msg, $event)"
-                      >
-                        {{ deletingThread === msg.id ? '⏳' : '🗑️' }}
-                      </button>
-                    </div>
-                  </div>
-                  <div class="aah-hr-meta">
-                    <span v-if="msg.jobTitle" class="aah-hr-job">{{ msg.jobTitle }}</span>
-                    <span v-else class="aah-hr-job aah-hr-job-empty">岗位未知</span>
-                    <span v-if="msg.salary" class="aah-hr-salary">{{ msg.salary }}</span>
-                  </div>
-                  <div class="aah-hr-content">{{ msg.content }}</div>
-                </div>
-
-                <p v-if="openThreadMsg" class="aah-hint">{{ openThreadMsg }}</p>
-
-                <!-- 空态：区分「加载中」与「确实没有」 -->
-                <p
-                  v-if="!recentHRMessages.length && hrMessagesLoaded && !hrMessagesError"
-                  class="aah-hint"
-                >
-                  暂无 HR 回复
-                </p>
-              </div>
-            </template>
-          </div>
-
-          <!-- ===== Tab: 调试（行为日志已迁移到服务端,这里保留 DOM 采集/调试入口） ===== -->
-          <div v-else-if="activeTab === 'logs'" key="logs" class="aah-tab-pane">
-            <!-- ===== 深度翻页测试（滚动加载方案，手动控制） ===== -->
-            <div class="aah-probe-section">
-              <h3 class="aah-section-title">深度翻页测试（滚动采集）</h3>
-              <p class="aah-tip">
-                BOSS 搜索页是左侧列表滚动加载（?page=N 无效）。本测试在当前页原地向下滚动，
-                每步统计卡片总数/新增/重复，并采集滚动容器 DOM 结构。不投递、不点沟通，随时可停止。
-              </p>
-              <div class="aah-row" style="gap:8px">
-                <label class="aah-row" style="gap:6px">
-                  <span>最大步数</span>
-                  <input
-                    v-model.number="probeMaxSteps"
-                    type="number"
-                    min="2"
-                    max="60"
-                    style="width:70px"
-                  />
-                </label>
-                <button
-                  v-if="!probeState?.active"
-                  class="aah-btn-secondary"
-                  :disabled="probeBusy"
-                  @click="doStartProbe"
-                >
-                  {{ probeBusy ? '启动中...' : '开始滚动采集' }}
-                </button>
-                <button v-else class="aah-btn-danger" @click="doStopProbe">停止采集</button>
-              </div>
-              <p v-if="probeMsg" class="aah-error">{{ probeMsg }}</p>
-
-              <div class="aah-row" style="gap:8px; margin-top:8px">
-                <button class="aah-btn-secondary" @click="doCollectListDom">采集列表结构</button>
-                <button class="aah-btn-secondary" @click="doToggleScrollListener">
-                  {{ listeningScroll ? '停止滚动监听' : '滚动监听（请手动滚一下列表）' }}
-                </button>
-              </div>
-              <pre v-if="listDomText" class="aah-probe-dom-pre">{{ listDomText }}</pre>
-              <div v-if="scrollHit" class="aah-probe-dom">
-                <div class="aah-probe-dom-title">真正滚动的元素（监听命中）</div>
-                <pre class="aah-probe-dom-pre">{{ scrollHitText }}</pre>
-              </div>
-
-              <div v-if="probeState?.container" class="aah-probe-dom">
-                <div class="aah-probe-dom-title">滚动容器 DOM 结构</div>
-                <pre v-if="probeState.container.found" class="aah-probe-dom-pre">{{ probeDomText }}</pre>
-                <p v-else class="aah-tip">
-                  未找到可滚动容器（滚动加载可能由 window 滚动或新选择器驱动），已改用 window.scrollBy。
-                </p>
-              </div>
-
-              <div v-if="probeState?.steps?.length" class="aah-probe-results">
-                <div class="aah-probe-summary">
-                  已采集 {{ probeState.steps.length }}/{{ probeState.maxSteps }} 步，
-                  当前卡片 {{ probeLastCount }} 张，累计唯一岗位 {{ probeTotalFresh }} 个
-                  <span v-if="probeState.done">（{{ probeState.doneReason || '已结束' }}）</span>
-                </div>
-                <table class="aah-probe-table">
-                  <thead>
-                    <tr><th>步</th><th>卡片</th><th>新增</th><th>重复</th><th>滚动位置</th><th>到底</th><th>加载信号</th></tr>
-                  </thead>
-                  <tbody>
-                    <tr v-for="p in probeState.steps" :key="p.step">
-                      <td>{{ p.step }}</td>
-                      <td>{{ p.cardCount }}</td>
-                      <td>{{ p.fresh }}</td>
-                      <td>{{ p.dup }}</td>
-                      <td>{{ p.scrollTop }}/{{ p.scrollHeight }}</td>
-                      <td>{{ p.atBottom ? '✓' : '' }}</td>
-                      <td class="aah-probe-signal">{{ p.signal || '-' }}</td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-            </div>
-
-            <div class="aah-divider"></div>
-
-            <!-- ===== DOM 采集（独立缓冲，回传日志供开发用） ===== -->
-            <div class="aah-diag-head">
-              <span>DOM 采集（{{ domLines.length }} 行）</span>
-              <span>
-                <button class="aah-link-btn" @click="collectPageDom">采集当前页</button>
-                <button class="aah-link-btn" @click="dumpDom">聊天页结构</button>
-                <button class="aah-link-btn" @click="probeChatStoreData">探测会话数据源</button>
-                <button class="aah-link-btn" :disabled="auditRunning" @click="runChatAuditNow">
-                  {{ auditRunning ? '采集中...' : '会话审计（只读）' }}
-                </button>
-                <button class="aah-link-btn" :disabled="debugCapturing" @click="startDebug">
-                  {{ debugCapturing ? '调试采集中(30s)' : '开始调试' }}
-                </button>
-                <button class="aah-link-btn" @click="copyDom">{{ domCopyMsg || '复制' }}</button>
-                <button class="aah-link-btn" @click="wipeDom">清空</button>
-              </span>
-            </div>
-            <p class="aah-hint">
-              去目标页面（岗位搜索页 / 聊天页）点「采集当前页」，把下方内容复制回传给开发者，
-              用于基于真实 DOM 开发（如岗位翻页）。「聊天页结构」输出在行为记录里。
-            </p>
-            <p class="aah-hint">
-              「探测会话数据源」：在 BOSS 聊天页列表加载完成后点一下，自动把页面内存里的
-              会话列表结构（store/组件树/字段名）写入日志（tag=STORE），用于实现零滚动读会话。
-            </p>
-            <div class="aah-logs aah-diag aah-dom-view">
-              <div v-if="!domLines.length" class="aah-log-line">
-                尚未采集。请先到目标页面再点「采集当前页」。
-              </div>
-              <div v-for="(line, i) in domLines" :key="'x' + i" class="aah-log-line">{{ line }}</div>
-            </div>
-
-            <div class="aah-divider"></div>
-
-            <!-- 调试入口：只投当前页、不跳转、不进会话托管。
-                 编排出问题时用它单独验证平台适配器（卡片扫描/沟通按钮）。 -->
-            <details class="aah-advanced">
-              <summary>调试：只投当前页</summary>
-              <p class="aah-tip">
-                不跳转、不处理会话，仅对当前列表页投递。用于排查编排器故障。
-              </p>
-              <p v-if="!ready" class="aah-tip">⚠ 请先在「设置」Tab 完成配置。</p>
-              <template v-else>
-                <button v-if="!progress.running" class="aah-btn-secondary" @click="start">
-                  投当前页
-                </button>
-                <button v-else class="aah-btn-danger" @click="stop">停止</button>
-              </template>
-            </details>
-          </div>
-        </Transition>
         </div>
+
+        <!-- 测试工具（只在聊天页显示） -->
+        <div v-if="isChatPage" class="aah-settings-section">
+          <button class="aah-settings-toggle" @click="showTestTools = !showTestTools">
+            {{ showTestTools ? '▾' : '▸' }} 测试工具（原子操作）
+          </button>
+          <div v-if="showTestTools" class="aah-settings-body" style="display:flex;flex-direction:column;gap:8px">
+            <p class="aah-tip">测试聊天页原子操作，结果自动写入日志文件。只读操作可放心点击，发送类操作会二次确认。</p>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <button
+                class="aah-btn-secondary"
+                :disabled="testToolsRunning"
+                @click="testReadMessages"
+              >读取消息</button>
+              <button
+                class="aah-btn-secondary"
+                :disabled="testToolsRunning"
+                @click="testListResumes"
+              >列出附件简历</button>
+            </div>
+            <p v-if="testToolsMsg" :class="testToolsMsg.includes('失败') ? 'aah-error' : 'aah-hint'">{{ testToolsMsg }}</p>
+          </div>
+        </div>
+
       </div>
     </div>
     </Transition>
@@ -1704,6 +1276,19 @@ watch(activeTab, (tab) => {
 .aah-ball { width: 48px; height: 48px; border-radius: 50%; background: linear-gradient(135deg,#3b82f6,#2563eb); color:#fff; display:flex; align-items:center; justify-content:center; font-weight:bold; cursor:move; box-shadow:0 4px 12px rgba(0,0,0,.2); user-select: none; }
 .aah-ball.dragging { cursor: grabbing; box-shadow:0 8px 24px rgba(0,0,0,.3); }
 .aah-drawer { width: 560px; background:#fff; border-radius:12px; box-shadow:0 8px 32px rgba(0,0,0,.18); overflow:hidden; border:1px solid #e5e7eb; }
+
+/* ---- 单流引导式布局 ---- */
+.aah-flow { max-height:72vh; overflow-y:auto; padding:14px; display:flex; flex-direction:column; gap:12px; }
+.aah-step-card { background:#f9fafb; border:1px solid #e5e7eb; border-radius:10px; padding:14px; display:flex; flex-direction:column; gap:10px; }
+.aah-step-card.aah-step-todo { border-color:#f59e0b; background:#fffbeb; }
+.aah-step-title { font-size:14px; font-weight:600; color:#111827; }
+.aah-step-row { display:flex; align-items:center; justify-content:space-between; }
+.aah-btn-start { font-size:15px; padding:12px; font-weight:600; }
+.aah-settings-section { border-top:1px solid #e5e7eb; padding-top:8px; }
+.aah-settings-toggle { background:none; border:none; color:#6b7280; font-size:13px; cursor:pointer; padding:4px 0; }
+.aah-settings-toggle:hover { color:#374151; }
+.aah-settings-body { margin-top:8px; }
+.aah-nav-unread { color:#dc2626; font-size:12px; font-weight:600; }
 
 /* ---- Tab 布局：左导航 80px + 右内容 480px ---- */
 /* min-height:0 是必需的：flex 子项默认 min-height:auto，内容超高时不会收缩，

@@ -299,13 +299,27 @@ function findDeleteDialog(): HTMLElement | null {
  *                  不再固定空等 14 轮（约 5 秒）。
  */
 export async function confirmDeleteDialog(opts?: { gone?: () => boolean }): Promise<boolean> {
+  let dumpedMissing = false
   for (let i = 0; i < 14; i++) {
     if (opts?.gone?.()) return true
     await delay(250, 400)
     if (opts?.gone?.()) return true
+
+    // 只在「真正的删除确认弹窗」范围内找「确定」。原来找不到弹窗就退回整个
+    // document 搜任意「确定」叶子，会点到页面上无关的确定按钮并谎报成功——
+    // 删除其实从未发生。宁可找不到也不乱点。
     const dialog = findDeleteDialog()
-    const scope: ParentNode = dialog || document
-    const ok = (Array.from(scope.querySelectorAll('button,span,div,a')) as HTMLElement[]).find(
+    if (!dialog) {
+      // 第一次没探到弹窗时取证：把当前可见的弹窗类节点文案 dump 出来，
+      // 便于判断是 BOSS 改了文案（findDeleteDialog 的正则失配）还是压根没弹窗。
+      if (!dumpedMissing) {
+        dumpedMissing = true
+        dumpVisibleDialogs('未探到删除确认弹窗')
+      }
+      continue
+    }
+
+    const ok = (Array.from(dialog.querySelectorAll('button,span,div,a')) as HTMLElement[]).find(
       (e) => {
         if (e.querySelector('*')) return false // 只认叶子，防命中容器
         const t = text(e).replace(/\s/g, '')
@@ -314,15 +328,59 @@ export async function confirmDeleteDialog(opts?: { gone?: () => boolean }): Prom
         return r.width > 1 && r.height > 1
       },
     )
-    if (ok) {
-      realClick(ok)
-      await delay(500, 800)
-      diag('CHAT', '已点击删除确认弹窗「确定」')
-      await dismissLeftoverDeleteDialogs()
-      return true
+    if (!ok) {
+      diag('CHAT', '删除确认弹窗已出现但未找到「确定」按钮', {
+        dialogTextLength: (dialog.textContent || '').replace(/\s/g, '').length,
+        leafTexts: dialogLeafTexts(dialog),
+      })
+      continue
     }
+    realClick(ok)
+    await delay(500, 800)
+    diag('CHAT', '已点击删除确认弹窗「确定」（已限定在确认弹窗内）')
+    await dismissLeftoverDeleteDialogs()
+    return true
   }
   return false
+}
+
+/** dump 当前所有可见、尺寸合理的「弹窗类」节点文案，用于诊断删除确认弹窗失配。 */
+function dumpVisibleDialogs(phase: string): void {
+  const cands = (Array.from(
+    document.querySelectorAll('[class*="dialog"],[class*="modal"],[class*="popup"],[role="dialog"]'),
+  ) as HTMLElement[])
+    .filter((d) => {
+      const r = d.getBoundingClientRect()
+      if (r.width < 1 || r.height < 1) return false
+      const t = (d.textContent || '').replace(/\s/g, '')
+      return t.length > 0 && t.length <= 160
+    })
+    .slice(0, 6)
+    .map((d) => ({
+      cls: String(d.className || '').slice(0, 50),
+      textLength: (d.textContent || '').replace(/\s/g, '').length,
+      // 文案本身可能含姓名/公司，统一脱敏：只保留结构性关键词命中情况
+      hasDeleteWord: /删除/.test(d.textContent || ''),
+      hasConfirmBtn: /确定|确认/.test(d.textContent || ''),
+    }))
+  diag('CHAT', `删除取证[${phase}] 可见弹窗节点`, {
+    count: cands.length,
+    dialogs: cands,
+    anyDeleteWord: cands.some((c) => c.hasDeleteWord),
+  })
+}
+
+/** 弹窗内叶子节点文本（仅结构性短词，脱敏：>6 字的文本只报长度，防泄露姓名/公司）。 */
+function dialogLeafTexts(dialog: HTMLElement): string[] {
+  return (Array.from(dialog.querySelectorAll('button,span,div,a')) as HTMLElement[])
+    .filter((e) => !e.querySelector('*'))
+    .map((e) => {
+      const t = text(e).replace(/\s/g, '')
+      if (!t) return ''
+      return t.length <= 6 ? t : `[len=${t.length}]`
+    })
+    .filter(Boolean)
+    .slice(0, 12)
 }
 
 /**
