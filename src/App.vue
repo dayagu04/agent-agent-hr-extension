@@ -155,10 +155,20 @@ async function resetBallPosition() {
 // 单流引导式面板：登录→选简历→开始投递全部一屏呈现，不再有 Tab 切换。
 // 「连接/设置」（环境、简历选择、匹配开关、退出）折叠在底部，默认收起。
 const showSettings = ref(false)
+const showTestTools = ref(false)
 
 /** 展开并滚动到底部的设置区（标题栏 ⚙ 与未配置引导共用） */
 function gotoSettings(): void {
   showSettings.value = true
+  showTestTools.value = false
+}
+
+/** 切换测试工具显示 */
+function toggleTestTools(): void {
+  showTestTools.value = !showTestTools.value
+  if (showTestTools.value) {
+    showSettings.value = false
+  }
 }
 
 const resumes = ref<Array<{ id: number; name: string; skills_count: number }>>([])
@@ -819,7 +829,6 @@ function updateOrchestratorStats() {
 }
 
 // ---- 测试工具（聊天页原子操作）----
-const showTestTools = ref(false)
 const testToolsMsg = ref('')
 const testToolsRunning = ref(false)
 
@@ -1012,6 +1021,14 @@ onMounted(() => {
       >
         <span class="aah-title">智能投递 · {{ platformName }} <small style="opacity:0.6;font-size:11px">{{ VERSION_LABEL }}</small></span>
         <div class="aah-header-btns">
+          <!-- 🧪 测试工具入口 -->
+          <button
+            v-if="platform"
+            class="aah-icon-btn"
+            :class="{ active: showTestTools }"
+            @click="toggleTestTools"
+            title="测试工具"
+          >🧪</button>
           <!-- ⚙ 快捷入口：展开底部「连接与设置」折叠区 -->
           <button
             v-if="platform"
@@ -1032,6 +1049,47 @@ onMounted(() => {
       <!-- 单流引导式面板：一屏呈现「登录 → 选简历 → 开始投递」，主页也能用。
            会话列表常驻下方；连接与设置折叠在最底部。 -->
       <div v-else class="aah-flow">
+
+        <!-- 测试工具面板（点标题栏 🧪 展开） -->
+        <div v-if="showTestTools" class="aah-test-panel">
+          <div class="aah-test-header">
+            <span class="aah-test-title">🧪 测试工具</span>
+            <span class="aah-test-subtitle">原子操作验证 · 结果自动写日志</span>
+          </div>
+
+          <div class="aah-test-section">
+            <div class="aah-test-section-title">💬 聊天页功能</div>
+            <p v-if="!isChatPage" class="aah-test-warning">⚠️ 请先切换到 BOSS 聊天页</p>
+            <div v-else class="aah-test-buttons">
+              <button
+                class="aah-test-btn"
+                :disabled="testToolsRunning"
+                @click="testReadMessages"
+              >
+                <span class="aah-test-btn-icon">📖</span>
+                <span class="aah-test-btn-label">读取消息</span>
+                <span class="aah-test-btn-desc">读当前会话，区分 HR/我方/系统</span>
+              </button>
+              <button
+                class="aah-test-btn"
+                :disabled="testToolsRunning"
+                @click="testListResumes"
+              >
+                <span class="aah-test-btn-icon">📄</span>
+                <span class="aah-test-btn-label">列出附件简历</span>
+                <span class="aah-test-btn-desc">点开发简历弹窗，读列表后关闭</span>
+              </button>
+            </div>
+          </div>
+
+          <div v-if="testToolsMsg" class="aah-test-result" :class="{ error: testToolsMsg.includes('失败') }">
+            {{ testToolsMsg }}
+          </div>
+
+          <p class="aah-test-footer">
+            结果已写入 <code>logs/plugin/{{ new Date().toISOString().slice(0, 10) }}.log</code>
+          </p>
+        </div>
 
         <!-- 步骤 1：未登录 → 登录卡片（最显眼，先引导登录） -->
         <div v-if="!loggedIn" class="aah-step-card">
@@ -1242,29 +1300,6 @@ onMounted(() => {
           </div>
         </div>
 
-        <!-- 测试工具（只在聊天页显示） -->
-        <div v-if="isChatPage" class="aah-settings-section">
-          <button class="aah-settings-toggle" @click="showTestTools = !showTestTools">
-            {{ showTestTools ? '▾' : '▸' }} 测试工具（原子操作）
-          </button>
-          <div v-if="showTestTools" class="aah-settings-body" style="display:flex;flex-direction:column;gap:8px">
-            <p class="aah-tip">测试聊天页原子操作，结果自动写入日志文件。只读操作可放心点击，发送类操作会二次确认。</p>
-            <div style="display:flex;gap:8px;flex-wrap:wrap">
-              <button
-                class="aah-btn-secondary"
-                :disabled="testToolsRunning"
-                @click="testReadMessages"
-              >读取消息</button>
-              <button
-                class="aah-btn-secondary"
-                :disabled="testToolsRunning"
-                @click="testListResumes"
-              >列出附件简历</button>
-            </div>
-            <p v-if="testToolsMsg" :class="testToolsMsg.includes('失败') ? 'aah-error' : 'aah-hint'">{{ testToolsMsg }}</p>
-          </div>
-        </div>
-
       </div>
     </div>
     </Transition>
@@ -1289,6 +1324,28 @@ onMounted(() => {
 .aah-settings-toggle:hover { color:#374151; }
 .aah-settings-body { margin-top:8px; }
 .aah-nav-unread { color:#dc2626; font-size:12px; font-weight:600; }
+
+/* ---- 测试工具面板（标题栏 🧪 展开，置顶显示） ---- */
+.aah-test-panel { background:#faf5ff; border:2px solid #c4b5fd; border-radius:10px; padding:14px; display:flex; flex-direction:column; gap:10px; }
+.aah-test-header { display:flex; flex-direction:column; gap:2px; }
+.aah-test-title { font-size:15px; font-weight:700; color:#5b21b6; }
+.aah-test-subtitle { font-size:11px; color:#7c3aed; }
+.aah-test-section { display:flex; flex-direction:column; gap:8px; }
+.aah-test-section-title { font-size:13px; font-weight:600; color:#374151; }
+.aah-test-warning { margin:0; padding:8px 10px; background:#fef3c7; border:1px solid #fcd34d; border-radius:6px; color:#92400e; font-size:12px; }
+.aah-test-buttons { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+.aah-test-btn { display:flex; flex-direction:column; align-items:flex-start; gap:2px; padding:10px 12px; background:#fff; border:1px solid #ddd6fe; border-radius:8px; cursor:pointer; text-align:left; transition:border-color .12s, background .12s; }
+.aah-test-btn:hover:not(:disabled) { border-color:#7c3aed; background:#f5f3ff; }
+.aah-test-btn:focus-visible { outline:2px solid #7c3aed; outline-offset:2px; }
+.aah-test-btn:disabled { opacity:.5; cursor:wait; }
+.aah-test-btn-icon { font-size:18px; }
+.aah-test-btn-label { font-size:13px; font-weight:600; color:#111827; }
+.aah-test-btn-desc { font-size:11px; color:#6b7280; line-height:1.4; }
+.aah-test-result { padding:8px 10px; background:#ecfdf5; border:1px solid #a7f3d0; border-radius:6px; color:#065f46; font-size:12px; }
+.aah-test-result.error { background:#fef2f2; border-color:#fecaca; color:#991b1b; }
+.aah-test-footer { margin:0; font-size:11px; color:#9ca3af; }
+.aah-test-footer code { background:#f3f4f6; padding:1px 4px; border-radius:3px; }
+.aah-icon-btn.active { background:rgba(255,255,255,.5); box-shadow:inset 0 0 0 1px #fff; }
 
 /* ---- Tab 布局：左导航 80px + 右内容 480px ---- */
 /* min-height:0 是必需的：flex 子项默认 min-height:auto，内容超高时不会收缩，
