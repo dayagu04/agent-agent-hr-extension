@@ -2499,11 +2499,14 @@ export async function completeResumeSend(
 export function countResumeSentMarks(): number {
   const panel = findChatPanel()
   if (!panel) return 0
+  // BOSS 发简历成功后的两种系统痕迹（2026-10-20 实测）：
+  //   1) 文本：「您的附件简历 xxx 已发送给Boss」
+  //   2) 系统卡片链接：「点击查看附件」（新版选择框路径走的是这个）
+  const MARK = /已发送给boss|点击查看附件|查看附件/i
   return (Array.from(panel.querySelectorAll('*')) as HTMLElement[]).filter((el) => {
+    if (el.children.length) return false // 只数叶子，避免父容器重复计数
     const t = (el.textContent || '').replace(/\s/g, '')
-    if (!/附件简历.*已发送给boss/i.test(t) || t.length > 80) return false
-    // 只数最内层：外层容器也包含这段文字
-    return !Array.from(el.children).some((c) => /已发送给boss/i.test(c.textContent || ''))
+    return MARK.test(t) && t.length <= 80
   }).length
 }
 

@@ -732,3 +732,21 @@ describe('card handling is retryable', () => {
     vi.useRealTimers()
   })
 })
+
+describe('resume sent markers', () => {
+  it('counts the new system card link 「点击查看附件」 as a sent mark', () => {
+    document.body.innerHTML = `
+      <div class="chat-conversation">
+        <li class="message-item item-system"><div class="message-content"><div class="hyper-link text"><a>点击查看附件</a></div></div></li>
+      </div>`
+    for (const el of Array.from(document.querySelectorAll('*')) as HTMLElement[]) {
+      vi.spyOn(el, 'getBoundingClientRect').mockReturnValue({
+        x: 0, y: 0, top: 0, left: 0, right: 400, bottom: 60, width: 400, height: 60, toJSON: () => ({}),
+      })
+    }
+    vi.spyOn(document.querySelector('.chat-conversation')!, 'getBoundingClientRect')
+      .mockReturnValue({ x: 0, y: 0, top: 0, left: 0, right: 800, bottom: 800, width: 800, height: 800, toJSON: () => ({}) })
+
+    expect(countResumeSentMarks()).toBe(1)
+  })
+})
