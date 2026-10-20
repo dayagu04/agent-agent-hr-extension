@@ -39,6 +39,7 @@ import {
 } from '../contact-policy'
 import { findByText, findChatPanel, findEditable } from '../domprobe'
 import { clickDirect, realClick } from '../dom-events'
+import { probeDialogVue, rememberAttachments } from './boss-attachments'
 import {
   clickDeleteInHeaderMenu,
   confirmDeleteDialog,
@@ -1980,6 +1981,30 @@ export function listResumeOptions(dialog: HTMLElement): ResumeOption[] {
   return entries.map(([row, name]) => ({ name, ...optionState(row) }))
 }
 
+const notedPickers = new WeakSet<HTMLElement>()
+
+/**
+ * 选择框一出现就把附件列表存下来（供以后不点击就知道有几份），
+ * 并记下它背后 Vue 数据的字段路径（找静默读取的数据源）。每个弹窗只做一次。
+ */
+function notePicker(dialog: HTMLElement): ResumeOption[] {
+  const options = listResumeOptions(dialog)
+  if (!notedPickers.has(dialog)) {
+    notedPickers.add(dialog)
+    void rememberAttachments({
+      items: options.map((o) => ({ name: o.name, id: '' })),
+      via: 'picker',
+      at: Date.now(),
+    })
+    try {
+      probeDialogVue(dialog)
+    } catch {
+      /* 取证失败不影响发送 */
+    }
+  }
+  return options
+}
+
 /** 工具栏「发简历」入口。跳过消息流里 HR 卡片上的同名文字，避免误点卡片。 */
 function findResumeToolbarButton(): HTMLElement | null {
   const panel = findChatPanel()
@@ -2038,7 +2063,7 @@ export async function openResumePicker(): Promise<ResumePickerOpen> {
     if (!dialog) continue
     const kind = resumeDialogKind(dialog)
     if (kind === 'picker') {
-      const options = listResumeOptions(dialog)
+      const options = notePicker(dialog)
       diag(
         'CHAT',
         `resume_picker status=picker options=${options.length} ` +
@@ -2150,6 +2175,8 @@ export async function completeResumeSend(
     sawDialog = true
 
     const kind = resumeDialogKind(dialog)
+    // agent 托管发简历时同样刷新本地附件缓存（与面板打开选择框走同一处）
+    if (kind === 'picker') notePicker(dialog)
     if (kind === 'unknown') {
       // 仅有「简历」字样的 active 浮层可能是上传表单、必填问卷或新版未知
       // 流程。不能因里面恰好有“发送”就盲点；保留结构摘要后交给人工适配。
@@ -2199,7 +2226,14 @@ export async function completeResumeSend(
       // BOSS uses delegated Vue handlers for the portal button. A bare
       // HTMLElement.click() can update nothing even though the button is
       // visible; dispatch the same pointer/mouse sequence as a user click.
-      realClick(sendBtn)
+      const sendHit = realClick(sendBtn)
+      const sendRect = sendBtn.getBoundingClientRect()
+      diag(
+        'CHAT',
+        `resume_send step=click_send hit=${sendHit} tag=${sendBtn.tagName.toLowerCase()} ` +
+          `x=${Math.round(sendRect.left)} y=${Math.round(sendRect.top)} ` +
+          `inChatPanel=${!!findChatPanel()?.contains(sendBtn)}`,
+      )
       // 不重试点击同一个发送按钮：第一次可能已到服务端但页面关闭稍慢，
       // 再点会重复发送。只轮询弹窗是否关闭/切到下一阶段。
       for (let wait = 0; wait < 12; wait++) {

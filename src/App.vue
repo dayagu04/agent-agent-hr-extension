@@ -21,6 +21,12 @@ import {
   type ChatMessage,
   type ResumeOption,
 } from './platforms/boss-chat'
+import {
+  lastKnownAttachments,
+  probeBossAttachments,
+  rememberAttachments,
+  type AttachmentSnapshot,
+} from './platforms/boss-attachments'
 import { setPendingOpen, takePendingOpen } from './chat-store'
 import {
   flushConversationDeletedMarks,
@@ -836,12 +842,46 @@ const testToolsMsg = ref('')
 const testToolsRunning = ref(false)
 /** 读到的消息（只在面板显示，方便对照页面核对 HR/我方 分类；正文不进日志） */
 const testMessages = ref<ChatMessage[]>([])
+/** 静默读到的 BOSS 附件简历（不点击页面；名字只在面板显示） */
+const knownAttachments = ref<AttachmentSnapshot | null>(null)
+
+const ATTACH_VIA_LABEL: Record<string, string> = {
+  'probe:store': '从页面数据静默读取',
+  'probe:component': '从页面组件静默读取',
+  picker: '上次弹出选择框时记录',
+}
+
+/**
+ * 静默读附件简历：先试页面数据（不点击、不弹窗），读不到就用上次选择框记下的缓存。
+ * 进聊天页时自动跑一次；面板按钮可手动重跑。
+ */
+async function loadAttachmentsSilently(manual = false): Promise<void> {
+  if (!onChatPage()) return
+  const live = probeBossAttachments()
+  if (live && live.items.length) {
+    knownAttachments.value = live
+    await rememberAttachments(live)
+  } else {
+    knownAttachments.value = await lastKnownAttachments()
+  }
+  if (manual) {
+    const k = knownAttachments.value
+    diag('TEST', `attachments status=${live ? 'probe' : k ? 'cache' : 'none'} count=${k?.items.length ?? 0}`)
+    testToolsMsg.value = live
+      ? `不点击页面就读到了 ${live.items.length} 份附件。`
+      : k
+        ? `页面数据里没找到附件列表，显示的是 ${relativeTime(k.at)} 选择框弹出时记下的 ${k.items.length} 份。`
+        : '页面数据里没找到附件列表，也还没有缓存。真实发一次简历、弹出选择框后会自动记下。'
+  }
+}
 /** BOSS 简历选择框里的候选（名字只在面板显示，不进日志） */
 const testResumeOptions = ref<ResumeOption[]>([])
 const testResumePick = ref<number>(-1)
 /** 发简历确认：第一次点击记下会话身份，第二次点击核对未切换才去点 BOSS「发简历」 */
 const testSendArmed = ref<{ threadId: string; company: string; jobTitle: string } | null>(null)
 let testSendArmTimer: number | undefined
+/** 插件在点 BOSS 弹窗时让面板不拦截鼠标（面板会盖住 BOSS 的按钮） */
+const panelPassthrough = ref(false)
 /** 多份附件时 BOSS 弹出的选择框（保持打开，等用户在面板上选） */
 let pickerDialog: HTMLElement | null = null
 let pickerThreadId = ''
@@ -927,6 +967,7 @@ async function confirmSendResume(): Promise<void> {
     return
   }
   testToolsRunning.value = true
+  panelPassthrough.value = true
   try {
     const r = await openResumePicker()
     const target = armed.company || '当前会话'
@@ -939,6 +980,8 @@ async function confirmSendResume(): Promise<void> {
       const pre = r.options.findIndex((o) => o.selected && !o.disabled)
       testResumePick.value = pre >= 0 ? pre : -1
       pickerThreadId = armed.threadId
+      // 选择框里的列表就是最准的附件清单，同步到「已知附件」区
+      knownAttachments.value = { items: r.options.map((o) => ({ name: o.name, id: '' })), via: 'picker', at: Date.now() }
       diag('TEST', `send_resume status=picker options=${r.options.length} preselected=${pre >= 0 ? pre : 'none'}`)
       testToolsMsg.value = r.options.length
         ? `BOSS 弹出了选择框，里面有 ${r.options.length} 份附件。请在下方选一份，再点「发送这份」。`
@@ -961,6 +1004,7 @@ async function confirmSendResume(): Promise<void> {
     testToolsMsg.value = `发送失败：${(e as Error).message}`
     diag('TEST', `send_resume status=error error=${(e as Error).name || 'Error'}`)
   } finally {
+    panelPassthrough.value = false
     testToolsRunning.value = false
   }
 }
@@ -980,6 +1024,9 @@ async function sendPickedResume(): Promise<void> {
     return
   }
   testToolsRunning.value = true
+  // 面板 560px 宽、贴在右侧，正好盖住 BOSS 选择框的「发送」按钮（2026-10-18 实测）。
+  // 点 BOSS 弹窗期间让面板不拦截鼠标，点击才会落到真正的按钮上。
+  panelPassthrough.value = true
   try {
     const ok = await sendFromOpenPicker(dialog, opt.name)
     diag('TEST', `send_resume status=${ok ? 'sent' : 'failed'} via=picker option=${testResumePick.value} options=${testResumeOptions.value.length}`)
@@ -991,6 +1038,7 @@ async function sendPickedResume(): Promise<void> {
     testToolsMsg.value = `发送失败：${(e as Error).message}`
     diag('TEST', `send_resume status=error error=${(e as Error).name || 'Error'}`)
   } finally {
+    panelPassthrough.value = false
     testToolsRunning.value = false
   }
 }
@@ -1065,12 +1113,18 @@ onMounted(() => {
   // 聊天页：延迟后台静默回填岗位名（列表项无岗位名，需短暂打开会话读头部）
   if (onChatPage()) {
     window.setTimeout(() => void backfillChatJobTitles(), 4000)
+    // 静默读附件简历（只读页面数据，不点击）；结果进日志，用于判断能否不打扰用户
+    window.setTimeout(() => void loadAttachmentsSilently(), 6000)
   }
 })
 </script>
 
 <template>
-  <div class="aah-root" :style="{ top: ballPosition.top + 'px', right: ballPosition.right + 'px' }">
+  <div
+    class="aah-root"
+    :class="{ 'aah-passthrough': panelPassthrough }"
+    :style="{ top: ballPosition.top + 'px', right: ballPosition.right + 'px' }"
+  >
     <!-- 折叠态：悬浮球（可拖拽） -->
     <div
       v-if="collapsed"
@@ -1157,6 +1211,15 @@ onMounted(() => {
                 <span class="aah-test-btn-label">发送简历</span>
                 <span class="aah-test-btn-desc">会真的发出去：先确认会话，多份附件时再选一份</span>
               </button>
+              <button
+                class="aah-test-btn"
+                :disabled="testToolsRunning"
+                @click="loadAttachmentsSilently(true)"
+              >
+                <span class="aah-test-btn-icon">🗂️</span>
+                <span class="aah-test-btn-label">静默读附件</span>
+                <span class="aah-test-btn-desc">不点页面，只读 BOSS 页面数据，看有几份附件</span>
+              </button>
             </div>
           </div>
 
@@ -1174,6 +1237,19 @@ onMounted(() => {
             >
               <span class="aah-test-msg-who">{{ m.kind === 'card' ? SENDER_LABEL[m.sender] + '·卡片' : SENDER_LABEL[m.sender] }}</span>
               <span class="aah-test-msg-text">{{ m.content }}</span>
+            </div>
+          </div>
+
+          <!-- 已知的 BOSS 附件（静默读取或上次选择框记录） -->
+          <div v-if="knownAttachments && knownAttachments.items.length && !testResumeOptions.length" class="aah-test-section">
+            <div class="aah-test-section-title">
+              🗂️ BOSS 附件简历 {{ knownAttachments.items.length }} 份
+              <small style="font-weight:400;color:#6b7280">
+                · {{ ATTACH_VIA_LABEL[knownAttachments.via] || knownAttachments.via }}（{{ relativeTime(knownAttachments.at) }}）
+              </small>
+            </div>
+            <div v-for="(a, i) in knownAttachments.items" :key="i" class="aah-test-resume" style="cursor:default">
+              <span>{{ a.name }}</span>
             </div>
           </div>
 
@@ -1492,6 +1568,8 @@ onMounted(() => {
 .aah-test-resume.disabled { opacity:.5; cursor:not-allowed; }
 .aah-test-confirm { padding:8px 10px; background:#fef2f2; border:1px solid #fca5a5; border-radius:6px; color:#991b1b; font-size:12px; line-height:1.6; display:flex; flex-direction:column; gap:6px; }
 .aah-test-confirm-btns { display:flex; gap:8px; }
+/* 插件点 BOSS 弹窗期间：面板半透明且不接收鼠标，点击才能落到被盖住的 BOSS 按钮上 */
+.aah-root.aah-passthrough { pointer-events:none; opacity:.35; }
 .aah-test-confirm-btns > button { flex:1; margin:0; padding:8px; }
 .aah-test-btn-danger { border-color:#fecaca; }
 .aah-test-btn-danger:hover:not(:disabled) { border-color:#dc2626; background:#fef2f2; }

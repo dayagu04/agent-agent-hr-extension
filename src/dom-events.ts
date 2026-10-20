@@ -65,14 +65,20 @@ export function clickDirect(el: HTMLElement): void {
  * 平台的监听常挂在内层节点，直接点容器不会冒泡到正确的 handler，
  * 因此用 elementFromPoint 找到实际可见节点再派发。
  */
-export function realClick(el: HTMLElement): void {
+export function realClick(el: HTMLElement): 'hit' | 'occluded' {
   // 脱敏 DOM fixture / 旧 WebView 可能没有 scrollIntoView；点击本身仍可执行。
   el.scrollIntoView?.({ block: 'center' })
   const pos = centerOf(el)
-  const target = (
-    typeof document.elementFromPoint === 'function'
-      ? document.elementFromPoint(pos.clientX, pos.clientY) as HTMLElement | null
-      : null
-  ) || el
-  clickDirect(target)
+  const top = typeof document.elementFromPoint === 'function'
+    ? document.elementFromPoint(pos.clientX, pos.clientY) as HTMLElement | null
+    : null
+  // 坐标处最上层不是目标自己或它的子节点 = 目标被挡住了（2026-10-18 实测：
+  // 插件面板盖住了 BOSS 简历选择框的「发送」按钮，点击落在插件面板上，
+  // 页面显示「已点击发送」但弹窗纹丝不动）。这时直接派发给目标本身。
+  if (top && (top === el || el.contains(top))) {
+    clickDirect(top)
+    return 'hit'
+  }
+  clickDirect(el)
+  return 'occluded'
 }
