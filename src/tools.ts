@@ -27,6 +27,7 @@ import { readSearchFilters, selectSearchFilter } from './search-filters'
 import { detectPlatform } from './platforms/factory'
 import { loadConfig } from './config'
 import { fetchGreeting, recordApplication } from './api'
+import { setPendingOpen } from './chat-store'
 import type { ApplyOutcome } from './types'
 
 export interface ToolResult {
@@ -48,6 +49,23 @@ export interface ToolSpec {
 function str(args: Record<string, unknown>, key: string): string {
   const v = args[key]
   return typeof v === 'string' ? v.trim() : ''
+}
+
+/**
+ * 按 jobId 找卡片。
+ *
+ * BOSS 首屏未渲染完时，平台回退读 `data-jobid`，拿到的是完整 id 的前 18 位
+ * （2026-10-20 实测：短 id 是长 id 的前缀）。所以匹配时允许前缀互认，
+ * 否则「上一次扫描拿到的 id 下一次就用不了」。
+ */
+function findJobCard<T extends { platformJobId: string }>(jobs: T[], jobId: string): T | undefined {
+  const exact = jobs.find((j) => j.platformJobId === jobId)
+  if (exact) return exact
+  if (jobId.length < 12) return undefined
+  return jobs.find(
+    (j) => j.platformJobId.length >= 12 &&
+      (j.platformJobId.startsWith(jobId) || jobId.startsWith(j.platformJobId)),
+  )
 }
 
 function needChatPage(): ToolResult | null {
@@ -85,13 +103,19 @@ const TOOLS: ToolSpec[] = [
   },
   {
     name: 'open_thread',
-    description: '打开指定会话（公司名必填，岗位名可选）',
+    description: '打开指定会话（公司名必填，岗位名可选）；不在聊天页时先跳转聊天页',
     exampleArgs: { company: '', jobTitle: '' },
     async run(args) {
-      if (needChatPage()) return needChatPage()!
       const company = str(args, 'company')
       if (!company) return { ok: false, error: 'company_required' }
-      const r = openThread(company, str(args, 'jobTitle') || str(args, 'job_title'))
+      const jobTitle = str(args, 'jobTitle') || str(args, 'job_title')
+      if (!onChatPage()) {
+        // 跨页打开：把目标落盘，跳转后由聊天页的 consumePendingOpen 接手
+        await setPendingOpen(company, jobTitle)
+        setTimeout(() => location.assign('https://www.zhipin.com/web/geek/chat'), 800)
+        return { ok: true, data: 'navigating' }
+      }
+      const r = openThread(company, jobTitle)
       return { ok: r === 'ok', data: r, error: r === 'ok' ? undefined : r }
     },
   },
@@ -246,7 +270,7 @@ const TOOLS: ToolSpec[] = [
       const platform = detectPlatform()
       if (!platform) return { ok: false, error: 'platform_not_supported' }
       const jobs = await platform.scanJobs()
-      const card = jobs.find((j) => j.platformJobId === jobId)
+      const card = findJobCard(jobs, jobId)
       if (!card) return { ok: false, error: 'job_not_found' }
       const reader = (platform as unknown as { readJobDetail?: (c: typeof card) => Promise<string> })
         .readJobDetail
@@ -266,7 +290,7 @@ const TOOLS: ToolSpec[] = [
       const platform = detectPlatform()
       if (!platform) return { ok: false, error: 'platform_not_supported' }
       const jobs = await platform.scanJobs()
-      const card = jobs.find((j) => j.platformJobId === jobId)
+      const card = findJobCard(jobs, jobId)
       if (!card) return { ok: false, error: 'job_not_found' }
       const cfg = loadConfig()
       const raw = await platform.applyJob(card, {

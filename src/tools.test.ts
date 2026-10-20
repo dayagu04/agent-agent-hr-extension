@@ -113,3 +113,18 @@ describe('apply_job', () => {
     expect(r).toEqual({ ok: false, error: 'job_not_found' })
   })
 })
+
+describe('job id lookup tolerance', () => {
+  it('accepts the short data-jobid when the full encrypted id is known', async () => {
+    const readJobDetail = vi.fn(async () => 'JD 全文')
+    vi.mocked(detectPlatform).mockReturnValue({
+      code: 'zhipin',
+      scanJobs: async () => [{ platformJobId: '628b8fca4a28278e0nx40ti6EFJX', title: 'x', company: 'y' }],
+      readJobDetail,
+    } as never)
+
+    const r = await callTool('read_job_detail', { jobId: '628b8fca4a28278e0n' })
+    expect(r.ok).toBe(true)
+    expect(readJobDetail).toHaveBeenCalledTimes(1)
+  })
+})

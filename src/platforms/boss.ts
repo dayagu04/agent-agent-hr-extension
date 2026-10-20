@@ -194,6 +194,8 @@ export class BossPlatform extends BasePlatform {
     if (!box) return ''
     // 去掉详情面板里的操作按钮文案，避免把「立即沟通」等算进 JD
     const clone = box.cloneNode(true) as HTMLElement
+    // 详情里夹着反爬用的内联样式（隐藏字符/字体混淆），必须清掉，否则 JD 全是 CSS
+    clone.querySelectorAll('style, script, noscript, svg, link, template').forEach((el) => el.remove())
     clone.querySelectorAll('button, a').forEach((el) => {
       const t = (el.textContent || '').replace(/\s/g, '')
       if (/立即沟通|继续沟通|收藏|分享|举报|投诉|查看更多|展开/.test(t)) el.remove()
