@@ -288,7 +288,16 @@ export async function syncChatOne(
       timeout: 60000,
     })
     if (resp.status !== 200) {
-      diag('API', `chat/sync 失败 HTTP ${resp.status}`)
+      // 服务端用 404 表达业务拒绝（例如 reply_scope=this_round 时不回非我方投递的会话），
+      // 把 detail 带进日志，否则只有「HTTP 404」无法判断是路由不存在还是策略跳过。
+      let reason = ''
+      try {
+        const body = JSON.parse(resp.responseText || '{}')
+        reason = String(body.detail || '').slice(0, 160)
+      } catch {
+        reason = ''
+      }
+      diag('API', `chat/sync 失败 HTTP ${resp.status} reason=${reason || '-'}`)
       return null
     }
     return JSON.parse(resp.responseText)

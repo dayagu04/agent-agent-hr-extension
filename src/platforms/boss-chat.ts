@@ -894,6 +894,7 @@ export async function readMessages(
   // 交互卡片（HR 索要简历/交换联系方式/确认地点…）没有 span.text-content，
   // 上面那轮收不到。按气泡收：同一气泡里已有文本消息的跳过，避免重复。
   let orphanButtons = 0
+  let orphanChain = ''
   const seenBubbles = new Set<Element>()
   for (const bubble of Array.from(panel.querySelectorAll('.item-friend, .item-myself, .item-system')) as HTMLElement[]) {
     if (seenBubbles.has(bubble)) continue
@@ -920,7 +921,21 @@ export async function readMessages(
   // 兜底取证：消息区里有「同意/拒绝」按钮却不在任何已识别气泡里，说明卡片结构变了
   for (const btn of Array.from(panel.querySelectorAll('*')) as HTMLElement[]) {
     if (btn.children.length || !/^(同意|拒绝)$/.test((btn.textContent || '').trim())) continue
-    if (!btn.closest('.item-friend, .item-myself, .item-system')) orphanButtons++
+    if (!btn.closest('.item-friend, .item-myself, .item-system')) {
+      orphanButtons++
+      // 第一次取证：按钮不在任何已知气泡里，说明卡片结构变了。
+      // 记标签链（不含文案），下次据此适配选择器。
+      if (!orphanChain) {
+        const parts: string[] = []
+        let cur: HTMLElement | null = btn
+        for (let i = 0; i < 5 && cur && cur !== panel; i++) {
+          const cls = Array.from(cur.classList).slice(0, 2).map((c) => c.slice(0, 20)).join('.')
+          parts.push(cls ? `${cur.tagName.toLowerCase()}.${cls}` : cur.tagName.toLowerCase())
+          cur = cur.parentElement
+        }
+        orphanChain = parts.join(' < ')
+      }
+    }
   }
 
   // 两轮收集后恢复页面上的先后顺序
@@ -946,7 +961,8 @@ export async function readMessages(
       // 键名不能写成 resume=/content= 这类：服务端 _KEYED_SECRET 会把这些整段打码
       `cards=${cards.length} resumeCard=${kinds('resume_request')} locationCard=${kinds('location_confirm')} ` +
       `contactCard=${kinds('contact_exchange')} unknownCard=${kinds('unknown')} ` +
-      `geometry=${geometryCount} orphanButtons=${orphanButtons} mid=${Math.round(mid)}`,
+      `geometry=${geometryCount} orphanButtons=${orphanButtons} ` +
+      `orphanChain=${orphanChain || '-'} mid=${Math.round(mid)}`,
   )
   if (opts.verbose) for (const line of dbg.slice(0, 40)) diag('CHAT', line)
   return out
