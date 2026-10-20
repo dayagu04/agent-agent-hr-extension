@@ -39,7 +39,6 @@ import {
 } from '../contact-policy'
 import { findByText, findChatPanel, findEditable } from '../domprobe'
 import { clickDirect, realClick } from '../dom-events'
-import { probeDialogVue, rememberAttachments } from './boss-attachments'
 import {
   clickDeleteInHeaderMenu,
   confirmDeleteDialog,
@@ -801,6 +800,8 @@ export interface ChatMessage {
   content: string
   /** card = 交互卡片（索要简历/交换联系方式/确认地点等，带同意/拒绝按钮），没有 text-content 正文 */
   kind?: 'text' | 'card'
+  /** 卡片类型：与自动处理用的 classifyCard 同一套判据，便于区分「索要简历 / 确认工作地点 / 交换联系方式」 */
+  cardKind?: 'resume_request' | 'location_confirm' | 'contact_exchange' | 'unknown'
 }
 
 /** 卡片里的按钮/附属文字，不算卡片正文 */
@@ -906,10 +907,13 @@ export async function readMessages(
     const sender: ChatMessage['sender'] = clsList.includes('item-system')
       ? 'system'
       : clsList.includes('item-myself') ? 'me' : 'hr'
-    out.push({ sender, content, kind: 'card' })
+    // 卡片类型沿用自动处理时的同一套判据，读和点不会各判一套
+    const cardKind = classifyCard(content)
+    out.push({ sender, content, kind: 'card', cardKind })
     anchors.push(bubble)
     dbg.push(
-      `msg sender=${sender} kind=card via=class bubble=${clsList.filter((c) => /^item-/.test(c)).join('+')} ` +
+      `msg sender=${sender} kind=card card_kind=${cardKind} via=class ` +
+        `bubble=${clsList.filter((c) => /^item-/.test(c)).join('+')} ` +
         `x=${Math.round(r.left)} length=${content.length}`,
     )
   }
@@ -934,11 +938,14 @@ export async function readMessages(
     system: out.filter((m) => m.sender === 'system').length,
   }
   const geometryCount = dbg.filter((l) => l.includes('via=geometry')).length
-  const cardCount = out.filter((m) => m.kind === 'card').length
+  const cards = out.filter((m) => m.kind === 'card')
+  const kinds = (k: string) => cards.filter((m) => m.cardKind === k).length
   diag(
     'CHAT',
     `消息判定 total=${out.length} hr=${counts.hr} me=${counts.me} system=${counts.system} ` +
-      `cards=${cardCount} geometry=${geometryCount} orphanButtons=${orphanButtons} mid=${Math.round(mid)}`,
+      `cards=${cards.length} resume=${kinds('resume_request')} location=${kinds('location_confirm')} ` +
+      `contact=${kinds('contact_exchange')} unknownCard=${kinds('unknown')} ` +
+      `geometry=${geometryCount} orphanButtons=${orphanButtons} mid=${Math.round(mid)}`,
   )
   if (opts.verbose) for (const line of dbg.slice(0, 40)) diag('CHAT', line)
   return out
@@ -1981,30 +1988,6 @@ export function listResumeOptions(dialog: HTMLElement): ResumeOption[] {
   return entries.map(([row, name]) => ({ name, ...optionState(row) }))
 }
 
-const notedPickers = new WeakSet<HTMLElement>()
-
-/**
- * 选择框一出现就把附件列表存下来（供以后不点击就知道有几份），
- * 并记下它背后 Vue 数据的字段路径（找静默读取的数据源）。每个弹窗只做一次。
- */
-function notePicker(dialog: HTMLElement): ResumeOption[] {
-  const options = listResumeOptions(dialog)
-  if (!notedPickers.has(dialog)) {
-    notedPickers.add(dialog)
-    void rememberAttachments({
-      items: options.map((o) => ({ name: o.name, id: '' })),
-      via: 'picker',
-      at: Date.now(),
-    })
-    try {
-      probeDialogVue(dialog)
-    } catch {
-      /* 取证失败不影响发送 */
-    }
-  }
-  return options
-}
-
 /** 工具栏「发简历」入口。跳过消息流里 HR 卡片上的同名文字，避免误点卡片。 */
 function findResumeToolbarButton(): HTMLElement | null {
   const panel = findChatPanel()
@@ -2022,123 +2005,6 @@ function findResumeToolbarButton(): HTMLElement | null {
     return clickable || el
   }
   return null
-}
-
-export type ResumePickerOpen =
-  | { status: 'picker'; dialog: HTMLElement; options: ResumeOption[] }
-  | { status: 'confirm'; dialog: HTMLElement }
-  | { status: 'unknown'; dialog: HTMLElement }
-  /** 只有一份附件时 BOSS 不弹选择框，点「发简历」就直接发出了 */
-  | { status: 'sent_directly' }
-  | { status: 'no_button' | 'button_disabled' | 'no_dialog' }
-
-/**
- * 点工具栏「发简历」打开选择框，最多等 4 秒，不选不发。
- *
- * ⚠ 这不是只读操作：BOSS 账号里只有一份附件时，点「发简历」会直接发出，
- * 不弹任何选择框（2026-10-18 实测）。调用方必须先让用户确认。
- *
- * 与 sendResume 用同一套定位和 realClick（BOSS 工具栏是 Vue 委托事件，
- * 裸 el.click() 不一定能打开弹窗）。每个分支都记日志。
- */
-export async function openResumePicker(): Promise<ResumePickerOpen> {
-  const btn = findResumeToolbarButton()
-  if (!btn) {
-    diag('CHAT', 'resume_picker status=no_button')
-    return { status: 'no_button' }
-  }
-  if (isDialogButtonDisabled(btn)) {
-    diag('CHAT', `resume_picker status=button_disabled tag=${btn.tagName.toLowerCase()}`)
-    return { status: 'button_disabled' }
-  }
-  const baseline = countResumeSentMarks()
-  realClick(btn)
-  for (let i = 0; i < 16; i++) {
-    await delay(220, 300)
-    if (countResumeSentMarks() > baseline) {
-      diag('CHAT', `resume_picker status=sent_directly waitMs=${(i + 1) * 260}`)
-      return { status: 'sent_directly' }
-    }
-    const dialog = findResumeDialog()
-    if (!dialog) continue
-    const kind = resumeDialogKind(dialog)
-    if (kind === 'picker') {
-      const options = notePicker(dialog)
-      diag(
-        'CHAT',
-        `resume_picker status=picker options=${options.length} ` +
-          `preselected=${options.filter((o) => o.selected).length} ` +
-          `disabled=${options.filter((o) => o.disabled).length} waitMs=${(i + 1) * 260}`,
-      )
-      return { status: 'picker', dialog, options }
-    }
-    diag('CHAT', `resume_picker status=${kind} waitMs=${(i + 1) * 260}`)
-    return { status: kind, dialog }
-  }
-  diag('CHAT', `resume_picker status=no_dialog candidates=${dumpDialogCandidates().length} ${describePickerMiss()}`)
-  return { status: 'no_dialog' }
-}
-
-/** 没认出选择框时的取证（纯 k=v，不含文件名）：标题在不在、往上几层有附件行、是否被多弹窗闸门拦掉 */
-function describePickerMiss(): string {
-  const titles = (Array.from(document.querySelectorAll('*')) as HTMLElement[]).filter(
-    (el) => !el.children.length && !el.closest('.aah-root') &&
-      /请选择.*简历/.test((el.textContent || '').replace(/\s/g, '')),
-  )
-  const t = titles[0]
-  let chain = '-'
-  let filesUp = -1
-  if (t) {
-    const parts: string[] = []
-    let cur: HTMLElement | null = t
-    for (let i = 0; i < 8 && cur && cur !== document.body; i++) {
-      const cls = Array.from(cur.classList).slice(0, 2).map((c) => c.slice(0, 20)).join('.')
-      parts.push(cls ? `${cur.tagName.toLowerCase()}.${cls}` : cur.tagName.toLowerCase())
-      if (filesUp < 0 && i > 0 && resumeFileLeaves(cur).length) filesUp = i
-      cur = cur.parentElement
-    }
-    chain = parts.join(' < ') // 必须带空格：「<div」会被服务端当成原始 DOM 整行脱敏
-  }
-  const gate = (Array.from(document.querySelectorAll(
-    '[role="dialog"], [class*="dialog"], [class*="modal"], [class*="layer"], [class*="popup"]',
-  )) as HTMLElement[]).filter((d) => isVisibleDialog(d) && (
-    d.getAttribute('role') === 'dialog' || d.classList.contains('active') ||
-    !!findDialogButton(d, RESUME_DIALOG_ACTION_RE)
-  )).length
-  return `titles=${titles.length} titleVisible=${t ? isVisibleDialog(t) : false} filesUp=${filesUp} ` +
-    `fileLeaves=${resumeFileLeaves(document.body).length} gateCandidates=${gate} chain=${chain}`
-}
-
-/**
- * 在已经打开的选择框里选中一份并发送（openResumePicker 之后调用）。
- * 选择框在选完前被关掉或换成别的弹窗，安全停止。
- */
-export async function sendFromOpenPicker(dialog: HTMLElement, name: string): Promise<boolean> {
-  if (!dialog.isConnected || findResumeDialog() !== dialog) {
-    diag('CHAT', 'resume_send status=picker_gone')
-    return false
-  }
-  const baseline = countResumeSentMarks()
-  return completeResumeSend(name, false, baseline)
-}
-
-/** 关闭简历弹窗：只点取消/关闭，绝不碰发送/同意。返回弹窗是否已消失。 */
-export async function closeResumeDialog(dialog: HTMLElement): Promise<boolean> {
-  const btn =
-    findDialogButton(dialog, /^(取消|关闭|暂不发送|稍后再说)$/) ||
-    (dialog.querySelector(
-      '[class*="close"], [aria-label*="关闭"], [aria-label*="close" i], .icon-close',
-    ) as HTMLElement | null)
-  if (btn) realClick(btn)
-  for (let i = 0; i < 8; i++) {
-    await delay(150, 250)
-    if (!dialog.isConnected || !isVisibleDialog(dialog)) {
-      diag('CHAT', `resume_picker closed=true via=${btn ? 'button' : 'none'}`)
-      return true
-    }
-  }
-  diag('CHAT', `resume_picker closed=false via=${btn ? 'button' : 'none'}`)
-  return false
 }
 
 /**
@@ -2175,8 +2041,6 @@ export async function completeResumeSend(
     sawDialog = true
 
     const kind = resumeDialogKind(dialog)
-    // agent 托管发简历时同样刷新本地附件缓存（与面板打开选择框走同一处）
-    if (kind === 'picker') notePicker(dialog)
     if (kind === 'unknown') {
       // 仅有「简历」字样的 active 浮层可能是上传表单、必填问卷或新版未知
       // 流程。不能因里面恰好有“发送”就盲点；保留结构摘要后交给人工适配。

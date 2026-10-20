@@ -7,26 +7,13 @@ import { detectPlatform } from './platforms/factory'
 import { diag } from './logger'
 import { detectNavUnread } from './nav-unread'
 import {
-  closeResumeDialog,
-  currentThreadId,
   currentThreadInfo,
   deleteThread,
   listThreads,
   onChatPage,
-  openResumePicker,
   openThread,
   readRowJobInfo,
-  readMessages,
-  sendFromOpenPicker,
-  type ChatMessage,
-  type ResumeOption,
 } from './platforms/boss-chat'
-import {
-  lastKnownAttachments,
-  probeBossAttachments,
-  rememberAttachments,
-  type AttachmentSnapshot,
-} from './platforms/boss-attachments'
 import { setPendingOpen, takePendingOpen } from './chat-store'
 import {
   flushConversationDeletedMarks,
@@ -164,20 +151,9 @@ async function resetBallPosition() {
 // 单流引导式面板：登录→选简历→开始投递全部一屏呈现，不再有 Tab 切换。
 // 「连接/设置」（环境、简历选择、匹配开关、退出）折叠在底部，默认收起。
 const showSettings = ref(false)
-const showTestTools = ref(false)
-
 /** 展开并滚动到底部的设置区（标题栏 ⚙ 与未配置引导共用） */
 function gotoSettings(): void {
   showSettings.value = true
-  showTestTools.value = false
-}
-
-/** 切换测试工具显示 */
-function toggleTestTools(): void {
-  showTestTools.value = !showTestTools.value
-  if (showTestTools.value) {
-    showSettings.value = false
-  }
 }
 
 const resumes = ref<Array<{ id: number; name: string; skills_count: number }>>([])
@@ -837,229 +813,6 @@ function updateOrchestratorStats() {
   }
 }
 
-// ---- 测试工具（聊天页原子操作）----
-const testToolsMsg = ref('')
-const testToolsRunning = ref(false)
-/** 读到的消息（只在面板显示，方便对照页面核对 HR/我方 分类；正文不进日志） */
-const testMessages = ref<ChatMessage[]>([])
-/** 静默读到的 BOSS 附件简历（不点击页面；名字只在面板显示） */
-const knownAttachments = ref<AttachmentSnapshot | null>(null)
-
-const ATTACH_VIA_LABEL: Record<string, string> = {
-  'probe:store': '从页面数据静默读取',
-  'probe:component': '从页面组件静默读取',
-  picker: '上次弹出选择框时记录',
-}
-
-/**
- * 静默读附件简历：先试页面数据（不点击、不弹窗），读不到就用上次选择框记下的缓存。
- * 进聊天页时自动跑一次；面板按钮可手动重跑。
- */
-async function loadAttachmentsSilently(manual = false): Promise<void> {
-  if (!onChatPage()) return
-  const live = probeBossAttachments()
-  if (live && live.items.length) {
-    knownAttachments.value = live
-    await rememberAttachments(live)
-  } else {
-    knownAttachments.value = await lastKnownAttachments()
-  }
-  if (manual) {
-    const k = knownAttachments.value
-    diag('TEST', `attachments status=${live ? 'probe' : k ? 'cache' : 'none'} count=${k?.items.length ?? 0}`)
-    testToolsMsg.value = live
-      ? `不点击页面就读到了 ${live.items.length} 份附件。`
-      : k
-        ? `页面数据里没找到附件列表，显示的是 ${relativeTime(k.at)} 选择框弹出时记下的 ${k.items.length} 份。`
-        : '页面数据里没找到附件列表，也还没有缓存。真实发一次简历、弹出选择框后会自动记下。'
-  }
-}
-/** BOSS 简历选择框里的候选（名字只在面板显示，不进日志） */
-const testResumeOptions = ref<ResumeOption[]>([])
-const testResumePick = ref<number>(-1)
-/** 发简历确认：第一次点击记下会话身份，第二次点击核对未切换才去点 BOSS「发简历」 */
-const testSendArmed = ref<{ threadId: string; company: string; jobTitle: string } | null>(null)
-let testSendArmTimer: number | undefined
-/** 插件在点 BOSS 弹窗时让面板不拦截鼠标（面板会盖住 BOSS 的按钮） */
-const panelPassthrough = ref(false)
-/** 多份附件时 BOSS 弹出的选择框（保持打开，等用户在面板上选） */
-let pickerDialog: HTMLElement | null = null
-let pickerThreadId = ''
-
-const SENDER_LABEL: Record<'hr' | 'me' | 'system', string> = { hr: 'HR', me: '我方', system: '系统' }
-
-/** 当前打开的会话身份；没打开会话时为空串（头部姓名和岗位都读不到） */
-function openThreadId(): string {
-  const id = currentThreadId()
-  return id === '|' ? '' : id
-}
-
-/** 测试工具：读取当前会话消息（只读） */
-async function testReadMessages(): Promise<void> {
-  testToolsMsg.value = ''
-  testMessages.value = []
-  if (!isChatPage.value) {
-    testToolsMsg.value = '请先到聊天页'
-    return
-  }
-  if (!openThreadId()) {
-    testToolsMsg.value = '请先在左侧点开一个会话'
-    diag('TEST', 'read_messages status=no_thread')
-    return
-  }
-  testToolsRunning.value = true
-  try {
-    // verbose：逐条记录判定依据（规则/气泡 class/横坐标/长度），不含正文
-    const msgs = await readMessages({ verbose: true })
-    testMessages.value = msgs
-    const hr = msgs.filter((m) => m.sender === 'hr').length
-    const me = msgs.filter((m) => m.sender === 'me').length
-    const system = msgs.filter((m) => m.sender === 'system').length
-    diag('TEST', `read_messages status=ok total=${msgs.length} hr=${hr} me=${me} system=${system}`)
-    testToolsMsg.value = `读到 ${msgs.length} 条：HR ${hr} / 我方 ${me} / 系统 ${system}。请对照右侧聊天记录核对下方分类。`
-  } catch (e) {
-    testToolsMsg.value = `读取失败：${(e as Error).message}`
-    diag('TEST', `read_messages status=error error=${(e as Error).name || 'Error'}`)
-  } finally {
-    testToolsRunning.value = false
-  }
-}
-
-/**
- * 发简历第一步：上膛。
- *
- * 「发简历」不是只读操作：BOSS 里只有一份附件时，点一下就直接发出去了
- * （2026-10-18 实测，原「列出附件简历」按钮因此误发过一次）。所以无论有几份，
- * 都先在面板里确认要发给谁；第二次点击才去点 BOSS 的「发简历」。
- */
-function armSendResume(): void {
-  testToolsMsg.value = ''
-  if (!isChatPage.value) {
-    testToolsMsg.value = '请先到聊天页'
-    return
-  }
-  const threadId = openThreadId()
-  if (!threadId) {
-    testToolsMsg.value = '请先在左侧点开一个会话'
-    return
-  }
-  closePickerState()
-  const info = currentThreadInfo()
-  testSendArmed.value = { threadId, company: info.company, jobTitle: info.jobTitle }
-  if (testSendArmTimer !== undefined) clearTimeout(testSendArmTimer)
-  testSendArmTimer = window.setTimeout(disarmSendResume, 10_000)
-}
-
-function disarmSendResume(): void {
-  testSendArmed.value = null
-  if (testSendArmTimer !== undefined) clearTimeout(testSendArmTimer)
-  testSendArmTimer = undefined
-}
-
-/** 第二步：点 BOSS「发简历」。一份附件会直接发出；多份会弹选择框，交给第三步。 */
-async function confirmSendResume(): Promise<void> {
-  const armed = testSendArmed.value
-  disarmSendResume()
-  if (!armed) return
-  if (openThreadId() !== armed.threadId) {
-    testToolsMsg.value = '当前会话已切换，已取消。请重新点「发送简历」。'
-    diag('TEST', 'send_resume status=thread_changed step=open')
-    return
-  }
-  testToolsRunning.value = true
-  panelPassthrough.value = true
-  try {
-    const r = await openResumePicker()
-    const target = armed.company || '当前会话'
-    if (r.status === 'sent_directly') {
-      diag('TEST', 'send_resume status=sent via=single_attachment')
-      testToolsMsg.value = `已发送：BOSS 里只有一份附件，点「发简历」后直接发给了 ${target}，请在聊天记录里确认。`
-    } else if (r.status === 'picker') {
-      pickerDialog = r.dialog
-      testResumeOptions.value = r.options
-      const pre = r.options.findIndex((o) => o.selected && !o.disabled)
-      testResumePick.value = pre >= 0 ? pre : -1
-      pickerThreadId = armed.threadId
-      // 选择框里的列表就是最准的附件清单，同步到「已知附件」区
-      knownAttachments.value = { items: r.options.map((o) => ({ name: o.name, id: '' })), via: 'picker', at: Date.now() }
-      diag('TEST', `send_resume status=picker options=${r.options.length} preselected=${pre >= 0 ? pre : 'none'}`)
-      testToolsMsg.value = r.options.length
-        ? `BOSS 弹出了选择框，里面有 ${r.options.length} 份附件。请在下方选一份，再点「发送这份」。`
-        : '弹出了选择框，但没读到附件行（结构已记入日志）。请在页面上手动选择或关闭。'
-    } else if (r.status === 'confirm' || r.status === 'unknown') {
-      // 确认框/未知弹窗：不替用户点「同意」，关掉并说明
-      const closed = await closeResumeDialog(r.dialog)
-      diag('TEST', `send_resume status=${r.status} closed=${closed}`)
-      testToolsMsg.value = `弹出的是${r.status === 'confirm' ? '「确认发送」' : '不认识的'}弹窗，没有替你点同意${closed ? '，已关闭' : '，请手动关闭'}。`
-    } else {
-      const reason = {
-        no_button: '没找到「发简历」按钮（这个会话的工具栏可能没有这个入口）',
-        button_disabled: '「发简历」按钮是灰的（BOSS 可能要求先回复过对方）',
-        no_dialog: '点了「发简历」，4 秒内既没弹出选择框、也没看到「已发送」提示（结构已记入日志）',
-      }[r.status]
-      diag('TEST', `send_resume status=${r.status}`)
-      testToolsMsg.value = `发送失败：${reason}`
-    }
-  } catch (e) {
-    testToolsMsg.value = `发送失败：${(e as Error).message}`
-    diag('TEST', `send_resume status=error error=${(e as Error).name || 'Error'}`)
-  } finally {
-    panelPassthrough.value = false
-    testToolsRunning.value = false
-  }
-}
-
-/** 第三步（多份附件）：在已弹出的选择框里选中面板上勾的那份 */
-async function sendPickedResume(): Promise<void> {
-  const opt = testResumeOptions.value[testResumePick.value]
-  const dialog = pickerDialog
-  if (!opt || !dialog) {
-    testToolsMsg.value = '先在下方选一份附件'
-    return
-  }
-  if (openThreadId() !== pickerThreadId) {
-    testToolsMsg.value = '当前会话已切换，已取消。'
-    diag('TEST', 'send_resume status=thread_changed step=pick')
-    closePickerState()
-    return
-  }
-  testToolsRunning.value = true
-  // 面板 560px 宽、贴在右侧，正好盖住 BOSS 选择框的「发送」按钮（2026-10-18 实测）。
-  // 点 BOSS 弹窗期间让面板不拦截鼠标，点击才会落到真正的按钮上。
-  panelPassthrough.value = true
-  try {
-    const ok = await sendFromOpenPicker(dialog, opt.name)
-    diag('TEST', `send_resume status=${ok ? 'sent' : 'failed'} via=picker option=${testResumePick.value} options=${testResumeOptions.value.length}`)
-    testToolsMsg.value = ok
-      ? `已发送「${opt.name}」，请在聊天记录里确认。`
-      : '发送失败：卡在哪一步已写进日志。选择框如果还开着，请手动关闭。'
-    if (ok) closePickerState()
-  } catch (e) {
-    testToolsMsg.value = `发送失败：${(e as Error).message}`
-    diag('TEST', `send_resume status=error error=${(e as Error).name || 'Error'}`)
-  } finally {
-    panelPassthrough.value = false
-    testToolsRunning.value = false
-  }
-}
-
-/** 放弃：关掉 BOSS 选择框（只点取消/关闭） */
-async function cancelPickedResume(): Promise<void> {
-  const dialog = pickerDialog
-  closePickerState()
-  if (!dialog) return
-  const closed = await closeResumeDialog(dialog)
-  diag('TEST', `send_resume status=cancelled closed=${closed}`)
-  testToolsMsg.value = closed ? '已取消，选择框已关闭。' : '已取消。选择框没能自动关闭，请手动点页面空白处关闭。'
-}
-
-function closePickerState(): void {
-  pickerDialog = null
-  pickerThreadId = ''
-  testResumeOptions.value = []
-  testResumePick.value = -1
-}
-
 onMounted(() => {
   // 注入确认 + 平台识别结果，便于「面板没出现/平台判错」类问题定位
   diag('INIT', `插件已注入 ${VERSION_LABEL}：平台=${platform?.name || '不支持'} url=${location.host}${location.pathname}`)
@@ -1113,18 +866,12 @@ onMounted(() => {
   // 聊天页：延迟后台静默回填岗位名（列表项无岗位名，需短暂打开会话读头部）
   if (onChatPage()) {
     window.setTimeout(() => void backfillChatJobTitles(), 4000)
-    // 静默读附件简历（只读页面数据，不点击）；结果进日志，用于判断能否不打扰用户
-    window.setTimeout(() => void loadAttachmentsSilently(), 6000)
   }
 })
 </script>
 
 <template>
-  <div
-    class="aah-root"
-    :class="{ 'aah-passthrough': panelPassthrough }"
-    :style="{ top: ballPosition.top + 'px', right: ballPosition.right + 'px' }"
-  >
+  <div class="aah-root" :style="{ top: ballPosition.top + 'px', right: ballPosition.right + 'px' }">
     <!-- 折叠态：悬浮球（可拖拽） -->
     <div
       v-if="collapsed"
@@ -1153,14 +900,6 @@ onMounted(() => {
       >
         <span class="aah-title">智能投递 · {{ platformName }} <small style="opacity:0.6;font-size:11px">{{ VERSION_LABEL }}</small></span>
         <div class="aah-header-btns">
-          <!-- 🧪 测试工具入口 -->
-          <button
-            v-if="platform"
-            class="aah-icon-btn"
-            :class="{ active: showTestTools }"
-            @click="toggleTestTools"
-            title="测试工具"
-          >🧪</button>
           <!-- ⚙ 快捷入口：展开底部「连接与设置」折叠区 -->
           <button
             v-if="platform"
@@ -1181,123 +920,6 @@ onMounted(() => {
       <!-- 单流引导式面板：一屏呈现「登录 → 选简历 → 开始投递」，主页也能用。
            会话列表常驻下方；连接与设置折叠在最底部。 -->
       <div v-else class="aah-flow">
-
-        <!-- 测试工具面板（点标题栏 🧪 展开） -->
-        <div v-if="showTestTools" class="aah-test-panel">
-          <div class="aah-test-header">
-            <span class="aah-test-title">🧪 测试工具</span>
-            <span class="aah-test-subtitle">原子操作验证 · 结果自动写日志</span>
-          </div>
-
-          <div class="aah-test-section">
-            <div class="aah-test-section-title">💬 聊天页功能</div>
-            <p v-if="!isChatPage" class="aah-test-warning">⚠️ 请先切换到 BOSS 聊天页</p>
-            <div v-else class="aah-test-buttons">
-              <button
-                class="aah-test-btn"
-                :disabled="testToolsRunning"
-                @click="testReadMessages"
-              >
-                <span class="aah-test-btn-icon">📖</span>
-                <span class="aah-test-btn-label">读取消息</span>
-                <span class="aah-test-btn-desc">读当前会话，区分 HR/我方/系统</span>
-              </button>
-              <button
-                class="aah-test-btn aah-test-btn-danger"
-                :disabled="testToolsRunning || !!testSendArmed || testResumeOptions.length > 0"
-                @click="armSendResume"
-              >
-                <span class="aah-test-btn-icon">📎</span>
-                <span class="aah-test-btn-label">发送简历</span>
-                <span class="aah-test-btn-desc">会真的发出去：先确认会话，多份附件时再选一份</span>
-              </button>
-              <button
-                class="aah-test-btn"
-                :disabled="testToolsRunning"
-                @click="loadAttachmentsSilently(true)"
-              >
-                <span class="aah-test-btn-icon">🗂️</span>
-                <span class="aah-test-btn-label">静默读附件</span>
-                <span class="aah-test-btn-desc">不点页面，只读 BOSS 页面数据，看有几份附件</span>
-              </button>
-            </div>
-          </div>
-
-          <div v-if="testToolsMsg" class="aah-test-result" :class="{ error: testToolsMsg.includes('失败') }">
-            {{ testToolsMsg }}
-          </div>
-
-          <!-- 读到的消息：逐条显示判定结果，对照右侧聊天记录核对 -->
-          <div v-if="testMessages.length" class="aah-test-msgs">
-            <div
-              v-for="(m, i) in testMessages"
-              :key="i"
-              class="aah-test-msg"
-              :class="'sender-' + m.sender"
-            >
-              <span class="aah-test-msg-who">{{ m.kind === 'card' ? SENDER_LABEL[m.sender] + '·卡片' : SENDER_LABEL[m.sender] }}</span>
-              <span class="aah-test-msg-text">{{ m.content }}</span>
-            </div>
-          </div>
-
-          <!-- 已知的 BOSS 附件（静默读取或上次选择框记录） -->
-          <div v-if="knownAttachments && knownAttachments.items.length && !testResumeOptions.length" class="aah-test-section">
-            <div class="aah-test-section-title">
-              🗂️ BOSS 附件简历 {{ knownAttachments.items.length }} 份
-              <small style="font-weight:400;color:#6b7280">
-                · {{ ATTACH_VIA_LABEL[knownAttachments.via] || knownAttachments.via }}（{{ relativeTime(knownAttachments.at) }}）
-              </small>
-            </div>
-            <div v-for="(a, i) in knownAttachments.items" :key="i" class="aah-test-resume" style="cursor:default">
-              <span>{{ a.name }}</span>
-            </div>
-          </div>
-
-          <!-- 发简历：先确认目标会话 → 点 BOSS「发简历」→（多份时）选一份 -->
-          <div v-if="testSendArmed" class="aah-test-confirm" role="alert">
-            <div>
-              ⚠️ 要给 <b>{{ testSendArmed.company || '当前会话' }}</b>
-              <span v-if="testSendArmed.jobTitle">（{{ testSendArmed.jobTitle }}）</span>发简历吗？
-            </div>
-            <div>BOSS 里<b>只有一份附件时会直接发出，无法撤回</b>；有多份时会弹出选择框，下一步再选。</div>
-            <div class="aah-test-confirm-btns">
-              <button class="aah-btn-danger" :disabled="testToolsRunning" @click="confirmSendResume">确认，点「发简历」</button>
-              <button class="aah-btn-secondary" :disabled="testToolsRunning" @click="disarmSendResume">取消</button>
-            </div>
-          </div>
-
-          <div v-if="testResumeOptions.length" class="aah-test-section">
-            <div class="aah-test-section-title">📎 选择要发送的附件（BOSS 选择框已打开）</div>
-            <label
-              v-for="(o, i) in testResumeOptions"
-              :key="i"
-              class="aah-test-resume"
-              :class="{ disabled: o.disabled }"
-            >
-              <input
-                type="radio"
-                name="aah-test-resume"
-                :value="i"
-                v-model="testResumePick"
-                :disabled="o.disabled || testToolsRunning"
-              />
-              <span>{{ o.name }}</span>
-              <small v-if="o.selected">BOSS 当前选中</small>
-            </label>
-            <div class="aah-test-confirm-btns">
-              <button
-                class="aah-btn-danger"
-                :disabled="testToolsRunning || testResumePick < 0"
-                @click="sendPickedResume"
-              >发送这份（不可撤回）</button>
-              <button class="aah-btn-secondary" :disabled="testToolsRunning" @click="cancelPickedResume">放弃，关闭选择框</button>
-            </div>
-          </div>
-
-          <p class="aah-test-footer">
-            结果已写入 <code>logs/plugin/{{ new Date().toISOString().slice(0, 10) }}.log</code>
-          </p>
-        </div>
 
         <!-- 步骤 1：未登录 → 登录卡片（最显眼，先引导登录） -->
         <div v-if="!loggedIn" class="aah-step-card">
@@ -1533,46 +1155,6 @@ onMounted(() => {
 .aah-settings-body { margin-top:8px; }
 .aah-nav-unread { color:#dc2626; font-size:12px; font-weight:600; }
 
-/* ---- 测试工具面板（标题栏 🧪 展开，置顶显示） ---- */
-.aah-test-panel { background:#faf5ff; border:2px solid #c4b5fd; border-radius:10px; padding:14px; display:flex; flex-direction:column; gap:10px; }
-.aah-test-header { display:flex; flex-direction:column; gap:2px; }
-.aah-test-title { font-size:15px; font-weight:700; color:#5b21b6; }
-.aah-test-subtitle { font-size:11px; color:#7c3aed; }
-.aah-test-section { display:flex; flex-direction:column; gap:8px; }
-.aah-test-section-title { font-size:13px; font-weight:600; color:#374151; }
-.aah-test-warning { margin:0; padding:8px 10px; background:#fef3c7; border:1px solid #fcd34d; border-radius:6px; color:#92400e; font-size:12px; }
-.aah-test-buttons { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
-.aah-test-btn { display:flex; flex-direction:column; align-items:flex-start; gap:2px; padding:10px 12px; background:#fff; border:1px solid #ddd6fe; border-radius:8px; cursor:pointer; text-align:left; transition:border-color .12s, background .12s; }
-.aah-test-btn:hover:not(:disabled) { border-color:#7c3aed; background:#f5f3ff; }
-.aah-test-btn:focus-visible { outline:2px solid #7c3aed; outline-offset:2px; }
-.aah-test-btn:disabled { opacity:.5; cursor:wait; }
-.aah-test-btn-icon { font-size:18px; }
-.aah-test-btn-label { font-size:13px; font-weight:600; color:#111827; }
-.aah-test-btn-desc { font-size:11px; color:#6b7280; line-height:1.4; }
-.aah-test-result { padding:8px 10px; background:#ecfdf5; border:1px solid #a7f3d0; border-radius:6px; color:#065f46; font-size:12px; }
-.aah-test-result.error { background:#fef2f2; border-color:#fecaca; color:#991b1b; }
-.aah-test-footer { margin:0; font-size:11px; color:#9ca3af; }
-.aah-test-footer code { background:#f3f4f6; padding:1px 4px; border-radius:3px; }
-.aah-test-msgs { display:flex; flex-direction:column; gap:4px; max-height:260px; overflow-y:auto; padding:8px; background:#fff; border:1px solid #e5e7eb; border-radius:8px; }
-.aah-test-msg { display:flex; gap:8px; align-items:flex-start; font-size:12px; line-height:1.5; }
-.aah-test-msg-who { flex:0 0 auto; min-width:36px; text-align:center; padding:1px 4px; border-radius:4px; font-size:11px; font-weight:700; }
-.aah-test-msg-text { flex:1; min-width:0; word-break:break-all; color:#374151; }
-.aah-test-msg.sender-hr .aah-test-msg-who { background:#ede9fe; color:#5b21b6; }
-.aah-test-msg.sender-me { flex-direction:row-reverse; }
-.aah-test-msg.sender-me .aah-test-msg-who { background:#dbeafe; color:#1d4ed8; }
-.aah-test-msg.sender-me .aah-test-msg-text { text-align:right; }
-.aah-test-msg.sender-system .aah-test-msg-who { background:#f3f4f6; color:#6b7280; }
-.aah-test-msg.sender-system .aah-test-msg-text { color:#9ca3af; font-style:italic; }
-.aah-test-resume { display:flex; align-items:center; gap:8px; padding:6px 8px; background:#fff; border:1px solid #e5e7eb; border-radius:6px; cursor:pointer; font-size:12px; }
-.aah-test-resume small { margin-left:auto; color:#6b7280; font-size:11px; }
-.aah-test-resume.disabled { opacity:.5; cursor:not-allowed; }
-.aah-test-confirm { padding:8px 10px; background:#fef2f2; border:1px solid #fca5a5; border-radius:6px; color:#991b1b; font-size:12px; line-height:1.6; display:flex; flex-direction:column; gap:6px; }
-.aah-test-confirm-btns { display:flex; gap:8px; }
-/* 插件点 BOSS 弹窗期间：面板半透明且不接收鼠标，点击才能落到被盖住的 BOSS 按钮上 */
-.aah-root.aah-passthrough { pointer-events:none; opacity:.35; }
-.aah-test-confirm-btns > button { flex:1; margin:0; padding:8px; }
-.aah-test-btn-danger { border-color:#fecaca; }
-.aah-test-btn-danger:hover:not(:disabled) { border-color:#dc2626; background:#fef2f2; }
 .aah-icon-btn.active { background:rgba(255,255,255,.5); box-shadow:inset 0 0 0 1px #fff; }
 
 /* ---- Tab 布局：左导航 80px + 右内容 480px ---- */

@@ -572,4 +572,29 @@ describe('BOSS message reading', () => {
     expect(msgs.map((m) => `${m.sender}:${m.kind}`)).toEqual(['me:text', 'hr:text', 'hr:card'])
     expect(msgs[2].content).toBe('我想要一份您的附件简历，您是否同意')
   })
+
+  it('tells a resume-request card apart from a location-confirm card', async () => {
+    Element.prototype.scrollTo = Element.prototype.scrollTo || (() => {})
+    document.body.innerHTML = `
+      <div class="chat-conversation">
+        <div class="item-friend"><div class="card"><p>我想要一份您的附件简历，您是否同意</p><span>拒绝</span><span>同意</span></div></div>
+        <div class="item-friend"><div class="card"><p>您是否接受此工作地点：合肥</p><span>暂不考虑</span><span>可以接受</span></div></div>
+        <div class="item-friend"><div class="card"><p>方便留个联系方式吗</p><span>拒绝</span><span>同意</span></div></div>
+      </div>
+    `
+    for (const el of Array.from(document.querySelectorAll('*'))) {
+      vi.spyOn(el, 'getBoundingClientRect').mockReturnValue({
+        x: 0, y: 0, top: 0, left: 0, right: 100, bottom: 30, width: 100, height: 30, toJSON: () => ({}),
+      })
+    }
+    vi.spyOn(document.querySelector('.chat-conversation')!, 'getBoundingClientRect').mockReturnValue({
+      x: 0, y: 0, top: 0, left: 0, right: 800, bottom: 800, width: 800, height: 800, toJSON: () => ({}),
+    })
+
+    const msgs = await readMessages()
+    expect(msgs.map((m) => m.cardKind)).toEqual(['resume_request', 'location_confirm', 'contact_exchange'])
+    // 卡片正文里不该混进按钮文字
+    expect(msgs[0].content).toBe('我想要一份您的附件简历，您是否同意')
+    expect(msgs[1].content).toBe('您是否接受此工作地点：合肥')
+  })
 })
