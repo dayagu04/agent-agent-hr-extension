@@ -356,6 +356,49 @@ const TOOLS: ToolSpec[] = [
     },
   },
   {
+    name: 'probe_dom',
+    description: '读指定选择器的 DOM 结构（标签/class/role/按钮文案与禁用态/文本长度），用于适配选择器',
+    exampleArgs: { selector: '.item-friend', depth: 2 },
+    async run(args) {
+      const sel = str(args, 'selector') || '.item-friend'
+      const rawDepth = Number(args.depth)
+      const depth = Number.isFinite(rawDepth) ? Math.max(0, Math.min(4, Math.floor(rawDepth))) : 2
+      const shortText = (el: Element): string => {
+        if (el.children.length) return ''
+        const t = (el.textContent || '').replace(/\s+/g, '').trim()
+        return t.length <= 12 ? t : ''
+      }
+      const walk = (el: Element, d: number): Record<string, unknown> => {
+        const node: Record<string, unknown> = {
+          tag: el.tagName.toLowerCase(),
+          cls: Array.from(el.classList).slice(0, 4).join('.').slice(0, 80),
+        }
+        const role = el.getAttribute('role')
+        if (role) node.role = role
+        const aria = el.getAttribute('aria-disabled')
+        if (aria) node.ariaDisabled = aria
+        let disabled = false
+        try {
+          disabled = el.matches(':disabled')
+        } catch {
+          disabled = false
+        }
+        if (disabled || /disabled|is-disabled|unable/i.test(String((el as HTMLElement).className || ''))) {
+          node.disabled = true
+        }
+        node.textLen = (el.textContent || '').replace(/\s/g, '').length
+        const t = shortText(el)
+        if (t) node.text = t
+        if (d > 0 && el.children.length) {
+          node.children = Array.from(el.children).slice(0, 8).map((c) => walk(c, d - 1))
+        }
+        return node
+      }
+      const roots = Array.from(document.querySelectorAll(sel)).slice(0, 8)
+      return { ok: roots.length > 0, data: { selector: sel, count: roots.length, nodes: roots.map((r) => walk(r, depth)) } }
+    },
+  },
+  {
     name: 'list_tools',
     description: '列出当前可用工具及其参数',
     async run() {
