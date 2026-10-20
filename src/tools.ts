@@ -14,7 +14,7 @@ import {
   clickCard,
   currentThreadInfo,
   deleteThread,
-  listPendingCardKinds,
+  listPendingCardsStable,
   listThreads,
   onChatPage,
   openThread,
@@ -98,7 +98,7 @@ const TOOLS: ToolSpec[] = [
     description: '列出当前会话里待处理的交互卡片类型（不点击）',
     async run() {
       if (needChatPage()) return needChatPage()!
-      return { ok: true, data: listPendingCardKinds() }
+      return { ok: true, data: await listPendingCardsStable() }
     },
   },
   {

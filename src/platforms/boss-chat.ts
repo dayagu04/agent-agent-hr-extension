@@ -1252,30 +1252,47 @@ export function classifyCard(question: string): ChatCard['kind'] {
  * 判据：卡片垂直位置之下已有我方消息（消息流自上而下按时间排列），
  * 或结果文本已出现在消息流中。
  */
-function isCardAnswered(cardEl: HTMLElement, panel: HTMLElement): boolean {
-  const cardBottom = cardEl.getBoundingClientRect().bottom
-  const cardText = (cardEl.textContent || '').replace(/\s/g, '')
+/**
+ * 卡片是否已答 —— 以 BOSS 自己的状态为准：答过之后卡片按钮会被禁用。
+ *
+ * 2026-10-20 probe_dom 实测：
+ *   已答（用户点了「可以接受」）：span.btn-v2.disabled 两个按钮都带 disabled
+ *   未答（简历卡）：            span.card-btn 无任何禁用标记
+ * 早期实现用「卡片下方有我方消息」判重，会把我方普通回复误当成已答；
+ * 用消息文案判断也分不清「用户手打的同一句话」和「点卡片产生的结果」。
+ */
+function isCardAnswered(cardEl: HTMLElement, _panel: HTMLElement): boolean {
+  const buttons = Array.from(
+    cardEl.querySelectorAll('.card-btn, .btn-v2, [role="button"], button, span, a'),
+  ).filter((el) => /^(同意|拒绝|可以接受|暂不考虑)$/.test((el.textContent || '').replace(/\s/g, '')))
 
-  /** 卡片下方是否出现了这类文本（只认叶子，且必须位于卡片下方） */
-  const hasBelow = (re: RegExp): boolean =>
-    (Array.from(panel.querySelectorAll('*')) as HTMLElement[]).some((el) => {
-      if (el.children.length || cardEl.contains(el)) return false
-      const t = (el.textContent || '').replace(/\s/g, '')
-      if (!t || !re.test(t) || t.length > 80) return false
-      const r = el.getBoundingClientRect()
-      return r.height > 0 && r.top >= cardBottom - 4
-    })
+  if (!buttons.length) {
+    // 找不到按钮：可能是已答后被 BOSS 换成纯文本，也可能结构未知。
+    // 不猜「已答」，交给上层按未知处理，避免把待处理卡片永久跳过。
+    return false
+  }
+  return buttons.every((el) => isDialogButtonDisabled(el as HTMLElement))
+}
 
-  // 只有「真的答过」才算答过：索要简历看发送结果，地点看接受结果。
-  // 旧逻辑用「卡片下方出现任意我方消息」判重——实测我方发一句普通回复后，
-  // 还没点的简历卡就被当成已答过，agent 再也点不到它。
-  if (/附件简历|一份.{0,4}简历|您的简历/.test(cardText)) {
-    return hasBelow(/已发送给boss|附件简历已发送|简历已发送/i)
+/** 把消息区滚到底，保证卡片按钮已经渲染/可见（否则 visible() 判定为 0 会漏卡） */
+async function revealLatestMessages(): Promise<void> {
+  const panel = findChatPanel()
+  if (!panel) return
+  const anchor = firstMatch(SEL.msgText, panel) || panel
+  let sc: HTMLElement | null = anchor
+  for (let i = 0; i < 8 && sc; i++) {
+    if (sc.scrollHeight > sc.clientHeight + 4) break
+    sc = sc.parentElement
   }
-  if (/是否接受此工作地点/.test(cardText)) {
-    return hasBelow(/工作地点我可以接受|已接受.{0,6}地点|已同意接受/)
-  }
-  return false
+  if (!sc) return
+  sc.scrollTo({ top: sc.scrollHeight })
+  await delay(150, 250)
+}
+
+/** 待处理卡片（会先滚动到消息底部，检测更稳定） */
+export async function listPendingCardsStable(): Promise<Array<{ kind: ChatCardKind; questionLength: number }>> {
+  await revealLatestMessages()
+  return listPendingCardKinds()
 }
 
 function findPendingCards(): ChatCard[] {
@@ -1480,6 +1497,7 @@ export async function clickCard(
   accept: boolean,
   opts: { resumeName?: string | null; resumeIndex?: number | null } = {},
 ): Promise<boolean> {
+  await revealLatestMessages()
   const card = findPendingCards().find((c) => c.kind === kind)
   if (!card) {
     diag('CHAT', `card_click status=not_found kind=${kind}`)
@@ -1787,6 +1805,17 @@ const RESUME_DIALOG_ACTION_RE = /^(发送|发送给Boss|发送简历|确认发�
 
 /** 定位简历弹窗：语义锚点优先，允许选择框同时带「上传简历」入口。 */
 export function findResumeDialog(): HTMLElement | null {
+  // 简历选择框的确定特征（2026-10-20 probe_dom 实测）：
+  //   .choose-resume-dialog > .resume-choose-container > ul.resume-list > li.list-item
+  //   .footer button.btn-sure-v2「发送」
+  // 必须放在「多弹窗就保险退出」之前：聊天里的卡片层（.message-dialog-both /
+  // .item-dialog）也会命中 [class*=dialog]，会被误当成竞争弹窗导致直接返回 null。
+  const chooseDialog = findChooseResumeDialog()
+  if (chooseDialog) {
+    diag('CHAT', 'resume_dialog via=choose-resume')
+    return chooseDialog
+  }
+
   const cands = Array.from(document.querySelectorAll(
     '[role="dialog"], [class*="dialog"], [class*="modal"], [class*="layer"], [class*="popup"]',
   )) as HTMLElement[]
@@ -2135,6 +2164,13 @@ function listRowsGeneric(dialog: HTMLElement): ResumeOption[] {
 
 /** 按序号点选（字体混淆导致名字不可靠时用） */
 export function selectResumeRowByIndex(dialog: HTMLElement, index: number): boolean {
+  const listItems = Array.from(dialog.querySelectorAll('li.list-item')) as HTMLElement[]
+  const pick = listItems[index]
+  if (pick) {
+    if (!pick.classList.contains('selected')) realClick(pick)
+    diag('CHAT', `resume_select status=clicked_list_item index=${index} rows=${listItems.length}`)
+    return true
+  }
   const rows = genericRowEls(dialog)
   const row = rows[index]
   if (!row) {
@@ -2192,6 +2228,22 @@ const RESUME_META_RE = /^(\d{4}[./-]\d{1,2}[./-]\d{1,2}.*|\d+(\.\d+)?\s*(kb|mb|k
  * 附件行：从文件名叶子往上爬，取「只包含这一个文件名」的最大祖先。
  * 新版选择框的行没有 li/label/radio，只能这样圈出整行（含更新时间和大小）。
  */
+/**
+ * 可见的简历选择框：优先带已选行的那个（页面里可能出现两份实例）。
+ */
+function findChooseResumeDialog(): HTMLElement | null {
+  const cands = (Array.from(document.querySelectorAll('.choose-resume-dialog')) as HTMLElement[])
+    .filter((el) => !el.closest('.aah-root') && isVisibleDialog(el))
+    .filter((el) => el.querySelectorAll('li.list-item').length > 0)
+  if (!cands.length) return null
+  const withSelected = cands.filter((el) => el.querySelector('li.list-item.selected'))
+  const pick = withSelected[0] || cands[cands.length - 1]
+  // 标题「请选择要发送的简历」在 .boss-dialog__header 里，不在 .choose-resume-dialog 内部；
+  // 返回整个 popup content，才能同时拿到标题（判类型）和「发送」按钮。
+  const wrapper = pick.closest('.boss-popup__content') as HTMLElement | null
+  return wrapper || pick
+}
+
 function resumeFileRows(dialog: HTMLElement): Array<{ row: HTMLElement; name: string }> {
   const leaves = resumeFileLeaves(dialog)
   return leaves.map((leaf) => {
@@ -2222,6 +2274,21 @@ function optionState(row: HTMLElement): { selected: boolean; disabled: boolean }
  * 没有文件名时退回旧版 li/label/radio 行。
  */
 export function listResumeOptions(dialog: HTMLElement): ResumeOption[] {
+  // 实测结构：li.list-item，.item-body 是名字/更新时间/大小，.selected 表示选中
+  const listItems = Array.from(dialog.querySelectorAll('li.list-item')) as HTMLElement[]
+  if (listItems.length) {
+    return listItems.map((li) => {
+      const body = li.querySelector('.item-body')
+      const raw = (body?.textContent || li.textContent || '').replace(/\s+/g, ' ').trim()
+      // 去掉「更新于 …」「xxxKB」等附属信息，只留文件名
+      const name = raw.split(/更新于|\d+(?:\.\d+)?\s*(?:KB|MB|K|M)\b/i)[0].trim().slice(0, 120)
+      return {
+        name: name || 'row',
+        selected: li.classList.contains('selected'),
+        disabled: false,
+      }
+    })
+  }
   const fileRows = resumeFileRows(dialog)
   if (fileRows.length) {
     return fileRows.map(({ row, name }) => ({ name, ...optionState(row) }))

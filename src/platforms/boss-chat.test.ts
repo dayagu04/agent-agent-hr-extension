@@ -633,11 +633,13 @@ describe('pending card detection', () => {
     expect(listPendingCardKinds().map((c) => c.kind)).toEqual(['resume_request'])
   })
 
-  it('treats the card as answered once BOSS shows the resume was sent', () => {
+  it('treats the card as answered when BOSS disables its buttons', () => {
+    // 实测：答过的卡片按钮带 disabled class（地点卡就是这样）
     document.body.innerHTML = `
       <div class="chat-conversation">
-        <div class="item-friend"><div class="card"><p>我想要一份您的附件简历，您是否同意</p><button>拒绝</button><button>同意</button></div></div>
-        <div class="item-system"><span>您的附件简历 261011 已发送给Boss</span></div>
+        <div class="item-friend"><div class="card"><p>我想要一份您的附件简历，您是否同意</p>
+          <span class="card-btn disabled" style="cursor:pointer">拒绝</span><span class="card-btn disabled" style="cursor:pointer">同意</span>
+        </div></div>
       </div>`
     mockRects()
 
@@ -653,41 +655,51 @@ describe('choose-resume dialog (measured structure)', () => {
   }
 
   function mount(): HTMLElement {
+    // 2026-10-20 probe_dom 实测结构
     document.body.innerHTML = `
-      <div class="dialog-wrap active">
+      <div class="boss-popup__wrapper boss-dialog">
         <div class="boss-popup__content">
-          <div class="title">请选择要发送的简历</div>
-          <div class="choose-resume-dialog">
-            <div class="resume-row"><span>蔡韬的简历-agent.pdf</span></div>
-            <div class="resume-row"><span>261011.pdf</span></div>
+          <div class="boss-dialog__header"><h3>请选择要发送的简历</h3></div>
+          <div class="boss-dialog__body">
+            <div class="choose-resume-dialog">
+              <div class="resume-choose-container">
+                <div class="resume-title">已上传附件</div>
+                <ul class="resume-list">
+                  <li class="list-item selected"><span class="icon-file icon-pdf"></span><div class="item-body">蔡韬的简历-agent.pdf 更新于2026.10.18 263.7KB</div><div class="preview">预览</div></li>
+                  <li class="list-item"><span class="icon-file icon-pdf"></span><div class="item-body">261011.pdf 更新于2026.10.11 313.2KB</div><div class="preview">预览</div></li>
+                </ul>
+              </div>
+              <div class="footer"><div class="manage-btn"></div><button class="btn-v2 btn-sure-v2 btn-confirm">发送</button></div>
+            </div>
           </div>
-          <button type="button">发送</button>
         </div>
       </div>`
     for (const el of Array.from(document.querySelectorAll('*'))) setRect(el, 520, 40)
-    setRect(document.querySelector('.dialog-wrap')!, 1462, 836)
-    setRect(document.querySelector('.boss-popup__content')!, 520, 268)
     setRect(document.querySelector('.choose-resume-dialog')!, 520, 224)
-    return document.querySelector('.boss-popup__content') as HTMLElement
+    return document.querySelector('.choose-resume-dialog') as HTMLElement
   }
 
-  it('recognizes the dialog by its choose-resume class (no role, no .pdf in text)', () => {
+  it('recognizes the dialog by choose-resume and lists rows from li.list-item', () => {
     mount()
     const dialog = findResumeDialog()
     expect(dialog?.className).toContain('boss-popup__content')
     expect(resumeDialogKind(dialog!)).toBe('picker')
-    expect(listResumeOptions(dialog!)).toHaveLength(2)
+    const options = listResumeOptions(dialog!)
+    expect(options.map((o) => o.name)).toEqual(['蔡韬的简历-agent.pdf', '261011.pdf'])
+    expect(options.map((o) => o.selected)).toEqual([true, false])
   })
 
-  it('selects by index when font obfuscation makes names unmatchable', () => {
+  it('selects the second row and finds the 发送 button in the same dialog', () => {
     const dialog = mount()
     const clicks: string[] = []
-    for (const row of Array.from(dialog.querySelectorAll('.resume-row'))) {
-      row.addEventListener('click', () => clicks.push((row.textContent || '').trim()))
+    for (const li of Array.from(dialog.querySelectorAll('li.list-item'))) {
+      li.addEventListener('click', () => clicks.push((li.textContent || '').trim().slice(0, 6)))
     }
 
     expect(selectResumeRowByIndex(dialog, 1)).toBe(true)
-    expect(clicks).toEqual(['261011.pdf'])
+    expect(clicks).toHaveLength(1)
+    expect(clicks[0]).toContain('261011')
+    expect(findDialogButton(dialog, /^(发送|确定)$/)?.textContent).toBe('发送')
   })
 })
 
@@ -696,13 +708,13 @@ describe('card handling is retryable', () => {
     return { x: 0, y: top, top, left: 0, right: 400, bottom: top + height, width: 400, height, toJSON: () => ({}) }
   }
 
-  it('unmarks the card when the resume never goes out, so it can be retried', async () => {
+  it('unmarks the card when the resume never goes out', async () => {
     vi.useFakeTimers()
     document.body.innerHTML = `
       <div class="chat-conversation">
         <div class="item-friend"><div class="card">
           <p>我想要一份您的附件简历，您是否同意</p>
-          <button>拒绝</button><button>同意</button>
+          <span class="card-btn" style="cursor:pointer">拒绝</span><span class="card-btn" style="cursor:pointer">同意</span>
         </div></div>
       </div>`
     for (const el of Array.from(document.querySelectorAll('*')) as HTMLElement[]) {
@@ -712,14 +724,10 @@ describe('card handling is retryable', () => {
     vi.spyOn(document.querySelector('.chat-conversation')!, 'getBoundingClientRect')
       .mockReturnValue({ ...box(0, 800), right: 800, width: 800 })
 
-    expect(listPendingCardKinds().map((c) => c.kind)).toEqual(['resume_request'])
-
-    // 选择框始终不出现 → 发简历失败
     const result = clickCard('resume_request', true)
     await vi.runAllTimersAsync()
     await expect(result).resolves.toBe(false)
-
-    // 关键：不能被永久标记为已处理，否则 agent 无法重试
+    // 失败必须回滚，否则这张卡会被永久跳过
     expect(listPendingCardKinds().map((c) => c.kind)).toEqual(['resume_request'])
     vi.useRealTimers()
   })
