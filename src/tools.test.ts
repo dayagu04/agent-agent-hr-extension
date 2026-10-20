@@ -20,6 +20,8 @@ vi.mock('./api', () => ({ fetchGreeting: vi.fn(async () => ''), recordApplicatio
 import { diag } from './logger'
 import { callTool, toolCatalog } from './tools'
 import { sendMessageText } from './platforms/boss-chat'
+import { detectPlatform } from './platforms/factory'
+import { recordApplication } from './api'
 
 describe('agent tools', () => {
   it('publishes a catalog that marks irreversible actions', () => {
@@ -76,5 +78,38 @@ describe('chain tools', () => {
   it('requires a job id before applying', async () => {
     const r = await callTool('apply_job', {})
     expect(r).toEqual({ ok: false, error: 'jobId_required' })
+  })
+})
+
+describe('apply_job', () => {
+  const card = { platformJobId: 'j1', title: 'C++', company: 'A', cardElement: null }
+
+  it('applies the requested job and records it like the engine does', async () => {
+    const applyJob = vi.fn(async () => ({
+      outcome: 'applied', message: '', greetingSent: true, alreadyApplied: false,
+    }))
+    vi.mocked(detectPlatform).mockReturnValue({
+      code: 'zhipin',
+      scanJobs: async () => [card],
+      applyJob,
+    } as never)
+
+    const r = await callTool('apply_job', { jobId: 'j1' })
+
+    expect(r.ok).toBe(true)
+    expect(applyJob).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(recordApplication)).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(recordApplication).mock.calls[0][4]).toBe('applied')
+  })
+
+  it('stops before clicking when the job id is not on this page', async () => {
+    vi.mocked(detectPlatform).mockReturnValue({
+      code: 'zhipin',
+      scanJobs: async () => [card],
+      applyJob: vi.fn(),
+    } as never)
+
+    const r = await callTool('apply_job', { jobId: 'nope' })
+    expect(r).toEqual({ ok: false, error: 'job_not_found' })
   })
 })
