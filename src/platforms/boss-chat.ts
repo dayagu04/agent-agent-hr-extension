@@ -1453,6 +1453,52 @@ function markCardHandled(card: ChatCard): void {
   card.element?.setAttribute('data-aah-card-handled', '1')
 }
 
+export type ChatCardKind = 'resume_request' | 'contact_exchange' | 'location_confirm' | 'unknown'
+
+/** 当前会话里待处理的交互卡片（只读，不点击）。 */
+export function listPendingCardKinds(): Array<{ kind: ChatCardKind; questionLength: number }> {
+  return findPendingCards().map((c) => ({ kind: c.kind, questionLength: c.question.length }))
+}
+
+/**
+ * 直接点一张待处理卡片的「同意 / 拒绝」按钮（agent 工具用）。
+ *
+ * 不套用本地策略：回不回、同不同意由 agent 决策；这里只负责执行并记账，
+ * 点击前打 handled 标记，避免同一张卡重复点。
+ */
+export async function clickCard(kind: ChatCardKind, accept: boolean): Promise<boolean> {
+  const card = findPendingCards().find((c) => c.kind === kind)
+  if (!card) {
+    diag('CHAT', `card_click status=not_found kind=${kind}`)
+    return false
+  }
+  const btn = accept ? card.acceptBtn : card.rejectBtn
+  if (!btn) {
+    diag('CHAT', `card_click status=no_button kind=${kind} accept=${accept}`)
+    return false
+  }
+  markCardHandled(card)
+  const hit = realClick(btn)
+  diag('CHAT', `card_click status=clicked kind=${kind} accept=${accept} hit=${hit}`)
+  return true
+}
+
+/** 给当前会话发一条文本（agent 工具用），发送前核对会话未被切换。 */
+export async function sendMessageText(content: string): Promise<boolean> {
+  const text_ = (content || '').trim()
+  if (!text_) return false
+  if (!onChatPage()) {
+    diag('CHAT', 'send_message status=not_chat_page')
+    return false
+  }
+  const id = currentThreadId()
+  if (id === '|') {
+    diag('CHAT', 'send_message status=no_thread')
+    return false
+  }
+  return sendText(text_, id)
+}
+
 /**
  * 处理交互卡片。
  *

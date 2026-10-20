@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 const { diag } = vi.hoisted(() => ({ diag: vi.fn() }))
 vi.mock('./logger', () => ({ diag }))
 
-import { probeSearchFiltersOnce, readSearchFilters } from './search-filters'
+import { probeSearchFiltersOnce, readSearchFilters, selectSearchFilter } from './search-filters'
 
 function visibleAll(): void {
   for (const el of Array.from(document.querySelectorAll('*'))) {
@@ -77,5 +77,47 @@ describe('search filters (read only)', () => {
     const line = String(diag.mock.calls.at(-1)?.[1])
     expect(line).toContain('status=none')
     expect(line).toContain('params=-')
+  })
+})
+
+describe('selecting a filter (click → panel → option)', () => {
+  function rects(): void {
+    for (const el of Array.from(document.querySelectorAll('*'))) {
+      if ((el as HTMLElement).getBoundingClientRect().width > 0) continue
+      vi.spyOn(el, 'getBoundingClientRect').mockReturnValue({
+        x: 0, y: 0, top: 0, left: 0, right: 60, bottom: 20, width: 60, height: 20, toJSON: () => ({}),
+      })
+    }
+  }
+
+  it('opens the group panel and clicks the exact option', async () => {
+    document.body.innerHTML = `
+      <div class="filter-bar"><span class="label">工作经验</span></div>`
+    rects()
+    const label = document.querySelector('.label') as HTMLElement
+    label.addEventListener('click', () => {
+      const panel = document.createElement('div')
+      panel.className = 'dropdown-panel'
+      panel.innerHTML = '<span>1-3年</span><span>3-5年</span>'
+      document.body.appendChild(panel)
+      rects()
+    })
+    const clicked: string[] = []
+    document.addEventListener('click', (e) => {
+      const t = (e.target as HTMLElement).textContent || ''
+      if (t === '3-5年') clicked.push(t)
+    })
+
+    const r = await selectSearchFilter('工作经验', '3-5年')
+    expect(r.status).toBe('ok')
+    expect(clicked).toEqual(['3-5年'])
+  })
+
+  it('stops and says why when the group label is missing', async () => {
+    document.body.innerHTML = `<div class="filter-bar"><span>城市</span></div>`
+    rects()
+    const r = await selectSearchFilter('工作经验', '3-5年')
+    expect(r.status).toBe('no_trigger')
+    expect(String(diag.mock.calls.at(-1)?.[1])).toContain('status=no_trigger')
   })
 })

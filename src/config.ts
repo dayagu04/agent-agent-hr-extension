@@ -30,7 +30,8 @@ const DEFAULT_CONFIG: PluginConfig = {
   // 默认不因城市不符而拒绝：宁可接受并标记，也不自动放弃机会
   rejectOffCityLocation: false,
   minReplyScore: 50,
-  replyScope: 'this_round',
+  // 回复策略交由 agent 决策：默认覆盖全部会话，不再在代码里限定「本轮投递」
+  replyScope: 'all',
   maxRepliesPerRound: 10,
   cleanReadConversations: true,
   cleanReadAfterHours: 16,

@@ -14,6 +14,7 @@ import {
   flushOrchestratorEvents, getCurrentJob, getOrchestrator, getOrchestratorSnapshot, resumeOrchestrator,
 } from './orchestrator'
 import { runChatAudit } from './platforms/boss-chat'
+import { callTool, toolCatalog } from './tools'
 import { detectPlatform } from './platforms/factory'
 
 /** 当前页面平台代号（用于心跳上报） */
@@ -34,7 +35,7 @@ interface RemoteCommand {
 
 /** 与服务端 `/api/plugin/heartbeat` 协商的远程命令协议。 */
 const PLUGIN_PROTOCOL_VERSION = 2
-const PLUGIN_CAPABILITIES = ['command_ack_v2'] as const
+const PLUGIN_CAPABILITIES = ['command_ack_v2', 'tools_v1'] as const
 
 interface PluginCompatibility {
   can_receive_commands?: boolean
@@ -127,6 +128,8 @@ export async function reportHeartbeatAndPoll(): Promise<void> {
       version: VERSION,
       protocol_version: PLUGIN_PROTOCOL_VERSION,
       capabilities: [...PLUGIN_CAPABILITIES],
+      // 工具清单随心跳上报：agent 不用猜插件这版支持哪些原子操作
+      tools: toolCatalog(),
       phase,
       running,
       visibility: document.visibilityState,
@@ -307,6 +310,20 @@ async function executeCommand(
           replyScope: cmd.payload?.reply_scope === 'this_round' ? 'this_round' : 'all',
         })
         break
+      case 'tool.call': {
+        // agent 直接调用一个原子工具。参数：{ name, args }
+        // 不论工具成败都 ACK（返回 true）：不可撤回的工具不能因为 ACK 丢失而重试一次。
+        const p = cmd.payload || {}
+        const name = typeof p.name === 'string' ? p.name : ''
+        const args = p.args && typeof p.args === 'object' ? (p.args as Record<string, unknown>) : {}
+        if (!name) {
+          diag('TOOL', 'tool name=- status=error error=name_required')
+          return true
+        }
+        const result = await callTool(name, args)
+        diag('TOOL', `tool_call name=${name} ok=${result.ok ? 1 : 0}`)
+        return true
+      }
       case 'config.reload':
         // 网页端改了核心配置(单轮投递上限/阈值等):通知面板静默重拉配置,实时生效
         window.dispatchEvent(new CustomEvent('aah:config-reload'))

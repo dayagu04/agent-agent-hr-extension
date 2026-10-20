@@ -148,3 +148,128 @@ export function probeSearchFiltersOnce(reason: string): void {
       `${parts.join(' ')} params=${paramKeys.join(',') || '-'}`,
   )
 }
+
+// ---- 选中筛选项（点击式） -------------------------------------------------
+//
+// 实测结论（2026-10-20）：筛选项全部没有 href，不能靠 URL 参数设定；
+// 交互形态是「点分组 → 弹出面板 → 点里面的具体选项」。这里按这个流程实现，
+// 每一步都记日志，失败也能看出卡在哪一步。
+
+import { realClick } from './dom-events'
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms))
+}
+
+/** 点开分组后面板里「自身文本完全等于目标」的可见选项 */
+function findOptionInPanel(optionText: string, exclude: Element[]): HTMLElement | null {
+  const want = optionText.replace(/\s/g, '')
+  const cands = Array.from(document.querySelectorAll('a, li, span, div, label')) as HTMLElement[]
+  for (const el of cands) {
+    if (el.closest('.aah-root')) continue
+    if (exclude.some((x) => x === el || x.contains(el))) continue
+    if (ownText(el) !== want) continue
+    if (!visible(el)) continue
+    // 选项必须位于一个「新出现的面板」里：有 role 或 class 像下拉/弹层，
+    // 或者它自己有 pointer 光标/在 li/a 里。
+    const panel = el.closest(
+      '[role="listbox"], [role="menu"], [class*="dropdown"], [class*="select"], ' +
+        '[class*="popup"], [class*="panel"], [class*="option"], ul',
+    )
+    const interactive =
+      el.tagName === 'A' || el.tagName === 'LI' || el.tagName === 'LABEL' ||
+      getComputedStyle(el).cursor === 'pointer' || !!el.closest('a, li, label')
+    if (!panel && !interactive) continue
+    return el
+  }
+  return null
+}
+
+export interface FilterApplyResult {
+  group: string
+  option: string
+  status: 'ok' | 'no_trigger' | 'no_panel' | 'no_option'
+  urlChanged: boolean
+}
+
+/**
+ * 依次选中一个或多个筛选项：点分组标签 → 等面板 → 点选项 →（有「确定」就点）。
+ *
+ * 只点文本完全匹配的选项；找不到就停下并记日志，不猜。
+ */
+export async function selectSearchFilter(
+  group: string,
+  option: string,
+): Promise<FilterApplyResult> {
+  const urlBefore = location.search
+  const trigger = findGroupLabel(group)
+  if (!trigger) {
+    diag('FILTER', `filter_apply group=${group} status=no_trigger`)
+    return { group, option, status: 'no_trigger', urlChanged: false }
+  }
+  const triggersBefore = Array.from(document.querySelectorAll('*'))
+  const hit = realClick(trigger)
+  diag('FILTER', `filter_apply group=${group} step=click_trigger hit=${hit}`)
+
+  // 等面板出现并找到选项（面板可能是异步渲染的，最多约 2.4 秒）
+  let target: HTMLElement | null = null
+  for (let i = 0; i < 12 && !target; i++) {
+    await sleep(200)
+    target = findOptionInPanel(option, [trigger])
+  }
+  if (!target) {
+    // 区分「面板没弹出来」和「面板出来了但没有这一项」
+    const panelish = Array.from(document.querySelectorAll(
+      '[role="listbox"], [role="menu"], [class*="dropdown"], [class*="popup"], [class*="panel"]',
+    )).filter((el) => visible(el)) as HTMLElement[]
+    const status = panelish.length ? 'no_option' : 'no_panel'
+    diag(
+      'FILTER',
+      `filter_apply group=${group} option=${option} status=${status} ` +
+        `panels=${panelish.length} newNodes=${document.querySelectorAll('*').length - triggersBefore.length} ` +
+        `chain=${panelish[0] ? describeChain(panelish[0]) : '-'}`,
+    )
+    return { group, option, status, urlChanged: false }
+  }
+
+  realClick(target)
+  await sleep(350)
+
+  // 有些面板是「多选 + 确定」，选完要点确定；没有就不动
+  const panel = target.closest(
+    '[role="listbox"], [role="menu"], [class*="dropdown"], [class*="popup"], [class*="panel"]',
+  ) as HTMLElement | null
+  let confirmed = false
+  if (panel) {
+    const ok = (Array.from(panel.querySelectorAll('button, a, span, div')) as HTMLElement[]).find(
+      (el) => /^(确定|确认|完成|应用)$/.test(ownText(el)) && visible(el),
+    )
+    if (ok) {
+      realClick(ok)
+      confirmed = true
+      await sleep(350)
+    }
+  }
+
+  const urlChanged = location.search !== urlBefore
+  const params = new URLSearchParams(location.search)
+  const filterKeys = Array.from(params.keys()).filter((k) => !NON_FILTER_PARAMS.has(k))
+  diag(
+    'FILTER',
+    `filter_apply group=${group} option=${option} status=ok confirmed=${confirmed} ` +
+      `urlChanged=${urlChanged} params=${filterKeys.join(',') || '-'}`,
+  )
+  return { group, option, status: 'ok', urlChanged }
+}
+
+/** 标签链（tag.class，不含文案），用于面板没认出来时取证 */
+function describeChain(el: Element): string {
+  const parts: string[] = []
+  let cur: Element | null = el
+  for (let i = 0; i < 4 && cur && cur !== document.body; i++) {
+    const cls = Array.from(cur.classList).slice(0, 2).map((c) => c.slice(0, 20)).join('.')
+    parts.push(cls ? `${cur.tagName.toLowerCase()}.${cls}` : cur.tagName.toLowerCase())
+    cur = cur.parentElement
+  }
+  return parts.join(' < ')
+}
