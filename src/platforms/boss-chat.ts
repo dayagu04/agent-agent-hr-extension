@@ -902,12 +902,17 @@ export async function readMessages(
     if (firstMatch(SEL.msgText, bubble)) continue
     const r = bubble.getBoundingClientRect()
     if (r.width === 0) continue
-    const content = cardText(bubble).slice(0, 300)
-    if (!content) continue
     const clsList = Array.from(bubble.classList)
     const sender: ChatMessage['sender'] = clsList.includes('item-system')
       ? 'system'
       : clsList.includes('item-myself') ? 'me' : 'hr'
+    // 系统提示要看全文：「您的附件简历 261011 已发送给Boss点击查看附件」——
+    // cardText 只取叶子会丢掉前半句，agent 就看不出「发了什么」。
+    const content = (sender === 'system'
+      ? (bubble.textContent || '').replace(/\s+/g, ' ').trim()
+      : cardText(bubble)
+    ).slice(0, 300)
+    if (!content) continue
     // 卡片类型沿用自动处理时的同一套判据，读和点不会各判一套
     const cardKind = classifyCard(content)
     out.push({ sender, content, kind: 'card', cardKind })
@@ -2502,7 +2507,7 @@ export function countResumeSentMarks(): number {
   // BOSS 发简历成功后的两种系统痕迹（2026-10-20 实测）：
   //   1) 文本：「您的附件简历 xxx 已发送给Boss」
   //   2) 系统卡片链接：「点击查看附件」（新版选择框路径走的是这个）
-  const MARK = /已发送给boss|点击查看附件|查看附件/i
+  const MARK = /已发送给boss|点击查看附件|查看附件|对方已查看.{0,4}附件/i
   return (Array.from(panel.querySelectorAll('*')) as HTMLElement[]).filter((el) => {
     if (el.children.length) return false // 只数叶子，避免父容器重复计数
     const t = (el.textContent || '').replace(/\s/g, '')
