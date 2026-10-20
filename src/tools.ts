@@ -123,14 +123,17 @@ const TOOLS: ToolSpec[] = [
     name: 'click_card',
     description: '点一张待处理卡片的同意/拒绝（kind=resume_request|location_confirm|contact_exchange，accept=bool；同意索要简历时会走完发简历流程）',
     irreversible: true,
-    exampleArgs: { kind: 'resume_request', accept: true, resumeName: '' },
+    exampleArgs: { kind: 'resume_request', accept: true, resumeName: '', resumeIndex: null },
     async run(args) {
       if (needChatPage()) return needChatPage()!
       const kind = str(args, 'kind') as ChatCardKind
       const accept = args.accept !== false
       if (!kind) return { ok: false, error: 'kind_required' }
       // 同意索要简历时可选指定发哪份；不指定则按配置的默认简历
-      const ok = await clickCard(kind, accept, { resumeName: str(args, 'resumeName') || null })
+      const ok = await clickCard(kind, accept, {
+        resumeName: str(args, 'resumeName') || null,
+        resumeIndex: typeof args.resumeIndex === 'number' ? args.resumeIndex : null,
+      })
       return { ok, error: ok ? undefined : 'card_not_found_or_no_button' }
     },
   },
@@ -151,10 +154,11 @@ const TOOLS: ToolSpec[] = [
     name: 'send_resume',
     description: '给当前会话发附件简历（resumeName 可选；不可撤回）',
     irreversible: true,
-    exampleArgs: { resumeName: '' },
+    exampleArgs: { resumeName: '', resumeIndex: null },
     async run(args) {
       if (needChatPage()) return needChatPage()!
-      const ok = await sendResume(str(args, 'resumeName') || null)
+      const idx = typeof args.resumeIndex === 'number' ? args.resumeIndex : null
+      const ok = await sendResume(str(args, 'resumeName') || null, idx)
       return { ok, error: ok ? undefined : 'resume_send_failed' }
     },
   },

@@ -10,6 +10,7 @@ import {
   listPendingCardKinds,
   listResumeOptions,
   readMessages,
+  selectResumeRowByIndex,
   resumeDialogKind,
   selectResumeInDialog,
 } from './boss-chat'
@@ -640,5 +641,51 @@ describe('pending card detection', () => {
     mockRects()
 
     expect(listPendingCardKinds()).toEqual([])
+  })
+})
+
+describe('choose-resume dialog (measured structure)', () => {
+  function setRect(el: Element, w: number, h: number): void {
+    vi.spyOn(el, 'getBoundingClientRect').mockReturnValue({
+      x: 0, y: 0, top: 0, left: 0, right: w, bottom: h, width: w, height: h, toJSON: () => ({}),
+    })
+  }
+
+  function mount(): HTMLElement {
+    document.body.innerHTML = `
+      <div class="dialog-wrap active">
+        <div class="boss-popup__content">
+          <div class="title">请选择要发送的简历</div>
+          <div class="choose-resume-dialog">
+            <div class="resume-row"><span>蔡韬的简历-agent.pdf</span></div>
+            <div class="resume-row"><span>261011.pdf</span></div>
+          </div>
+          <button type="button">发送</button>
+        </div>
+      </div>`
+    for (const el of Array.from(document.querySelectorAll('*'))) setRect(el, 520, 40)
+    setRect(document.querySelector('.dialog-wrap')!, 1462, 836)
+    setRect(document.querySelector('.boss-popup__content')!, 520, 268)
+    setRect(document.querySelector('.choose-resume-dialog')!, 520, 224)
+    return document.querySelector('.boss-popup__content') as HTMLElement
+  }
+
+  it('recognizes the dialog by its choose-resume class (no role, no .pdf in text)', () => {
+    mount()
+    const dialog = findResumeDialog()
+    expect(dialog?.className).toContain('boss-popup__content')
+    expect(resumeDialogKind(dialog!)).toBe('picker')
+    expect(listResumeOptions(dialog!)).toHaveLength(2)
+  })
+
+  it('selects by index when font obfuscation makes names unmatchable', () => {
+    const dialog = mount()
+    const clicks: string[] = []
+    for (const row of Array.from(dialog.querySelectorAll('.resume-row'))) {
+      row.addEventListener('click', () => clicks.push((row.textContent || '').trim()))
+    }
+
+    expect(selectResumeRowByIndex(dialog, 1)).toBe(true)
+    expect(clicks).toEqual(['261011.pdf'])
   })
 })

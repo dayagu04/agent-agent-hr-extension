@@ -1476,7 +1476,7 @@ export function listPendingCardKinds(): Array<{ kind: ChatCardKind; questionLeng
 export async function clickCard(
   kind: ChatCardKind,
   accept: boolean,
-  opts: { resumeName?: string | null } = {},
+  opts: { resumeName?: string | null; resumeIndex?: number | null } = {},
 ): Promise<boolean> {
   const card = findPendingCards().find((c) => c.kind === kind)
   if (!card) {
@@ -1502,7 +1502,7 @@ export async function clickCard(
       (cfg.defaultSendResumeId && cfg.resumeNames
         ? cfg.resumeNames[String(cfg.defaultSendResumeId)] || null
         : null)
-    const sent = await completeResumeSend(target, false, baseline)
+    const sent = await completeResumeSend(target, false, baseline, opts.resumeIndex ?? null)
     diag('CHAT', `card_click resume_send status=${sent ? 'sent' : 'failed'} target=${target ? 'named' : 'none'}`)
     return sent
   }
@@ -1829,6 +1829,20 @@ export function findResumeDialog(): HTMLElement | null {
   // 新版选择框（2026-10 实测）：标题「请选择要发送的简历」+ 附件行（文件名/更新于/大小）
   // + 「管理附件」，没有发送按钮、没有 role=dialog，上面几条规则都认不出。
   // 依次尝试：标题锚点 → 文件名锚点 → 同源 iframe 里的标题锚点。
+  // 实测（2026-10-20 probe_overlays）：索要简历卡片点同意后弹出的选择框是
+  // .dialog-wrap.active > .boss-popup__content > .choose-resume-dialog，
+  // 附件名被字体混淆（DOM 文本里没有 .pdf），所以按文件名找必然失败。
+  const known = Array.from(document.querySelectorAll(
+    '.choose-resume-dialog, [class*="choose-resume"], [class*="chooseResume"]',
+  )) as HTMLElement[]
+  const visibleKnown = known.filter(isVisibleDialog)
+  if (visibleKnown.length === 1) {
+    const el = visibleKnown[0]
+    const container = (el.closest('.boss-popup__content') as HTMLElement | null) || el
+    diag('CHAT', 'resume_dialog via=choose-resume')
+    return container
+  }
+
   const byTitle = findResumePickerByTitle()
   if (byTitle) return byTitle
   const byFiles = findResumePickerByFiles()
@@ -2092,6 +2106,44 @@ export function selectResumeInDialog(dialog: HTMLElement, targetName: string): b
   return false
 }
 
+/** 不依赖文件名的行元素（字体混淆时的兜底） */
+function genericRowEls(dialog: HTMLElement): HTMLElement[] {
+  const NON_ROW = /请选择|发送|取消|确定|关闭|管理附件|上传|在线简历|附件简历/
+  const rows: HTMLElement[] = []
+  for (const el of Array.from(dialog.querySelectorAll('[class*="resume"], [class*="item"], li, [role="radio"], label')) as HTMLElement[]) {
+    if (!isVisibleDialog(el)) continue
+    const r = el.getBoundingClientRect()
+    if (r.height < 36 || r.width < 120) continue
+    const t = (el.textContent || '').replace(/\s+/g, ' ').trim()
+    if (!t || t.length < 4 || t.length > 120) continue
+    if (NON_ROW.test(t)) continue
+    rows.push(el)
+  }
+  // 只留最内层：包住别的行的容器不算一行
+  return rows.filter((r) => !rows.some((o) => o !== r && r.contains(o))).slice(0, 10)
+}
+
+function listRowsGeneric(dialog: HTMLElement): ResumeOption[] {
+  return genericRowEls(dialog).map((row) => ({ name: 'row', ...optionState(row) }))
+}
+
+/** 按序号点选（字体混淆导致名字不可靠时用） */
+export function selectResumeRowByIndex(dialog: HTMLElement, index: number): boolean {
+  const rows = genericRowEls(dialog)
+  const row = rows[index]
+  if (!row) {
+    diag('CHAT', `resume_select status=index_out_of_range index=${index} rows=${rows.length}`)
+    return false
+  }
+  const input = row.querySelector('input[type="radio"], input[type="checkbox"]') as HTMLElement | null
+  if (!optionState(row).selected) {
+    if (input) clickDirect(input)
+    else realClick(row)
+  }
+  diag('CHAT', `resume_select status=clicked_by_index index=${index} rows=${rows.length}`)
+  return true
+}
+
 /** picker 出现未识别的可见必填控件时，不猜字段语义，不继续发送。 */
 function hasUnknownRequiredField(dialog: HTMLElement): boolean {
   const controls = Array.from(dialog.querySelectorAll(
@@ -2168,6 +2220,10 @@ export function listResumeOptions(dialog: HTMLElement): ResumeOption[] {
   if (fileRows.length) {
     return fileRows.map(({ row, name }) => ({ name, ...optionState(row) }))
   }
+  // 附件名被字体混淆时没有 ".pdf" 字样，按结构找行：
+  // 选择框内可见、高度够、文本短、可点击的行，按 DOM 顺序编号。
+  const structural = listRowsGeneric(dialog)
+  if (structural.length) return structural
   const rows = new Map<HTMLElement, string>()
   for (const el of Array.from(dialog.querySelectorAll('*')) as HTMLElement[]) {
     if (el.children.length) continue
@@ -2220,6 +2276,8 @@ export async function completeResumeSend(
   alreadyAgreed = false,
   /** 点「发简历/同意」之前消息区里「已发送给Boss」的条数；传了才能识别「没弹窗直接发出」 */
   sentBaseline: number | null = null,
+  /** 按序号选（附件名被字体混淆、无法按名字匹配时用） */
+  targetIndex: number | null = null,
 ): Promise<boolean> {
   let agreed = alreadyAgreed
   const selectedPickers = new WeakSet<HTMLElement>()
@@ -2259,7 +2317,7 @@ export async function completeResumeSend(
       })
       return false
     }
-    if (kind === 'picker' && !targetName) {
+    if (kind === 'picker' && !targetName && targetIndex === null) {
       // 没指定发哪份：只有一份时可以直接发；多份时 BOSS 的「当前选中」
       // 只是它自己的默认值，不代表用户意图。简历不可撤回，宁可停下交给人工。
       const options = listResumeOptions(dialog)
@@ -2267,6 +2325,12 @@ export async function completeResumeSend(
         diag('CHAT', `resume_send status=ambiguous options=${options.length} target=none`)
         return false
       }
+    }
+    if (kind === 'picker' && targetIndex !== null && !selectedPickers.has(dialog)) {
+      selectedPickers.add(dialog)
+      if (!selectResumeRowByIndex(dialog, targetIndex)) return false
+      await delay(350, 550)
+      continue
     }
     if (kind === 'picker' && targetName && !selectedPickers.has(dialog)) {
       selectedPickers.add(dialog)
@@ -2358,7 +2422,10 @@ export function countResumeSentMarks(): number {
  * @param targetName 要发的简历名（BOSS 弹窗里显示的那份）。不传则用配置的默认简历；
  *                   两者都没有且弹窗里有多份时安全停止，不发 BOSS 预选的那份。
  */
-export async function sendResume(targetName?: string | null): Promise<boolean> {
+export async function sendResume(
+  targetName?: string | null,
+  targetIndex?: number | null,
+): Promise<boolean> {
   const btn = findResumeToolbarButton()
   if (!btn) {
     diag('CHAT', '未找到「发送简历」按钮')
@@ -2374,7 +2441,9 @@ export async function sendResume(targetName?: string | null): Promise<boolean> {
   realClick(btn)
   await delay(1200, 1800)
 
-  if (targetName) return completeResumeSend(targetName, false, baseline)
+  if (targetName || targetIndex != null) {
+    return completeResumeSend(targetName || null, false, baseline, targetIndex ?? null)
+  }
   const cfg = loadConfig()
   const configured =
     cfg.defaultSendResumeId && cfg.resumeNames
