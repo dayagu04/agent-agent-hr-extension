@@ -2,7 +2,8 @@ import { describe, expect, it, vi } from 'vitest'
 
 vi.mock('./logger', () => ({ diag: vi.fn() }))
 vi.mock('./platforms/boss-chat', () => ({
-  listThreads: vi.fn(() => [{ company: 'A', jobTitle: 'B', name: 'HR', unread: true, bossId: 'x', el: {} }]),
+  listThreads: vi.fn(() => [{ company: 'A人事经理', jobTitle: '', name: 'HR', unread: true, bossId: 'x', el: {} }]),
+  readRowJobInfo: vi.fn(() => ({ title: 'B', salary: '11-18K', jobId: 'j1', brandName: 'A', hrName: '朱先生' })),
   readMessages: vi.fn(async () => [{ sender: 'hr', content: 'hi' }]),
   currentThreadInfo: vi.fn(() => ({ company: 'A', jobTitle: 'B', salary: '', city: '' })),
   onChatPage: vi.fn(() => true),
@@ -131,9 +132,13 @@ describe('job id lookup tolerance', () => {
 })
 
 describe('tool results must be JSON-serializable', () => {
-  it('list_threads strips DOM references', async () => {
+  it('list_threads strips DOM references and prefers the row Vue data', async () => {
     const r = await callTool('list_threads', {})
     expect(() => JSON.stringify(r)).not.toThrow()
-    expect(r.data).toEqual([{ company: 'A', jobTitle: 'B', name: 'HR', unread: true, bossId: 'x' }])
+    // 公司/岗位来自行组件数据，不再用 DOM 里「公司+HR职务」的拼接文本
+    expect(r.data).toEqual([{
+      hrName: '朱先生', company: 'A', jobTitle: 'B', salary: '11-18K', jobId: 'j1',
+      unread: true, bossId: 'x',
+    }])
   })
 })

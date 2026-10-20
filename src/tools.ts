@@ -19,6 +19,7 @@ import {
   onChatPage,
   openThread,
   readMessages,
+  readRowJobInfo,
   sendMessageText,
   sendResumeDetailed,
   type ChatCardKind,
@@ -81,13 +82,23 @@ const TOOLS: ToolSpec[] = [
       if (needChatPage()) return needChatPage()!
       // listThreads 的每项带 el（DOM 节点），直接回传会 JSON 序列化失败，
       // 导致 tool result 上传失败、agent 拿不到结果。只回纯数据字段。
-      const threads = listThreads().map((t) => ({
-        company: t.company,
-        jobTitle: t.jobTitle,
-        name: t.name,
-        unread: t.unread,
-        bossId: t.bossId,
-      }))
+      //
+      // 字段来源有讲究：列表 DOM 只把「公司 + HR 职务」拼在一起
+      // （实测 company="卓越际联科技有限公司人事经理"），岗位名/薪资取不到。
+      // 行组件的 Vue boss 对象里有干净的 company/positionName/salary，
+      // 与聊天页「无感回填岗位名」用的是同一个 readRowJobInfo。
+      const threads = listThreads().map((t) => {
+        const info = readRowJobInfo(t.el)
+        return {
+          hrName: info.hrName || t.name,
+          company: info.brandName || t.company,
+          jobTitle: info.title || t.jobTitle,
+          salary: info.salary || '',
+          jobId: info.jobId || '',
+          unread: t.unread,
+          bossId: t.bossId || '',
+        }
+      })
       return { ok: true, data: threads }
     },
   },
