@@ -1,6 +1,6 @@
 {
   "name": "agent-agent-hr-tampermonkey",
-  "version": "0.6.35",
+  "version": "0.6.36",
   "description": "社招四平台自动投递油猴插件（BOSS/智联/猎聘/51前程无忧）",
   "type": "module",
   "scripts": {

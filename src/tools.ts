@@ -121,15 +121,16 @@ const TOOLS: ToolSpec[] = [
   },
   {
     name: 'click_card',
-    description: '点一张待处理卡片的同意/拒绝（kind=resume_request|location_confirm|contact_exchange，accept=bool）',
+    description: '点一张待处理卡片的同意/拒绝（kind=resume_request|location_confirm|contact_exchange，accept=bool；同意索要简历时会走完发简历流程）',
     irreversible: true,
-    exampleArgs: { kind: 'resume_request', accept: true },
+    exampleArgs: { kind: 'resume_request', accept: true, resumeName: '' },
     async run(args) {
       if (needChatPage()) return needChatPage()!
       const kind = str(args, 'kind') as ChatCardKind
       const accept = args.accept !== false
       if (!kind) return { ok: false, error: 'kind_required' }
-      const ok = await clickCard(kind, accept)
+      // 同意索要简历时可选指定发哪份；不指定则按配置的默认简历
+      const ok = await clickCard(kind, accept, { resumeName: str(args, 'resumeName') || null })
       return { ok, error: ok ? undefined : 'card_not_found_or_no_button' }
     },
   },

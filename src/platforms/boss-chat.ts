@@ -1466,7 +1466,11 @@ export function listPendingCardKinds(): Array<{ kind: ChatCardKind; questionLeng
  * 不套用本地策略：回不回、同不同意由 agent 决策；这里只负责执行并记账，
  * 点击前打 handled 标记，避免同一张卡重复点。
  */
-export async function clickCard(kind: ChatCardKind, accept: boolean): Promise<boolean> {
+export async function clickCard(
+  kind: ChatCardKind,
+  accept: boolean,
+  opts: { resumeName?: string | null } = {},
+): Promise<boolean> {
   const card = findPendingCards().find((c) => c.kind === kind)
   if (!card) {
     diag('CHAT', `card_click status=not_found kind=${kind}`)
@@ -1478,8 +1482,23 @@ export async function clickCard(kind: ChatCardKind, accept: boolean): Promise<bo
     return false
   }
   markCardHandled(card)
+  // 同意「索要简历」后 BOSS 会弹选择框（多份附件）或直接发出（一份），
+  // 少了这一步只完成「点按钮」，简历并不会真的发出去。
+  const baseline = kind === 'resume_request' && accept ? countResumeSentMarks() : null
   const hit = realClick(btn)
   diag('CHAT', `card_click status=clicked kind=${kind} accept=${accept} hit=${hit}`)
+  if (kind === 'resume_request' && accept) {
+    await delay(1200, 2000)
+    const cfg = loadConfig()
+    const target =
+      opts.resumeName ||
+      (cfg.defaultSendResumeId && cfg.resumeNames
+        ? cfg.resumeNames[String(cfg.defaultSendResumeId)] || null
+        : null)
+    const sent = await completeResumeSend(target, false, baseline)
+    diag('CHAT', `card_click resume_send status=${sent ? 'sent' : 'failed'} target=${target ? 'named' : 'none'}`)
+    return sent
+  }
   return true
 }
 
