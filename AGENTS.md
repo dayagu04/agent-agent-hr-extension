@@ -123,10 +123,12 @@ tool name=delete_thread status=error ms=120 error=not-found
 | `read_messages` | — | | 读当前会话消息（含卡片类型） |
 | `list_pending_cards` | — | | 列出待处理卡片 |
 | `open_thread` | `company`, `jobTitle?` | | 打开指定会话 |
-| `click_card` | `kind`, `accept` | ✓ | 点卡片同意/拒绝 |
+| `click_card` | `kind`, `accept`, `resumeName?`, `resumeIndex?` | ✓ | 点卡片同意/拒绝；同意索要简历时走完发送 |
 | `send_message` | `text` | ✓ | 给当前会话发文本 |
-| `send_resume` | `resumeName?` | ✓ | 发附件简历 |
+| `send_resume` | `resumeName?`, `resumeIndex?` | ✓ | 发附件简历；失败返回具体原因码 |
 | `delete_thread` | `company`, `jobTitle?` | ✓ | 删除会话 |
+| `probe_overlays` | — | | 读可见浮层结构（排障用） |
+| `probe_dom` | `selector`, `depth?` | | 读指定选择器的 DOM 结构（排障用） |
 | `list_tools` | — | | 列出工具清单 |
 
 ## 8. 完整链路的工具覆盖
@@ -136,14 +138,28 @@ tool name=delete_thread status=error ms=120 error=not-found
 | 搜岗位（关键词/城市/翻页） | `open_search` + `scan_jobs` | 已验证（scan 300 条上限） |
 | 选筛选条件（城市/类型/薪资/经验…） | `read_filters` + `select_filters` | 已验证（工作经验=3-5年 → URL 出现 experience） |
 | 取岗位数据（公司/岗位/JD/薪资/地点） | `scan_jobs`（`withDetail`）、`read_job_detail` | 字段齐；JD 读取待实测覆盖率 |
-| 投递（点立即沟通 + 打招呼 + 记账） | `apply_job` | 待实测 |
-| 读会话与消息分类 | `list_threads`、`read_messages` | 已验证 |
-| 处理 HR 卡片（要简历/地点/联系方式） | `list_pending_cards` + `click_card` | 待实测 |
-| 发消息 / 发简历 / 删会话 | `send_message`、`send_resume`、`delete_thread` | 发简历已验证；发消息、删会话待实测 |
+| 投递（点立即沟通 + 打招呼 + 记账） | `apply_job` | 已验证（非计算机岗位真实投递并记账） |
+| 读会话与消息分类 | `list_threads`、`read_messages` | 已验证（含系统消息全文） |
+| 处理 HR 卡片（要简历/地点/联系方式） | `list_pending_cards` + `click_card` | 已验证（索要简历卡片 → 真实发出简历） |
+| 发消息 | `send_message` | 已验证（真实发到 HR 会话） |
+| 发简历 | `send_resume`、`click_card` | 已验证（BOSS 出现「点击查看附件」系统卡片）；失败原因码已细分 |
+| 删会话 | `delete_thread` | 未验证（会真实删除 BOSS 会话，需指定一条可删的） |
 
 判定「封装完成」的标准：agent 只靠工具 + `/tools/result` 就能完成该环节，不依赖页面手动操作。
 
-## 9. 筛选点击参考实现（按实测定，不靠猜）
+## 9. BOSS 页面的真实标记（2026-10-20 实测，别再猜）
+
+| 状态 | 页面特征 |
+|---|---|
+| 卡片已处理 | 卡片按钮被禁用：`span.card-btn.disabled` / `span.btn-v2.disabled`（不是靠消息文字判断） |
+| 简历已发出 | 系统消息全文「您的附件简历 xxx 已发送给Boss点击查看附件」；或系统卡片链接「点击查看附件」；或「对方已查看了您的附件简历」 |
+| 简历选择框 | `.boss-popup__content > .boss-dialog__body > .choose-resume-dialog`；选项 `ul.resume-list > li.list-item[.selected]`；发送 `button.btn-v2.btn-sure-v2` |
+| 工具栏发简历不可用 | `.toolbar-btn.tooltip.unable`（BOSS 未允许时），此时必须走 HR 卡片的「同意」 |
+| 离屏副本 | BOSS 保留一份视口外的 `.choose-resume-dialog`，宽高正常、位置在外，必须用 `inViewport` 过滤 |
+
+判定卡片状态一律看按钮禁用态；判定发送成功一律看上述系统痕迹，并与发送前基线比较。
+
+## 10. 筛选点击参考实现（按实测定，不靠猜）
 
 实测（2026-10-20）：筛选区各选项**没有 href**，只能点。交互是「点分组 → 弹面板 → 点具体项」。
 
