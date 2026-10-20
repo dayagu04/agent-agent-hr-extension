@@ -386,6 +386,8 @@ const TOOLS: ToolSpec[] = [
         if (disabled || /disabled|is-disabled|unable/i.test(String((el as HTMLElement).className || ''))) {
           node.disabled = true
         }
+        const rect = el.getBoundingClientRect()
+        node.rect = [Math.round(rect.left), Math.round(rect.top), Math.round(rect.width), Math.round(rect.height)]
         node.textLen = (el.textContent || '').replace(/\s/g, '').length
         const t = shortText(el)
         if (t) node.text = t

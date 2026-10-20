@@ -1786,6 +1786,14 @@ function compactText(el: Element): string {
   return (el.textContent || '').replace(/\s+/g, '')
 }
 
+/** 元素是否真的在视口内（离屏副本宽高正常，只有位置能区分） */
+function inViewport(el: HTMLElement): boolean {
+  const r = el.getBoundingClientRect()
+  return r.width > 0 && r.height > 0 &&
+    r.right > 0 && r.bottom > 0 &&
+    r.left < window.innerWidth && r.top < window.innerHeight
+}
+
 function isVisibleDialog(el: HTMLElement): boolean {
   if (el.hidden || el.getAttribute('aria-hidden') === 'true') return false
   const style = getComputedStyle(el)
@@ -2235,6 +2243,9 @@ function findChooseResumeDialog(): HTMLElement | null {
   const cands = (Array.from(document.querySelectorAll('.choose-resume-dialog')) as HTMLElement[])
     .filter((el) => !el.closest('.aah-root') && isVisibleDialog(el))
     .filter((el) => el.querySelectorAll('li.list-item').length > 0)
+    // BOSS 会保留一份离屏副本（宽高都正常，但 left/top 在视口外）。
+    // 点到副本等于没点 —— 只留真正在视口里的那一份。
+    .filter(inViewport)
   if (!cands.length) return null
   const withSelected = cands.filter((el) => el.querySelector('li.list-item.selected'))
   const pick = withSelected[0] || cands[cands.length - 1]
