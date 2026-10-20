@@ -19,6 +19,7 @@ import {
   onChatPage,
   openThread,
   readMessages,
+  probeRowObject,
   readRowJobInfo,
   sendMessageText,
   sendResumeDetailed,
@@ -418,6 +419,24 @@ const TOOLS: ToolSpec[] = [
       }
       const roots = Array.from(document.querySelectorAll(sel)).slice(0, 8)
       return { ok: roots.length > 0, data: { selector: sel, count: roots.length, nodes: roots.map((r) => walk(r, depth)) } }
+    },
+  },
+  {
+    name: 'probe_row',
+    description: '读某一会话行的组件数据结构（键名与短字符串值），用于适配岗位名/薪资字段',
+    exampleArgs: { company: '' },
+    async run(args) {
+      if (needChatPage()) return needChatPage()!
+      const company = str(args, 'company')
+      const rows = listThreads()
+      if (!rows.length) return { ok: false, error: 'no_rows' }
+      const target = company
+        ? rows.find((t) => (t.company || '').includes(company) || (t.name || '').includes(company))
+        : rows[0]
+      if (!target) return { ok: false, error: 'row_not_found' }
+      const info = probeRowObject(target.el)
+      if (!info) return { ok: false, error: 'no_vue_object' }
+      return { ok: true, data: { row: { company: target.company, name: target.name }, ...info } }
     },
   },
   {

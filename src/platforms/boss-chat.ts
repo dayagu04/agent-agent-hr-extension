@@ -355,6 +355,42 @@ export function readRowJobInfo(li: HTMLElement): {
   return { title: '', salary: '', jobId: '', brandName: '', hrName: '' }
 }
 
+/**
+ * 读取某一行的 boss 对象结构（键名 + 短字符串值），供工具 probe_row 使用。
+ * 只用于开发期适配，不参与业务逻辑。
+ */
+export function probeRowObject(li: HTMLElement): {
+  path: string
+  keys: string[]
+  strings: Array<{ key: string; len: number; value: string }>
+} | null {
+  const hosts = [
+    li.querySelector('.gray.last-msg'),
+    li.querySelector('.last-msg'),
+    li.querySelector('.friend-content'),
+    li,
+  ].filter(Boolean) as HTMLElement[]
+  for (const host of hosts) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const vm = (host as any).__vue__
+    if (!vm) continue
+    const boss = findBossObject(vm)
+    if (!boss?.obj) continue
+    const obj = boss.obj as Record<string, unknown>
+    const strings: Array<{ key: string; len: number; value: string }> = []
+    for (const [k, v] of Object.entries(obj)) {
+      if (typeof v !== 'string' || !v.trim() || v.length > 60) continue
+      strings.push({ key: k, len: v.length, value: v.trim() })
+    }
+    return {
+      path: boss.path,
+      keys: Object.keys(obj).filter((k) => !k.startsWith('_')).slice(0, 40),
+      strings,
+    }
+  }
+  return null
+}
+
 /** 页面加载内只 dump 一次 boss 对象键 */
 let dumpedBossKeys = false
 
