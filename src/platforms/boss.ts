@@ -201,6 +201,28 @@ export class BossPlatform extends BasePlatform {
     return (clone.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 4000)
   }
 
+  /**
+   * 读指定岗位的 JD 全文（只切换详情面板，不点「立即沟通」）。
+   * 供 agent 的 read_job_detail 工具使用。
+   */
+  async readJobDetail(card: JobCard): Promise<string> {
+    const el = card.cardElement
+    const clickTarget =
+      (el?.querySelector('a, .job-name, .job-title') as HTMLElement | null) || el || null
+    if (!clickTarget) return ''
+    clickTarget.scrollIntoView({ block: 'center' })
+    await this.delay(250, 450)
+    clickTarget.click()
+    let jd = ''
+    for (let i = 0; i < 10; i++) {
+      await this.delay(220, 300)
+      jd = this.readDetailJd()
+      if (jd.length > 80) break
+    }
+    diag('BOSS', `read_job_detail id=${card.platformJobId ? 'ok' : '-'} jdLen=${jd.length}`)
+    return jd
+  }
+
   /** 逐个打开详情读 JD；失败不影响投递，按读取数量记日志。 */
   private async fillJobDetails(jobs: JobCard[]): Promise<void> {
     let ok = 0

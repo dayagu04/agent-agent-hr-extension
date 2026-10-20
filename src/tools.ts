@@ -25,6 +25,9 @@ import {
 } from './platforms/boss-chat'
 import { readSearchFilters, selectSearchFilter } from './search-filters'
 import { detectPlatform } from './platforms/factory'
+import { loadConfig } from './config'
+import { fetchGreeting, recordApplication } from './api'
+import type { ApplyOutcome } from './types'
 
 export interface ToolResult {
   ok: boolean
@@ -194,6 +197,98 @@ const TOOLS: ToolSpec[] = [
         results.push(await selectSearchFilter(group, option))
       }
       return { ok: results.every((r) => r.status === 'ok'), data: results }
+    },
+  },
+  {
+    name: 'get_page_state',
+    description: '当前页面状态：网址、是否聊天页、当前打开会话（公司/岗位/薪资/城市）',
+    async run() {
+      const chat = onChatPage()
+      return {
+        ok: true,
+        data: {
+          url: location.href,
+          path: location.pathname,
+          chat,
+          thread: chat ? currentThreadInfo() : null,
+        },
+      }
+    },
+  },
+  {
+    name: 'open_search',
+    description: '打开职位搜索页（keyword 必填，cityCode 可选；保留当前筛选条件；会跳转页面）',
+    exampleArgs: { keyword: '', cityCode: '' },
+    async run(args) {
+      const keyword = str(args, 'keyword')
+      if (!keyword) return { ok: false, error: 'keyword_required' }
+      if (!/zhipin\.com/.test(location.hostname)) return { ok: false, error: 'platform_not_supported' }
+      const params = new URLSearchParams(location.search)
+      params.delete('page')
+      params.set('query', keyword)
+      const city = str(args, 'cityCode')
+      if (city) params.set('city', city)
+      const page = Number(args.page)
+      if (Number.isFinite(page) && page > 1) params.set('page', String(Math.floor(page)))
+      const url = `https://www.zhipin.com/web/geek/jobs?${params.toString()}`
+      // 先让调用方把结果回传成功，再跳转（跳转会销毁当前 JS 上下文）
+      setTimeout(() => location.assign(url), 800)
+      return { ok: true, data: { url } }
+    },
+  },
+  {
+    name: 'read_job_detail',
+    description: '读指定岗位的 JD 全文（只切换详情面板，不投递）',
+    exampleArgs: { jobId: '' },
+    async run(args) {
+      const jobId = str(args, 'jobId')
+      if (!jobId) return { ok: false, error: 'jobId_required' }
+      const platform = detectPlatform()
+      if (!platform) return { ok: false, error: 'platform_not_supported' }
+      const jobs = await platform.scanJobs()
+      const card = jobs.find((j) => j.platformJobId === jobId)
+      if (!card) return { ok: false, error: 'job_not_found' }
+      const reader = (platform as unknown as { readJobDetail?: (c: typeof card) => Promise<string> })
+        .readJobDetail
+      if (typeof reader !== 'function') return { ok: false, error: 'not_supported' }
+      const jd = await reader.call(platform, card)
+      return { ok: jd.length > 0, data: { jobId, jd, jdLength: jd.length }, error: jd ? undefined : 'jd_empty' }
+    },
+  },
+  {
+    name: 'apply_job',
+    description: '对指定岗位点「立即沟通」投递（jobId 必填，不可撤回；会记账）',
+    irreversible: true,
+    exampleArgs: { jobId: '' },
+    async run(args) {
+      const jobId = str(args, 'jobId')
+      if (!jobId) return { ok: false, error: 'jobId_required' }
+      const platform = detectPlatform()
+      if (!platform) return { ok: false, error: 'platform_not_supported' }
+      const jobs = await platform.scanJobs()
+      const card = jobs.find((j) => j.platformJobId === jobId)
+      if (!card) return { ok: false, error: 'job_not_found' }
+      const cfg = loadConfig()
+      const raw = await platform.applyJob(card, {
+        getGreeting: () => fetchGreeting(cfg, platform.code, card),
+      })
+      const res = typeof raw === 'boolean'
+        ? { outcome: (raw ? 'applied' : 'failed') as ApplyOutcome, message: '', greetingSent: false, alreadyApplied: false }
+        : raw
+      const outcome = (res.alreadyApplied ? 'applied' : res.outcome) as ApplyOutcome
+      try {
+        await recordApplication(
+          cfg, platform.code, card, 0, outcome, res.message || '', !!res.greetingSent,
+          '', new URLSearchParams(location.search).get('query') || '',
+        )
+      } catch (e) {
+        diag('TOOL', `apply_job record status=error error=${(e as Error).name || 'Error'}`)
+      }
+      return {
+        ok: outcome !== 'failed',
+        data: { jobId, outcome, messageLength: (res.message || '').length, greetingSent: !!res.greetingSent },
+        error: outcome === 'failed' ? 'apply_failed' : undefined,
+      }
     },
   },
   {

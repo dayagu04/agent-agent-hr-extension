@@ -14,6 +14,8 @@ vi.mock('./platforms/boss-chat', () => ({
   deleteThread: vi.fn(async () => 'ok'),
 }))
 vi.mock('./platforms/factory', () => ({ detectPlatform: vi.fn(() => null) }))
+vi.mock('./config', () => ({ loadConfig: vi.fn(() => ({})) }))
+vi.mock('./api', () => ({ fetchGreeting: vi.fn(async () => ''), recordApplication: vi.fn(async () => ({})) }))
 
 import { diag } from './logger'
 import { callTool, toolCatalog } from './tools'
@@ -25,6 +27,7 @@ describe('agent tools', () => {
     expect(names).toEqual(expect.arrayContaining([
       'read_messages', 'send_message', 'send_resume', 'click_card', 'delete_thread', 'scan_jobs',
       'read_filters', 'select_filters', 'list_tools',
+      'get_page_state', 'open_search', 'read_job_detail', 'apply_job',
     ]))
     expect(toolCatalog().find((t) => t.name === 'send_message')?.irreversible).toBe(true)
     expect(toolCatalog().find((t) => t.name === 'read_messages')?.irreversible).toBe(false)
@@ -50,5 +53,28 @@ describe('agent tools', () => {
     expect(line).toContain('name=read_messages status=ok')
     expect(line).toContain('messages=1')
     expect(line).not.toContain('hi')
+  })
+})
+
+describe('chain tools', () => {
+  it('reports the current page state and open thread', async () => {
+    const r = await callTool('get_page_state', {})
+    expect(r.ok).toBe(true)
+    expect(r.data).toMatchObject({ chat: true, thread: { company: 'A', jobTitle: 'B' } })
+  })
+
+  it('requires a keyword before navigating to search', async () => {
+    const r = await callTool('open_search', {})
+    expect(r).toEqual({ ok: false, error: 'keyword_required' })
+  })
+
+  it('refuses to read a job detail without a supported platform', async () => {
+    const r = await callTool('read_job_detail', { jobId: 'x' })
+    expect(r).toEqual({ ok: false, error: 'platform_not_supported' })
+  })
+
+  it('requires a job id before applying', async () => {
+    const r = await callTool('apply_job', {})
+    expect(r).toEqual({ ok: false, error: 'jobId_required' })
   })
 })

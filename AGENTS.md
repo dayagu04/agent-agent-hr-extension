@@ -3,6 +3,32 @@
 本文件是插件「工具层」的规范。新增任何面向 agent 的页面能力，都必须按这里的模板做，
 不要另起一套。分支与提交规范见 [CONTRIBUTING.md](./CONTRIBUTING.md)。
 
+## 0. 开发与验证方式（插件常驻，直接调接口）
+
+插件在浏览器里保持启用即可。开发者和 agent **不需要**在页面上手动点按钮：
+
+```bash
+# 1) 登录本地服务端拿 token（本地测试账号）
+TOKEN=$(curl -s -X POST http://127.0.0.1:8010/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"test@local.dev","password":"test1234"}' | jq -r .token)
+
+# 2) 调一个工具（插件下次心跳取走执行）
+curl -s -X POST http://127.0.0.1:8010/api/plugin/tools/call \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name":"read_filters","args":{}}'
+# → {"queued":true,"command_id":16,...}
+
+# 3) 取结果（插件执行完回传）
+curl -s http://127.0.0.1:8010/api/plugin/tools/result/16 -H "Authorization: Bearer $TOKEN"
+```
+
+- 结果默认保留 10 分钟、上限 200 条、超过 200KB 截断；日志 `logs/plugin/YYYY-MM-DD.log` 只有摘要。
+- **读页面结构也用工具**，不要指望 DevTools（BOSS 会因开 F12 关页）：
+  `get_page_state`（当前网址/是否聊天页/当前会话）、`read_filters`（筛选分组与选项）、
+  `scan_jobs`（岗位字段）、`list_threads` / `read_messages`（会话与消息分类）。
+- 插件在页面上必须处于启用状态；心跳约 1 秒一次，命令最迟 1~2 秒被消费。
+
 ## 1. 什么是工具
 
 工具 = **一件页面原子操作**（读一次消息、发一条消息、点一次筛选项……），
@@ -84,22 +110,40 @@ tool name=delete_thread status=error ms=120 error=not-found
 
 ## 7. 现有工具（以此为准）
 
-| 工具 | 参数 | 不可撤回 |
-|---|---|---|
-| `list_threads` | — | |
-| `read_messages` | — | |
-| `list_pending_cards` | — | |
-| `open_thread` | `company`, `jobTitle?` | |
-| `click_card` | `kind`, `accept` | ✓ |
-| `send_message` | `text` | ✓ |
-| `send_resume` | `resumeName?` | ✓ |
-| `delete_thread` | `company`, `jobTitle?` | ✓ |
-| `scan_jobs` | `withDetail?` | |
-| `read_filters` | — | |
-| `select_filters` | `filters: [{group, option}]` | ✓ |
-| `list_tools` | — | |
+| 工具 | 参数 | 不可撤回 | 说明 |
+|---|---|---|---|
+| `get_page_state` | — | | 当前网址、是否聊天页、当前打开会话 |
+| `open_search` | `keyword`, `cityCode?`, `page?` | | 打开职位搜索页（保留当前筛选） |
+| `scan_jobs` | `withDetail?` | | 扫描岗位；`withDetail=true` 连 JD 一起读 |
+| `read_job_detail` | `jobId` | | 读指定岗位 JD 全文（只切详情，不投递） |
+| `apply_job` | `jobId` | ✓ | 对指定岗位点「立即沟通」并记账 |
+| `read_filters` | — | | 读筛选分组/选项/当前选中 |
+| `select_filters` | `filters: [{group, option}]` | ✓ | 点选筛选项 |
+| `list_threads` | — | | 列出会话 |
+| `read_messages` | — | | 读当前会话消息（含卡片类型） |
+| `list_pending_cards` | — | | 列出待处理卡片 |
+| `open_thread` | `company`, `jobTitle?` | | 打开指定会话 |
+| `click_card` | `kind`, `accept` | ✓ | 点卡片同意/拒绝 |
+| `send_message` | `text` | ✓ | 给当前会话发文本 |
+| `send_resume` | `resumeName?` | ✓ | 发附件简历 |
+| `delete_thread` | `company`, `jobTitle?` | ✓ | 删除会话 |
+| `list_tools` | — | | 列出工具清单 |
 
-## 8. 筛选点击参考实现（按实测定，不靠猜）
+## 8. 完整链路的工具覆盖
+
+| 链路环节 | 工具 | 状态 |
+|---|---|---|
+| 搜岗位（关键词/城市/翻页） | `open_search` + `scan_jobs` | 已验证（scan 300 条上限） |
+| 选筛选条件（城市/类型/薪资/经验…） | `read_filters` + `select_filters` | 已验证（工作经验=3-5年 → URL 出现 experience） |
+| 取岗位数据（公司/岗位/JD/薪资/地点） | `scan_jobs`（`withDetail`）、`read_job_detail` | 字段齐；JD 读取待实测覆盖率 |
+| 投递（点立即沟通 + 打招呼 + 记账） | `apply_job` | 待实测 |
+| 读会话与消息分类 | `list_threads`、`read_messages` | 已验证 |
+| 处理 HR 卡片（要简历/地点/联系方式） | `list_pending_cards` + `click_card` | 待实测 |
+| 发消息 / 发简历 / 删会话 | `send_message`、`send_resume`、`delete_thread` | 发简历已验证；发消息、删会话待实测 |
+
+判定「封装完成」的标准：agent 只靠工具 + `/tools/result` 就能完成该环节，不依赖页面手动操作。
+
+## 9. 筛选点击参考实现（按实测定，不靠猜）
 
 实测（2026-10-20）：筛选区各选项**没有 href**，只能点。交互是「点分组 → 弹面板 → 点具体项」。
 
