@@ -37,6 +37,8 @@ export interface ToolSpec {
   description: string
   /** true = 会在页面上产生不可撤回的副作用 */
   irreversible?: boolean
+  /** 测试面板里预填的参数示例（也是参数规范的可执行版本） */
+  exampleArgs?: Record<string, unknown>
   run(args: Record<string, unknown>): Promise<ToolResult>
 }
 
@@ -81,6 +83,7 @@ const TOOLS: ToolSpec[] = [
   {
     name: 'open_thread',
     description: '打开指定会话（公司名必填，岗位名可选）',
+    exampleArgs: { company: '', jobTitle: '' },
     async run(args) {
       if (needChatPage()) return needChatPage()!
       const company = str(args, 'company')
@@ -93,6 +96,7 @@ const TOOLS: ToolSpec[] = [
     name: 'click_card',
     description: '点一张待处理卡片的同意/拒绝（kind=resume_request|location_confirm|contact_exchange，accept=bool）',
     irreversible: true,
+    exampleArgs: { kind: 'resume_request', accept: true },
     async run(args) {
       if (needChatPage()) return needChatPage()!
       const kind = str(args, 'kind') as ChatCardKind
@@ -106,6 +110,7 @@ const TOOLS: ToolSpec[] = [
     name: 'send_message',
     description: '给当前会话发一条文本（不可撤回）',
     irreversible: true,
+    exampleArgs: { text: '' },
     async run(args) {
       if (needChatPage()) return needChatPage()!
       const text = str(args, 'text')
@@ -118,6 +123,7 @@ const TOOLS: ToolSpec[] = [
     name: 'send_resume',
     description: '给当前会话发附件简历（resumeName 可选；不可撤回）',
     irreversible: true,
+    exampleArgs: { resumeName: '' },
     async run(args) {
       if (needChatPage()) return needChatPage()!
       const ok = await sendResume(str(args, 'resumeName') || null)
@@ -128,6 +134,7 @@ const TOOLS: ToolSpec[] = [
     name: 'delete_thread',
     description: '删除指定会话（company 必填；不可撤回）',
     irreversible: true,
+    exampleArgs: { company: '', jobTitle: '' },
     async run(args) {
       if (needChatPage()) return needChatPage()!
       const company = str(args, 'company')
@@ -139,6 +146,7 @@ const TOOLS: ToolSpec[] = [
   {
     name: 'scan_jobs',
     description: '扫描当前职位列表页的岗位（只读；withDetail=true 时读 JD，较慢）',
+    exampleArgs: { withDetail: false },
     async run(args) {
       const platform = detectPlatform()
       if (!platform) return { ok: false, error: 'platform_not_supported' }
@@ -173,6 +181,7 @@ const TOOLS: ToolSpec[] = [
     name: 'select_filters',
     description: '按「分组 → 选项」点选筛选项（如 工作经验=3-5年），可传多个',
     irreversible: true,
+    exampleArgs: { filters: [{ group: '工作经验', option: '3-5年' }] },
     async run(args) {
       const list = Array.isArray(args.filters) ? args.filters : []
       if (!list.length) return { ok: false, error: 'filters_required' }
@@ -198,6 +207,21 @@ const TOOLS: ToolSpec[] = [
 
 export function toolCatalog(): Array<{ name: string; description: string; irreversible: boolean }> {
   return TOOLS.map((t) => ({ name: t.name, description: t.description, irreversible: !!t.irreversible }))
+}
+
+/** 工具的完整定义（测试面板用：带参数示例） */
+export function toolSpecs(): Array<{
+  name: string
+  description: string
+  irreversible: boolean
+  exampleArgs: Record<string, unknown>
+}> {
+  return TOOLS.map((t) => ({
+    name: t.name,
+    description: t.description,
+    irreversible: !!t.irreversible,
+    exampleArgs: t.exampleArgs || {},
+  }))
 }
 
 /** 执行一个工具。未知工具直接报错，不猜。 */

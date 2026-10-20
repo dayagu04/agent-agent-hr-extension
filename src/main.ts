@@ -1,6 +1,7 @@
 // 油猴脚本入口 —— 注入 Vue 悬浮面板到招聘平台页面
 import { createApp } from 'vue'
 import App from './App.vue'
+import TestPanel from './TestPanel.vue'
 import { startRemoteLoop } from './remote'
 
 function mount() {
@@ -9,6 +10,12 @@ function mount() {
   host.id = 'aah-plugin-root'
   document.body.appendChild(host)
   createApp(App).mount(host)
+
+  // 独立测试面板：左下角「测」入口，与业务面板互不影响，可整体关闭
+  const testHost = document.createElement('div')
+  testHost.id = 'aah-test-host'
+  document.body.appendChild(testHost)
+  createApp(TestPanel).mount(testHost)
 }
 
 // 等页面加载完成再挂载（SPA 平台可能延迟渲染）
