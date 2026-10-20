@@ -7,6 +7,7 @@ import {
   findResumeDialog,
   isActionCardAllowed,
   isContactCardAllowed,
+  listPendingCardKinds,
   listResumeOptions,
   readMessages,
   resumeDialogKind,
@@ -596,5 +597,48 @@ describe('BOSS message reading', () => {
     // 卡片正文里不该混进按钮文字
     expect(msgs[0].content).toBe('我想要一份您的附件简历，您是否同意')
     expect(msgs[1].content).toBe('您是否接受此工作地点：合肥')
+  })
+})
+
+describe('pending card detection', () => {
+  function box(top: number, height = 60) {
+    return {
+      x: 0, y: top, top, left: 0, right: 400, bottom: top + height,
+      width: 400, height, toJSON: () => ({}),
+    }
+  }
+
+  function mockRects(): void {
+    for (const el of Array.from(document.querySelectorAll('*')) as HTMLElement[]) {
+      // 卡片在上、系统/我方消息在下，模拟真实消息流的位置关系
+      const top = el.closest('.item-system, .item-myself') ? 200 : 0
+      vi.spyOn(el, 'getBoundingClientRect').mockReturnValue(box(top))
+    }
+    vi.spyOn(document.querySelector('.chat-conversation')!, 'getBoundingClientRect').mockReturnValue({
+      ...box(0, 800), right: 800, width: 800,
+    })
+  }
+
+  it('keeps a resume card pending even after we send a plain text reply below it', () => {
+    // 实测 bug：我方回一句话后，卡片被误判成已答过，agent 再也点不到
+    document.body.innerHTML = `
+      <div class="chat-conversation">
+        <div class="item-friend"><div class="card"><p>我想要一份您的附件简历，您是否同意</p><button>拒绝</button><button>同意</button></div></div>
+        <div class="item-myself"><span class="text-content">您好，可以聊聊</span></div>
+      </div>`
+    mockRects()
+
+    expect(listPendingCardKinds().map((c) => c.kind)).toEqual(['resume_request'])
+  })
+
+  it('treats the card as answered once BOSS shows the resume was sent', () => {
+    document.body.innerHTML = `
+      <div class="chat-conversation">
+        <div class="item-friend"><div class="card"><p>我想要一份您的附件简历，您是否同意</p><button>拒绝</button><button>同意</button></div></div>
+        <div class="item-system"><span>您的附件简历 261011 已发送给Boss</span></div>
+      </div>`
+    mockRects()
+
+    expect(listPendingCardKinds()).toEqual([])
   })
 })

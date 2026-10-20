@@ -317,6 +317,41 @@ const TOOLS: ToolSpec[] = [
     },
   },
   {
+    name: 'probe_overlays',
+    description: '读当前可见浮层/弹窗结构（标签链、尺寸、文本长度、是否有 iframe），用于适配选择器',
+    async run() {
+      const pick = '[class*="dialog"],[class*="modal"],[class*="layer"],[class*="popup"],[class*="overlay"],[role="dialog"]'
+      const out: Array<Record<string, unknown>> = []
+      for (const el of Array.from(document.querySelectorAll(pick)) as HTMLElement[]) {
+        if (el.closest('.aah-root')) continue
+        const r = el.getBoundingClientRect()
+        if (r.width < 50 || r.height < 30) continue
+        const t = (el.textContent || '').replace(/\s/g, '')
+        out.push({
+          tag: el.tagName.toLowerCase(),
+          cls: Array.from(el.classList).slice(0, 3).join('.').slice(0, 60),
+          role: el.getAttribute('role') || '',
+          size: `${Math.round(r.width)}x${Math.round(r.height)}`,
+          textLength: t.length,
+          hasFile: /\.(pdf|docx?)$/i.test(t),
+          hasTitle: /请选择.{0,6}简历/.test(t),
+        })
+        if (out.length >= 15) break
+      }
+      const frames = Array.from(document.querySelectorAll('iframe')).map((f) => {
+        const r = f.getBoundingClientRect()
+        let sameOrigin = false
+        try {
+          sameOrigin = !!f.contentDocument
+        } catch {
+          sameOrigin = false
+        }
+        return { size: `${Math.round(r.width)}x${Math.round(r.height)}`, sameOrigin }
+      })
+      return { ok: true, data: { overlays: out, frames } }
+    },
+  },
+  {
     name: 'list_tools',
     description: '列出当前可用工具及其参数',
     async run() {

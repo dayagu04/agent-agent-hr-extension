@@ -1254,20 +1254,27 @@ export function classifyCard(question: string): ChatCard['kind'] {
  */
 function isCardAnswered(cardEl: HTMLElement, panel: HTMLElement): boolean {
   const cardBottom = cardEl.getBoundingClientRect().bottom
-
-  // 卡片之后是否有我方消息（item-myself / 带已读送达标记）
-  const mine = Array.from(panel.querySelectorAll('.item-myself, [class*="item-myself"]'))
-  for (const el of mine) {
-    const r = (el as HTMLElement).getBoundingClientRect()
-    if (r.height > 0 && r.top >= cardBottom - 4) return true
-  }
-
-  // 兜底：卡片结果文本已出现在消息流（「已发送给Boss」「工作地点我可以接受」）
-  const flow = (panel.textContent || '').replace(/\s/g, '')
   const cardText = (cardEl.textContent || '').replace(/\s/g, '')
-  if (/是否同意/.test(cardText) && /已发送给Boss|已发送给boss/i.test(flow)) return true
-  if (/是否接受此工作地点/.test(cardText) && /工作地点我可以接受/.test(flow)) return true
 
+  /** 卡片下方是否出现了这类文本（只认叶子，且必须位于卡片下方） */
+  const hasBelow = (re: RegExp): boolean =>
+    (Array.from(panel.querySelectorAll('*')) as HTMLElement[]).some((el) => {
+      if (el.children.length || cardEl.contains(el)) return false
+      const t = (el.textContent || '').replace(/\s/g, '')
+      if (!t || !re.test(t) || t.length > 80) return false
+      const r = el.getBoundingClientRect()
+      return r.height > 0 && r.top >= cardBottom - 4
+    })
+
+  // 只有「真的答过」才算答过：索要简历看发送结果，地点看接受结果。
+  // 旧逻辑用「卡片下方出现任意我方消息」判重——实测我方发一句普通回复后，
+  // 还没点的简历卡就被当成已答过，agent 再也点不到它。
+  if (/附件简历|一份.{0,4}简历|您的简历/.test(cardText)) {
+    return hasBelow(/已发送给boss|附件简历已发送|简历已发送/i)
+  }
+  if (/是否接受此工作地点/.test(cardText)) {
+    return hasBelow(/工作地点我可以接受|已接受.{0,6}地点|已同意接受/)
+  }
   return false
 }
 
@@ -1821,12 +1828,117 @@ export function findResumeDialog(): HTMLElement | null {
 
   // 新版选择框（2026-10 实测）：标题「请选择要发送的简历」+ 附件行（文件名/更新于/大小）
   // + 「管理附件」，没有发送按钮、没有 role=dialog，上面几条规则都认不出。
-  // 以标题文字为锚，往上找第一个同时包住附件行的祖先。
-  return findResumePickerByTitle()
+  // 依次尝试：标题锚点 → 文件名锚点 → 同源 iframe 里的标题锚点。
+  const byTitle = findResumePickerByTitle()
+  if (byTitle) return byTitle
+  const byFiles = findResumePickerByFiles()
+  if (byFiles) {
+    diag('CHAT', `resume_dialog via=files chain=${describeForLog(byFiles)}`)
+    return byFiles
+  }
+  for (const doc of sameOriginFrames().slice(1)) {
+    const t = findTitleIn(doc)
+    if (t) {
+      diag('CHAT', 'resume_dialog via=iframe')
+      return t
+    }
+  }
+  return null
+}
+
+/** 标签链（tag.class，不含文案），用于弹窗识别取证 */
+function describeForLog(el: Element): string {
+  const parts: string[] = []
+  let cur: Element | null = el
+  for (let i = 0; i < 5 && cur && cur !== document.body; i++) {
+    const cls = Array.from(cur.classList).slice(0, 2).map((c) => c.slice(0, 20)).join('.')
+    parts.push(cls ? `${cur.tagName.toLowerCase()}.${cls}` : cur.tagName.toLowerCase())
+    cur = cur.parentElement
+  }
+  return parts.join(' < ')
+}
+
+/** 在指定 document 里按标题找选择框 */
+function findTitleIn(doc: Document): HTMLElement | null {
+  const titles = (Array.from(doc.querySelectorAll('*')) as HTMLElement[]).filter((el) => {
+    if (el.children.length) return false
+    if (!/^请选择(?:要发送的)?(?:附件)?简历$/.test((el.textContent || '').replace(/\s/g, ''))) return false
+    const r = el.getBoundingClientRect()
+    return r.width > 0 && r.height > 0
+  })
+  for (const title of titles) {
+    let cur: HTMLElement | null = title.parentElement
+    for (let i = 0; i < 8 && cur && cur !== doc.body; i++) {
+      if (countFileLeaves(cur)) return cur
+      cur = cur.parentElement
+    }
+  }
+  return null
 }
 
 /** 简历附件文件名（BOSS 附件行里的 xxx.pdf / .doc / .docx） */
 const RESUME_FILE_RE = /\.(pdf|docx?|jpe?g|png)$/i
+
+/**
+ * 兜底：按「附件文件名」找选择框容器。
+ *
+ * 2026-10-20 实测：会话里挂着索要简历卡片时点同意/发简历，BOSS 弹出一个
+ * 视觉上是浮层的选择框，但它既没有 role=dialog、class 里也没有 dialog/modal，
+ * 标题兜底也没命中（findResumeDialog 返回 null，插件以为没弹窗）。
+ * 这里不依赖任何 class：找可见的 .pdf/.doc 叶子，向上取「包含 1~10 个文件名」
+ * 的最大容器，通常就是选择框本体。
+ */
+function countFileLeaves(root: Element): number {
+  let n = 0
+  for (const el of Array.from(root.querySelectorAll('*'))) {
+    if (el.children.length) continue
+    const t = (el.textContent || '').trim()
+    if (!RESUME_FILE_RE.test(t) || t.length > 120) continue
+    const r = el.getBoundingClientRect()
+    if (r.width > 0 && r.height > 0) n++
+    if (n > 12) return n
+  }
+  return n
+}
+
+function findResumePickerByFiles(): HTMLElement | null {
+  const leaves = (Array.from(document.querySelectorAll('*')) as HTMLElement[]).filter((el) => {
+    if (el.children.length || el.closest('.aah-root')) return false
+    const t = (el.textContent || '').trim()
+    if (!RESUME_FILE_RE.test(t) || t.length > 120) return false
+    const r = el.getBoundingClientRect()
+    return r.width > 0 && r.height > 0
+  })
+  if (!leaves.length || leaves.length > 12) return null
+  // 从第一个文件名往上爬，取仍然只包住这几个文件名的最大祖先
+  let best: HTMLElement | null = null
+  let cur: HTMLElement | null = leaves[0].parentElement
+  for (let i = 0; i < 10 && cur && cur !== document.body; i++) {
+    const n = countFileLeaves(cur)
+    if (n === 0 || n > 12) break
+    best = cur
+    cur = cur.parentElement
+  }
+  if (!best) return null
+  const r = best.getBoundingClientRect()
+  // 太小的容器（只有文件名本身）不算选择框
+  if (r.width < 200 || r.height < 80) return null
+  return best
+}
+
+/** 同源 iframe 的 document（BOSS 有些浮层挂在 iframe 里） */
+function sameOriginFrames(): Document[] {
+  const docs: Document[] = [document]
+  for (const f of Array.from(document.querySelectorAll('iframe'))) {
+    try {
+      const d = f.contentDocument
+      if (d && d !== document) docs.push(d)
+    } catch {
+      /* 跨域 iframe 读不到，跳过 */
+    }
+  }
+  return docs
+}
 
 function findResumePickerByTitle(): HTMLElement | null {
   const titles = (Array.from(document.querySelectorAll('*')) as HTMLElement[]).filter((el) => {
