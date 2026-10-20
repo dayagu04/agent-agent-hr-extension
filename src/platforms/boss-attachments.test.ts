@@ -69,4 +69,44 @@ describe('probeBossAttachments (no clicks)', () => {
     expect(probeBossAttachments()).toBeNull()
     expect(String(diag.mock.calls.at(-1)?.[1])).toMatch(/^attach_probe status=none store=1 components=1/)
   })
+
+  it('does not mistake a chat message article (picUrl/url/title) for the attachment list', () => {
+    // 2026-10-20 实测误判：ChatMessage.props.message.articles 被当成 1 份附件
+    mountVue({
+      $store: { state: { user: { id: 1 } } },
+      $data: {},
+      $children: [
+        {
+          $options: { name: 'ChatMessage' },
+          $props: {
+            message: {
+              articles: [
+                {
+                  templateId: 1,
+                  title: '附件简历',
+                  picUrl: 'https://img.example.com/a/b.png',
+                  url: 'https://www.zhipin.com/web/geek/resume/detail.pdf',
+                  bottomText: '查看',
+                },
+              ],
+            },
+          },
+          $children: [],
+        },
+      ],
+    })
+
+    expect(probeBossAttachments()).toBeNull()
+    expect(String(diag.mock.calls.at(-1)?.[1])).toMatch(/^attach_probe status=none/)
+  })
+
+  it('accepts a single attachment whose field is plainly a file name even without an id', () => {
+    mountVue({
+      $store: { state: { resume: { list: [{ fileName: '蔡韬的简历-agent.pdf' }] } } },
+      $data: {},
+      $children: [],
+    })
+
+    expect(probeBossAttachments()?.items).toEqual([{ name: '蔡韬的简历-agent.pdf', id: '' }])
+  })
 })
