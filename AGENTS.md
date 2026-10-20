@@ -119,7 +119,8 @@ tool name=delete_thread status=error ms=120 error=not-found
 | `apply_job` | `jobId` | ✓ | 对指定岗位点「立即沟通」并记账 |
 | `read_filters` | — | | 读筛选分组/选项/当前选中 |
 | `select_filters` | `filters: [{group, option}]` | ✓ | 点选筛选项 |
-| `list_threads` | — | | 列出会话 |
+| `list_threads` | — | | 列出会话（HR 名/公司/未读；岗位与薪资列表行没有） |
+| `read_thread_header` | `company`, `jobTitle?` | | 打开会话并读头部：HR 名/公司/岗位名/薪资/城市 |
 | `read_messages` | — | | 读当前会话消息（含卡片类型） |
 | `list_pending_cards` | — | | 列出待处理卡片 |
 | `open_thread` | `company`, `jobTitle?` | | 打开指定会话 |
@@ -129,6 +130,7 @@ tool name=delete_thread status=error ms=120 error=not-found
 | `delete_thread` | `company`, `jobTitle?` | ✓ | 删除会话 |
 | `probe_overlays` | — | | 读可见浮层结构（排障用） |
 | `probe_dom` | `selector`, `depth?` | | 读指定选择器的 DOM 结构（排障用） |
+| `probe_row` | `company?` | | 读会话行组件字段（排障用） |
 | `list_tools` | — | | 列出工具清单 |
 
 ## 8. 完整链路的工具覆盖
@@ -140,6 +142,7 @@ tool name=delete_thread status=error ms=120 error=not-found
 | 取岗位数据（公司/岗位/JD/薪资/地点） | `scan_jobs`（`withDetail`）、`read_job_detail` | 字段齐；JD 读取待实测覆盖率 |
 | 投递（点立即沟通 + 打招呼 + 记账） | `apply_job` | 已验证（非计算机岗位真实投递并记账） |
 | 读会话与消息分类 | `list_threads`、`read_messages` | 已验证（含系统消息全文） |
+| 会话的岗位名/薪资/城市 | `read_thread_header` | 已验证（6 个会话实测，与页面头部一致） |
 | 处理 HR 卡片（要简历/地点/联系方式） | `list_pending_cards` + `click_card` | 已验证（索要简历卡片 → 真实发出简历） |
 | 发消息 | `send_message` | 已验证（真实发到 HR 会话） |
 | 发简历 | `send_resume`、`click_card` | 已验证（BOSS 出现「点击查看附件」系统卡片）；失败原因码已细分 |
