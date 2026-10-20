@@ -2431,7 +2431,8 @@ export async function completeResumeSend(
       const sendRect = sendBtn.getBoundingClientRect()
       diag(
         'CHAT',
-        `resume_send step=click_send hit=${sendHit} tag=${sendBtn.tagName.toLowerCase()} ` +
+        `resume_send step=click_send hit=${sendHit} disabled=${isDialogButtonDisabled(sendBtn) ? 1 : 0} ` +
+          `tag=${sendBtn.tagName.toLowerCase()} ` +
           `x=${Math.round(sendRect.left)} y=${Math.round(sendRect.top)} ` +
           `inChatPanel=${!!findChatPanel()?.contains(sendBtn)}`,
       )

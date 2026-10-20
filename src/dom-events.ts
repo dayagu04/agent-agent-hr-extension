@@ -69,9 +69,20 @@ export function realClick(el: HTMLElement): 'hit' | 'occluded' {
   // 脱敏 DOM fixture / 旧 WebView 可能没有 scrollIntoView；点击本身仍可执行。
   el.scrollIntoView?.({ block: 'center' })
   const pos = centerOf(el)
-  const top = typeof document.elementFromPoint === 'function'
-    ? document.elementFromPoint(pos.clientX, pos.clientY) as HTMLElement | null
-    : null
+  // 插件面板可能正好盖住目标按钮（实测：简历选择框的「发送」被面板挡住，
+  // elementFromPoint 拿到面板，BOSS 的 Vue 委托事件收不到点击）。
+  // 取样前先让插件根节点不参与命中测试，拿到真实的最上层 BOSS 元素。
+  const roots = [document.getElementById('aah-plugin-root'), document.getElementById('aah-test-host')]
+  const prev = roots.map((r) => (r ? r.style.pointerEvents : ''))
+  roots.forEach((r) => { if (r) r.style.pointerEvents = 'none' })
+  let top: HTMLElement | null = null
+  try {
+    top = typeof document.elementFromPoint === 'function'
+      ? document.elementFromPoint(pos.clientX, pos.clientY) as HTMLElement | null
+      : null
+  } finally {
+    roots.forEach((r, i) => { if (r) r.style.pointerEvents = prev[i] })
+  }
   // 坐标处最上层不是目标自己或它的子节点 = 目标被挡住了（2026-10-18 实测：
   // 插件面板盖住了 BOSS 简历选择框的「发送」按钮，点击落在插件面板上，
   // 页面显示「已点击发送」但弹窗纹丝不动）。这时直接派发给目标本身。
