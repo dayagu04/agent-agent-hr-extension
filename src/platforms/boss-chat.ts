@@ -522,15 +522,34 @@ async function deleteThreadImpl(
  * - bossId：在已渲染行里按 data-user-id 精确找；
  * - 兜底：公司名子串滚动查找（旧行为）。
  */
+/**
+ * 会话行是否匹配「公司 + 岗位名」。
+ *
+ * BOSS 列表行常常没有独立岗位字段，岗位名被拼进公司文本
+ * （实测 company="江苏迈泉科技人事专员"、jobTitle=""），所以岗位名要在
+ * 整行文本里找，不能只看 jobTitle。
+ */
+export function threadRowMatchesText(
+  t: { company?: string; jobTitle?: string; name?: string },
+  company: string,
+  jobTitle = '',
+): boolean {
+  const norm = (v?: string) => (v || '').replace(/\s+/g, '').toLowerCase()
+  const target = norm(company)
+  if (!target) return false
+  if (!norm(t.company).includes(target)) return false
+  const wantJob = norm(jobTitle)
+  if (!wantJob) return true
+  return norm(`${t.company || ''}${t.jobTitle || ''}${t.name || ''}`).includes(wantJob)
+}
+
 async function findThreadForDelete(
   company: string,
   jobTitle: string,
   identity?: { bossId?: string; encryptJobId?: string },
 ): Promise<ChatThread | null> {
-  const target = (company || '').replace(/\s+/g, '').toLowerCase()
   const jobId = (identity?.encryptJobId || '').trim()
   const bossId = identity?.bossId || ''
-  const wantJob = (jobTitle || '').replace(/\s+/g, '').toLowerCase()
 
   // 1) 全量数据源按岗位 ID 精确定位（最稳）；inbound 虚拟 id 与 BOSS 真实
   //    jobId 对不上，跳过精确匹配，走公司兜底。
@@ -558,17 +577,7 @@ async function findThreadForDelete(
       const row = readRowJobInfo(t.el)
       if (row.jobId && row.jobId === jobId) return true
     }
-    const companyHit =
-      !!target && (t.company || '').replace(/\s+/g, '').toLowerCase().includes(target)
-    // 公司命中后若已知岗位名，再加一道岗位名过滤（同公司多会话时减少误删）。
-    // 注意：BOSS 列表行常常没有独立岗位字段，岗位名被拼进公司文本
-    // （实测 company="江苏迈泉科技人事专员"、jobTitle=""），所以岗位名要在
-    // 整行文本里找，不能只看 jobTitle。
-    if (!companyHit || !wantJob) return companyHit
-    const rowText = `${t.company || ''}${t.jobTitle || ''}${t.name || ''}`
-      .replace(/\s+/g, '')
-      .toLowerCase()
-    return rowText.includes(wantJob)
+    return threadRowMatchesText(t, company, jobTitle)
   }
   return findThreadByScrolling(match)
 }

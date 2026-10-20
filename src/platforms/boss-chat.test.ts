@@ -14,6 +14,7 @@ import {
   selectResumeRowByIndex,
   resumeDialogKind,
   selectResumeInDialog,
+  threadRowMatchesText,
 } from './boss-chat'
 import { normalizeAgentPolicy } from '../contact-policy'
 
@@ -765,5 +766,18 @@ describe('resume dialog false positives', () => {
     }
     // 没有「发送」按钮、class 也不像弹窗 → 不能认成选择框
     expect(findResumeDialog()).toBeNull()
+  })
+})
+
+describe('delete thread matching', () => {
+  it('matches when the job title is glued into the company text', () => {
+    const row = { company: '江苏迈泉科技人事专员', jobTitle: '', name: '周女士' }
+    expect(threadRowMatchesText(row, '江苏迈泉科技', '人事专员')).toBe(true)
+    expect(threadRowMatchesText(row, '江苏迈泉科技')).toBe(true)
+  })
+
+  it('does not match a different job at the same company', () => {
+    const row = { company: '江苏迈泉科技纯客服', jobTitle: '', name: '周女士' }
+    expect(threadRowMatchesText(row, '江苏迈泉科技', '人事专员')).toBe(false)
   })
 })
