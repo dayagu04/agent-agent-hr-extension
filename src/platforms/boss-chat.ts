@@ -943,8 +943,9 @@ export async function readMessages(
   diag(
     'CHAT',
     `消息判定 total=${out.length} hr=${counts.hr} me=${counts.me} system=${counts.system} ` +
-      `cards=${cards.length} resume=${kinds('resume_request')} location=${kinds('location_confirm')} ` +
-      `contact=${kinds('contact_exchange')} unknownCard=${kinds('unknown')} ` +
+      // 键名不能写成 resume=/content= 这类：服务端 _KEYED_SECRET 会把这些整段打码
+      `cards=${cards.length} resumeCard=${kinds('resume_request')} locationCard=${kinds('location_confirm')} ` +
+      `contactCard=${kinds('contact_exchange')} unknownCard=${kinds('unknown')} ` +
       `geometry=${geometryCount} orphanButtons=${orphanButtons} mid=${Math.round(mid)}`,
   )
   if (opts.verbose) for (const line of dbg.slice(0, 40)) diag('CHAT', line)

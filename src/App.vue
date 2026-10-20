@@ -6,6 +6,7 @@ import { fetchPluginConfig, login } from './api'
 import { detectPlatform } from './platforms/factory'
 import { diag } from './logger'
 import { detectNavUnread } from './nav-unread'
+import { probeSearchFiltersOnce } from './search-filters'
 import {
   currentThreadInfo,
   deleteThread,
@@ -863,6 +864,12 @@ onMounted(() => {
   // 跨页交接：若用户在别的页面点了 HR 卡片，这里接手打开对应会话
   consumePendingOpen()
 
+  // 职位列表页：只读探测筛选区结构（城市/求职类型/薪资/经验…），结果进日志，
+  // 用于把「筛选条件」做成 agent 可控的工具；不点击任何控件。
+  if (/\/web\/geek\/jobs?\b/.test(location.pathname)) {
+    window.setTimeout(() => probeSearchFiltersOnce('page_load'), 3000)
+  }
+
   // 聊天页：延迟后台静默回填岗位名（列表项无岗位名，需短暂打开会话读头部）
   if (onChatPage()) {
     window.setTimeout(() => void backfillChatJobTitles(), 4000)
@@ -1120,6 +1127,16 @@ onMounted(() => {
               </label>
               <span class="aah-hint">
                 关闭后跳过后端匹配接口，扫描到的岗位全部投递（黑名单/最低薪资规则仍生效）
+              </span>
+            </label>
+            <label class="aah-field aah-field-wide">
+              <span>岗位 JD</span>
+              <label class="aah-row" style="gap:6px">
+                <input type="checkbox" v-model="config.scanWithDetail" @change="persist" />
+                扫描时逐个打开详情，读取 JD 全文用于匹配
+              </label>
+              <span class="aah-hint">
+                列表页只有标签摘要。打开后每个岗位多一次详情加载（约 0.5 秒），匹配更准但扫描变慢。
               </span>
             </label>
             <p class="aah-tip">

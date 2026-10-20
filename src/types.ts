@@ -30,7 +30,9 @@ export interface JobCard {
   company: string // 公司名
   city?: string // 城市
   salary?: string // 薪资文本（如 "15-25K"）
-  description?: string // JD 摘要（用于匹配）
+  description?: string // 列表页能拿到的摘要（标签拼接），不是 JD 全文
+  /** 岗位 JD 全文（打开详情面板读取；需开启 scanWithDetail，见 PluginConfig） */
+  jd?: string
   url?: string // 职位详情 URL
   /** 卡片根元素（用于高亮/标记已处理） */
   cardElement?: HTMLElement
@@ -81,6 +83,12 @@ export interface PluginConfig {
    * 插件记住这些参数并在每次翻页/换关键词时原样带上。
    */
   searchFilterQuery: string
+  /**
+   * 扫描岗位时是否逐个打开详情读 JD 全文。
+   * 列表页只有标签摘要，JD 全文要读右侧详情面板；每个岗位多一次点击+等待，
+   * 扫描会明显变慢，故默认关闭。
+   */
+  scanWithDetail?: boolean
   /**
    * 投递间隔（秒）：投完一个岗位 → 等待该间隔 → 投下一个。
    * 单一来源（内置 ±10% 随机抖动模拟真人），不再有「随机范围 + 地板」两套概念。

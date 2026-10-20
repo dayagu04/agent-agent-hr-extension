@@ -48,7 +48,7 @@ export class BossPlatform extends BasePlatform {
   /** 与 onChatPage() 的路径判断保持一致（/web/geek/chat） */
   readonly chatUrl = 'https://www.zhipin.com/web/geek/chat'
 
-  async scanJobs(): Promise<JobCard[]> {
+  async scanJobs(opts: { withDetail?: boolean } = {}): Promise<JobCard[]> {
     // BOSS 搜索页是滚动加载：初始 DOM 只有 15 张卡片，滚动才加载更多，
     // 直接扫初始 15 张就翻页会浪费滚出来的岗位，故先滚动加载完全再扫描。
     await this.scrollJobListToLoadAll()
@@ -176,7 +176,58 @@ export class BossPlatform extends BasePlatform {
           salaryPresent: !!jobs[0].salary,
         }
       : null)
+
+    if (opts.withDetail && jobs.length) await this.fillJobDetails(jobs)
     return jobs
+  }
+
+  /**
+   * 读右侧详情面板的岗位 JD。
+   *
+   * 列表页只有标签摘要；JD 正文在右侧 `.job-detail-box`（左列表右详情联动）。
+   * 这里只读不点「立即沟通」——点卡片只是切换详情，不会投递。
+   */
+  private readDetailJd(): string {
+    const box =
+      document.querySelector('.job-detail-box, .job-detail, [class*="job-detail"]') ||
+      document.querySelector('.job-detail-container, [class*="detail-content"]')
+    if (!box) return ''
+    // 去掉详情面板里的操作按钮文案，避免把「立即沟通」等算进 JD
+    const clone = box.cloneNode(true) as HTMLElement
+    clone.querySelectorAll('button, a').forEach((el) => {
+      const t = (el.textContent || '').replace(/\s/g, '')
+      if (/立即沟通|继续沟通|收藏|分享|举报|投诉|查看更多|展开/.test(t)) el.remove()
+    })
+    return (clone.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 4000)
+  }
+
+  /** 逐个打开详情读 JD；失败不影响投递，按读取数量记日志。 */
+  private async fillJobDetails(jobs: JobCard[]): Promise<void> {
+    let ok = 0
+    let totalLen = 0
+    for (const job of jobs) {
+      const card = job.cardElement
+      const clickTarget =
+        (card?.querySelector('a, .job-name, .job-title') as HTMLElement | null) || card || null
+      if (!clickTarget) continue
+      clickTarget.scrollIntoView({ block: 'center' })
+      await this.delay(250, 450)
+      clickTarget.click()
+      // 等详情面板出现新内容：轮询 JD 文本长度，最多约 2.5s
+      let jd = ''
+      for (let i = 0; i < 10; i++) {
+        await this.delay(220, 300)
+        jd = this.readDetailJd()
+        if (jd.length > 80) break
+      }
+      if (jd) {
+        job.jd = jd
+        job.description = jd
+        ok++
+        totalLen += jd.length
+      }
+    }
+    diag('BOSS', `详情 JD 读取 ${ok}/${jobs.length} 个（平均 ${ok ? Math.round(totalLen / ok) : 0} 字）`)
   }
 
   async applyJob(card: JobCard, ctx?: ApplyContext): Promise<ApplyResult> {

@@ -108,7 +108,8 @@ export async function matchJobs(
       company: j.company || '',
       city: j.city || '',
       salary: j.salary || '',
-      description: j.description || '',
+      // JD 全文优先（读详情才拿得到）；没有就退回列表页标签摘要
+      description: j.jd || j.description || '',
       url: j.url || '',
     })),
   }
@@ -407,7 +408,8 @@ export async function judgeJobs(
           platform_job_id: j.platformJobId || '',
           company: j.company || '',
           title: j.title,
-          description: j.description || '',
+          // JD 全文优先（读详情才拿得到）；没有就退回列表页标签摘要
+      description: j.jd || j.description || '',
           salary: j.salary || '',
         })),
       }),
