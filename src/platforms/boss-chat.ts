@@ -1985,6 +1985,12 @@ function findResumePickerByFiles(): HTMLElement | null {
   const r = best.getBoundingClientRect()
   // 太小的容器（只有文件名本身）不算选择框
   if (r.width < 200 || r.height < 80) return null
+  // 必须像弹层：含「发送/确定」按钮，或 class 命中 popup/dialog/layer。
+  // 否则会话列表里出现过的附件名会把整个列表当成选择框（实测踩到）。
+  const hasSend = !!findDialogButton(best, /^(发送|确定|确认发送)$/)
+  const looksLikeLayer = /popup|dialog|layer|modal/i.test(String(best.className || ''))
+  if (!hasSend && !looksLikeLayer) return null
+  if (best.closest('[class*="chat-user"], [class*="user-list"], [class*="list-warp"]')) return null
   return best
 }
 
@@ -2533,12 +2539,21 @@ export async function sendResume(
     return completeResumeSend(targetName || null, false, baseline, targetIndex ?? null)
   }
   const btn = findResumeToolbarButton()
+  // 有未处理的「索要简历」卡片时，工具栏「发简历」是灰的：必须走卡片上的同意
+  const cardFallback = async (reason: string): Promise<boolean> => {
+    const cards = listPendingCardKinds().filter((c) => c.kind === 'resume_request')
+    if (!cards.length) return false
+    diag('CHAT', `resume_send step=fallback_card reason=${reason}`)
+    return clickCard('resume_request', true, { resumeName: targetName || null, resumeIndex: targetIndex ?? null })
+  }
   if (!btn) {
+    if (await cardFallback('no_toolbar_button')) return true
     diag('CHAT', '未找到「发送简历」按钮')
     return false
   }
   if (isDialogButtonDisabled(btn)) {
-    diag('CHAT', '「发简历」按钮处于禁用态，跳过', { cls: String(btn.className || '').slice(0, 60) })
+    diag('CHAT', '「发简历」按钮处于禁用态，尝试卡片路径', { cls: String(btn.className || '').slice(0, 60) })
+    if (await cardFallback('toolbar_disabled')) return true
     return false
   }
   // The toolbar button is Vue-controlled as well; use the full pointer

@@ -750,3 +750,20 @@ describe('resume sent markers', () => {
     expect(countResumeSentMarks()).toBe(1)
   })
 })
+
+describe('resume dialog false positives', () => {
+  it('does not treat the chat list as a resume picker just because it contains .pdf text', () => {
+    document.body.innerHTML = `
+      <div class="list-warp v2">
+        <div class="chat-user v2"><span class="last-msg">您的附件简历 261011.pdf 已发送</span></div>
+        <div class="chat-user v2"><span class="last-msg">蔡韬的简历-agent.pdf</span></div>
+      </div>`
+    for (const el of Array.from(document.querySelectorAll('*'))) {
+      vi.spyOn(el, 'getBoundingClientRect').mockReturnValue({
+        x: 0, y: 0, top: 0, left: 0, right: 400, bottom: 300, width: 400, height: 300, toJSON: () => ({}),
+      })
+    }
+    // 没有「发送」按钮、class 也不像弹窗 → 不能认成选择框
+    expect(findResumeDialog()).toBeNull()
+  })
+})
