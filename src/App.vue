@@ -4,6 +4,7 @@ import type { PluginConfig, ApplyProgress, HRMessageSummary } from './types'
 import { loadConfig, saveConfig, isConfigReady, applyPluginPreferences } from './config'
 import { fetchPluginConfig, login } from './api'
 import { detectPlatform } from './platforms/factory'
+import TestTools from './TestTools.vue'
 import { diag } from './logger'
 import { detectNavUnread } from './nav-unread'
 import { probeSearchFiltersOnce } from './search-filters'
@@ -152,6 +153,8 @@ async function resetBallPosition() {
 // 单流引导式面板：登录→选简历→开始投递全部一屏呈现，不再有 Tab 切换。
 // 「连接/设置」（环境、简历选择、匹配开关、退出）折叠在底部，默认收起。
 const showSettings = ref(false)
+/** 测试工具（内嵌）：点标题栏 🧪 打开，替代原来的独立浮窗 */
+const showTests = ref(false)
 /** 展开并滚动到底部的设置区（标题栏 ⚙ 与未配置引导共用） */
 function gotoSettings(): void {
   showSettings.value = true
@@ -907,6 +910,14 @@ onMounted(() => {
       >
         <span class="aah-title">智能投递 · {{ platformName }} <small style="opacity:0.6;font-size:11px">{{ VERSION_LABEL }}</small></span>
         <div class="aah-header-btns">
+          <!-- 🧪 测试工具：在面板内直接展开，避免独立窗口割裂 -->
+          <button
+            v-if="platform"
+            class="aah-icon-btn"
+            :class="{ active: showTests }"
+            title="测试工具"
+            @click="showTests = !showTests; showSettings = false"
+          >🧪</button>
           <!-- ⚙ 快捷入口：展开底部「连接与设置」折叠区 -->
           <button
             v-if="platform"
@@ -927,6 +938,9 @@ onMounted(() => {
       <!-- 单流引导式面板：一屏呈现「登录 → 选简历 → 开始投递」，主页也能用。
            会话列表常驻下方；连接与设置折叠在最底部。 -->
       <div v-else class="aah-flow">
+
+        <TestTools v-if="showTests" @close="showTests = false" />
+        <template v-else>
 
         <!-- 步骤 1：未登录 → 登录卡片（最显眼，先引导登录） -->
         <div v-if="!loggedIn" class="aah-step-card">
@@ -1146,6 +1160,7 @@ onMounted(() => {
             <p v-if="configError" class="aah-error">{{ configError }}</p>
           </div>
         </div>
+        </template>
 
       </div>
     </div>
