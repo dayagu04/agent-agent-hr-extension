@@ -15,6 +15,7 @@ import {
 } from './orchestrator'
 import { runChatAudit } from './platforms/boss-chat'
 import { callTool, toolCatalog } from './tools'
+import { reportToolResult } from './api'
 import { detectPlatform } from './platforms/factory'
 
 /** 当前页面平台代号（用于心跳上报） */
@@ -321,6 +322,8 @@ async function executeCommand(
           return true
         }
         const result = await callTool(name, args)
+        // 结果回传给服务端，agent 才能拿到数据（日志里只有摘要）
+        await reportToolResult(cfg, cmd.id, name, result)
         diag('TOOL', `tool_call name=${name} ok=${result.ok ? 1 : 0}`)
         return true
       }

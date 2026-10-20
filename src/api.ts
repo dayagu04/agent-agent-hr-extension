@@ -78,6 +78,36 @@ export async function fetchPluginConfig(cfg: PluginConfig): Promise<{
 }
 
 /** POST /api/plugin/match — 批量匹配岗位 */
+/**
+ * 回传工具执行结果（agent 通过 GET /api/plugin/tools/result/{id} 读取）。
+ * 失败只记一条日志，不影响工具本身的结果。
+ */
+export async function reportToolResult(
+  cfg: PluginConfig,
+  commandId: number,
+  tool: string,
+  result: { ok: boolean; data?: unknown; error?: string },
+): Promise<void> {
+  try {
+    const resp = await network.request({
+      method: 'POST',
+      url: `${cfg.apiBase}/api/plugin/tools/result`,
+      headers: authHeaders(cfg),
+      data: JSON.stringify({
+        command_id: commandId,
+        tool,
+        ok: result.ok,
+        data: result.data ?? null,
+        error: result.error || '',
+      }),
+      timeout: 20000,
+    })
+    if (resp.status !== 200) diag('TOOL', `tool_result_upload status=${resp.status} tool=${tool}`)
+  } catch (e) {
+    diag('TOOL', `tool_result_upload status=error tool=${tool} error=${(e as Error).name || 'Error'}`)
+  }
+}
+
 export async function matchJobs(
   cfg: PluginConfig,
   platform: PlatformCode,
