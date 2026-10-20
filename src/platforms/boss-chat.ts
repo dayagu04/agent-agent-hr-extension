@@ -2527,16 +2527,28 @@ export function countResumeSentMarks(): number {
  * @param targetName 要发的简历名（BOSS 弹窗里显示的那份）。不传则用配置的默认简历；
  *                   两者都没有且弹窗里有多份时安全停止，不发 BOSS 预选的那份。
  */
-export async function sendResume(
+export type ResumeSendReason =
+  | 'not_allowed'   // BOSS 侧暂不允许发简历（工具栏 unable、也没有索要简历卡片）
+  | 'no_button'     // 找不到工具栏按钮
+  | 'send_failed'   // 走了选择框但没确认发出
+
+export interface ResumeSendOutcome {
+  ok: boolean
+  reason?: ResumeSendReason
+}
+
+/** sendResume 的带原因版本（工具层用它给出稳定错误码） */
+export async function sendResumeDetailed(
   targetName?: string | null,
   targetIndex?: number | null,
-): Promise<boolean> {
+): Promise<ResumeSendOutcome> {
   // 选择框已经开着（例如刚点过卡片同意）：直接处理它，不要再点工具栏把框关掉
   const open = findResumeDialog()
   if (open && resumeDialogKind(open) === 'picker') {
     const baseline = countResumeSentMarks()
     diag('CHAT', 'resume_send step=reuse_open_picker')
-    return completeResumeSend(targetName || null, false, baseline, targetIndex ?? null)
+    const okReuse = await completeResumeSend(targetName || null, false, baseline, targetIndex ?? null)
+    return { ok: okReuse, reason: okReuse ? undefined : 'send_failed' }
   }
   const btn = findResumeToolbarButton()
   // 有未处理的「索要简历」卡片时，工具栏「发简历」是灰的：必须走卡片上的同意
@@ -2547,14 +2559,16 @@ export async function sendResume(
     return clickCard('resume_request', true, { resumeName: targetName || null, resumeIndex: targetIndex ?? null })
   }
   if (!btn) {
-    if (await cardFallback('no_toolbar_button')) return true
+    if (await cardFallback('no_toolbar_button')) return { ok: true }
     diag('CHAT', '未找到「发送简历」按钮')
-    return false
+    return { ok: false, reason: 'no_button' }
   }
   if (isDialogButtonDisabled(btn)) {
     diag('CHAT', '「发简历」按钮处于禁用态，尝试卡片路径', { cls: String(btn.className || '').slice(0, 60) })
-    if (await cardFallback('toolbar_disabled')) return true
-    return false
+    if (await cardFallback('toolbar_disabled')) return { ok: true }
+    // 工具栏禁用且没有索要简历卡片 = BOSS 当前不允许给这个会话发简历
+    diag('CHAT', 'resume_send status=not_allowed reason=toolbar_disabled_no_card')
+    return { ok: false, reason: 'not_allowed' }
   }
   // The toolbar button is Vue-controlled as well; use the full pointer
   // sequence so the resume picker is opened in the same way as a user click.
@@ -2563,14 +2577,24 @@ export async function sendResume(
   await delay(1200, 1800)
 
   if (targetName || targetIndex != null) {
-    return completeResumeSend(targetName || null, false, baseline, targetIndex ?? null)
+    const ok = await completeResumeSend(targetName || null, false, baseline, targetIndex ?? null)
+    return { ok, reason: ok ? undefined : 'send_failed' }
   }
   const cfg = loadConfig()
   const configured =
     cfg.defaultSendResumeId && cfg.resumeNames
       ? cfg.resumeNames[String(cfg.defaultSendResumeId)] || null
       : null
-  return completeResumeSend(configured, false, baseline)
+  const ok = await completeResumeSend(configured, false, baseline)
+  return { ok, reason: ok ? undefined : 'send_failed' }
+}
+
+/** 兼容旧调用：只要成败 */
+export async function sendResume(
+  targetName?: string | null,
+  targetIndex?: number | null,
+): Promise<boolean> {
+  return (await sendResumeDetailed(targetName, targetIndex)).ok
 }
 
 /**

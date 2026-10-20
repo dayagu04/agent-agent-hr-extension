@@ -11,6 +11,7 @@ vi.mock('./platforms/boss-chat', () => ({
   listPendingCardKinds: vi.fn(() => [{ kind: 'resume_request', questionLength: 10 }]),
   sendMessageText: vi.fn(async () => true),
   sendResume: vi.fn(async () => true),
+  sendResumeDetailed: vi.fn(async () => ({ ok: true })),
   deleteThread: vi.fn(async () => 'ok'),
 }))
 vi.mock('./platforms/factory', () => ({ detectPlatform: vi.fn(() => null) }))

@@ -20,7 +20,7 @@ import {
   openThread,
   readMessages,
   sendMessageText,
-  sendResume,
+  sendResumeDetailed,
   type ChatCardKind,
 } from './platforms/boss-chat'
 import { readSearchFilters, selectSearchFilter } from './search-filters'
@@ -158,8 +158,8 @@ const TOOLS: ToolSpec[] = [
     async run(args) {
       if (needChatPage()) return needChatPage()!
       const idx = typeof args.resumeIndex === 'number' ? args.resumeIndex : null
-      const ok = await sendResume(str(args, 'resumeName') || null, idx)
-      return { ok, error: ok ? undefined : 'resume_send_failed' }
+      const r = await sendResumeDetailed(str(args, 'resumeName') || null, idx)
+      return { ok: r.ok, error: r.ok ? undefined : (r.reason || 'resume_send_failed') }
     },
   },
   {
