@@ -78,7 +78,7 @@ function needChatPage(): ToolResult | null {
 const TOOLS: ToolSpec[] = [
   {
     name: 'list_threads',
-    description: '列出左侧会话（公司/岗位/未读/bossId）',
+    description: '列出左侧会话（HR 名/公司/未读；岗位名与薪资列表行没有，需 read_thread_header）',
     async run() {
       if (needChatPage()) return needChatPage()!
       // listThreads 的每项带 el（DOM 节点），直接回传会 JSON 序列化失败，
@@ -437,6 +437,26 @@ const TOOLS: ToolSpec[] = [
       const info = probeRowObject(target.el)
       if (!info) return { ok: false, error: 'no_vue_object' }
       return { ok: true, data: { row: { company: target.company, name: target.name }, ...info } }
+    },
+  },
+  {
+    name: 'read_thread_header',
+    description: '读某一会话的头部信息（HR 名/公司/岗位名/薪资/城市）；不在该会话时会先打开',
+    exampleArgs: { company: '', jobTitle: '' },
+    async run(args) {
+      if (needChatPage()) return needChatPage()!
+      const company = str(args, 'company')
+      if (!company) return { ok: false, error: 'company_required' }
+      const jobTitle = str(args, 'jobTitle') || str(args, 'job_title')
+      const current = currentThreadInfo()
+      const alreadyOpen = !!current.company && current.company.includes(company)
+      if (!alreadyOpen) {
+        const r = openThread(company, jobTitle)
+        if (r !== 'ok') return { ok: false, error: r }
+        await new Promise((res) => setTimeout(res, 900))
+      }
+      const info = currentThreadInfo()
+      return { ok: !!info.company || !!info.jobTitle, data: info, error: info.jobTitle ? undefined : 'header_incomplete' }
     },
   },
   {

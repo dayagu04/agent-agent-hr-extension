@@ -1089,6 +1089,7 @@ export function currentThreadId(): string {
  */
 export function currentThreadInfo(): {
   company: string
+  hrName: string
   jobTitle: string
   salary: string
   city: string
@@ -1110,7 +1111,7 @@ export function currentThreadInfo(): {
   const city = pickHeaderField(SEL.headerCity)
 
   const header = findChatHeader()
-  if (!header) return { company: '', jobTitle, salary, city }
+  if (!header) return { company: '', hrName: '', jobTitle, salary, city }
 
   const nameEl = headerNameIn(header)
   const nameTxt = text(nameEl)
@@ -1158,7 +1159,7 @@ export function currentThreadInfo(): {
         })),
     })
   }
-  return { company, jobTitle, salary, city }
+  return { company, hrName: nameTxt, jobTitle, salary, city }
 }
 
 /**

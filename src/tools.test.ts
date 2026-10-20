@@ -32,6 +32,7 @@ describe('agent tools', () => {
       'read_messages', 'send_message', 'send_resume', 'click_card', 'delete_thread', 'scan_jobs',
       'read_filters', 'select_filters', 'list_tools',
       'get_page_state', 'open_search', 'read_job_detail', 'apply_job', 'probe_overlays', 'probe_dom',
+      'read_thread_header', 'probe_row',
     ]))
     expect(toolCatalog().find((t) => t.name === 'send_message')?.irreversible).toBe(true)
     expect(toolCatalog().find((t) => t.name === 'read_messages')?.irreversible).toBe(false)
