@@ -560,9 +560,15 @@ async function findThreadForDelete(
     }
     const companyHit =
       !!target && (t.company || '').replace(/\s+/g, '').toLowerCase().includes(target)
-    // 公司命中后若已知岗位名，再加一道岗位名过滤（同公司多会话时减少误删）
+    // 公司命中后若已知岗位名，再加一道岗位名过滤（同公司多会话时减少误删）。
+    // 注意：BOSS 列表行常常没有独立岗位字段，岗位名被拼进公司文本
+    // （实测 company="江苏迈泉科技人事专员"、jobTitle=""），所以岗位名要在
+    // 整行文本里找，不能只看 jobTitle。
     if (!companyHit || !wantJob) return companyHit
-    return (t.jobTitle || '').replace(/\s+/g, '').toLowerCase().includes(wantJob)
+    const rowText = `${t.company || ''}${t.jobTitle || ''}${t.name || ''}`
+      .replace(/\s+/g, '')
+      .toLowerCase()
+    return rowText.includes(wantJob)
   }
   return findThreadByScrolling(match)
 }
