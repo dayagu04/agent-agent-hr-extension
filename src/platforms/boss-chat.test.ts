@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   classifyCard,
+  clickCard,
   completeResumeSend,
   countResumeSentMarks,
   findDialogButton,
@@ -687,5 +688,39 @@ describe('choose-resume dialog (measured structure)', () => {
 
     expect(selectResumeRowByIndex(dialog, 1)).toBe(true)
     expect(clicks).toEqual(['261011.pdf'])
+  })
+})
+
+describe('card handling is retryable', () => {
+  function box(top: number, height = 60) {
+    return { x: 0, y: top, top, left: 0, right: 400, bottom: top + height, width: 400, height, toJSON: () => ({}) }
+  }
+
+  it('unmarks the card when the resume never goes out, so it can be retried', async () => {
+    vi.useFakeTimers()
+    document.body.innerHTML = `
+      <div class="chat-conversation">
+        <div class="item-friend"><div class="card">
+          <p>我想要一份您的附件简历，您是否同意</p>
+          <button>拒绝</button><button>同意</button>
+        </div></div>
+      </div>`
+    for (const el of Array.from(document.querySelectorAll('*')) as HTMLElement[]) {
+      const inCard = !!el.closest('.item-friend, .item-myself')
+      vi.spyOn(el, 'getBoundingClientRect').mockReturnValue(box(inCard ? 0 : 200))
+    }
+    vi.spyOn(document.querySelector('.chat-conversation')!, 'getBoundingClientRect')
+      .mockReturnValue({ ...box(0, 800), right: 800, width: 800 })
+
+    expect(listPendingCardKinds().map((c) => c.kind)).toEqual(['resume_request'])
+
+    // 选择框始终不出现 → 发简历失败
+    const result = clickCard('resume_request', true)
+    await vi.runAllTimersAsync()
+    await expect(result).resolves.toBe(false)
+
+    // 关键：不能被永久标记为已处理，否则 agent 无法重试
+    expect(listPendingCardKinds().map((c) => c.kind)).toEqual(['resume_request'])
+    vi.useRealTimers()
   })
 })

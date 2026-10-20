@@ -1456,8 +1456,10 @@ function extractContactDecision(
   }
 }
 
-function markCardHandled(card: ChatCard): void {
-  card.element?.setAttribute('data-aah-card-handled', '1')
+function markCardHandled(card: ChatCard, handled = true): void {
+  if (!card.element) return
+  if (handled) card.element.setAttribute('data-aah-card-handled', '1')
+  else card.element.removeAttribute('data-aah-card-handled')
 }
 
 export type ChatCardKind = 'resume_request' | 'contact_exchange' | 'location_confirm' | 'unknown'
@@ -1488,12 +1490,13 @@ export async function clickCard(
     diag('CHAT', `card_click status=no_button kind=${kind} accept=${accept}`)
     return false
   }
+  // 先占位防止并发重复点击，但失败必须回滚：标记一旦留下，findPendingCards
+  // 会永远跳过这张卡，agent 再也没有重试机会（2026-10-20 实测踩到）。
   markCardHandled(card)
-  // 同意「索要简历」后 BOSS 会弹选择框（多份附件）或直接发出（一份），
-  // 少了这一步只完成「点按钮」，简历并不会真的发出去。
   const baseline = kind === 'resume_request' && accept ? countResumeSentMarks() : null
   const hit = realClick(btn)
   diag('CHAT', `card_click status=clicked kind=${kind} accept=${accept} hit=${hit}`)
+
   if (kind === 'resume_request' && accept) {
     await delay(1200, 2000)
     const cfg = loadConfig()
@@ -1503,7 +1506,8 @@ export async function clickCard(
         ? cfg.resumeNames[String(cfg.defaultSendResumeId)] || null
         : null)
     const sent = await completeResumeSend(target, false, baseline, opts.resumeIndex ?? null)
-    diag('CHAT', `card_click resume_send status=${sent ? 'sent' : 'failed'} target=${target ? 'named' : 'none'}`)
+    if (!sent) markCardHandled(card, false) // 简历没发出去 = 卡片没处理，允许重试
+    diag('CHAT', `card_click resume_send status=${sent ? 'sent' : 'failed_retryable'} target=${target ? 'named' : 'none'}`)
     return sent
   }
   return true
@@ -1632,7 +1636,9 @@ async function handleCard(
       resumeCfg.defaultSendResumeId && resumeCfg.resumeNames
         ? resumeCfg.resumeNames[String(resumeCfg.defaultSendResumeId)] || null
         : null
-    return await completeResumeSend(targetName, false, sentBaseline)
+    const sent = await completeResumeSend(targetName, false, sentBaseline)
+    if (!sent) markCardHandled(card, false)
+    return sent
   }
 
   if (card.kind === 'location_confirm') {
@@ -2426,6 +2432,13 @@ export async function sendResume(
   targetName?: string | null,
   targetIndex?: number | null,
 ): Promise<boolean> {
+  // 选择框已经开着（例如刚点过卡片同意）：直接处理它，不要再点工具栏把框关掉
+  const open = findResumeDialog()
+  if (open && resumeDialogKind(open) === 'picker') {
+    const baseline = countResumeSentMarks()
+    diag('CHAT', 'resume_send step=reuse_open_picker')
+    return completeResumeSend(targetName || null, false, baseline, targetIndex ?? null)
+  }
   const btn = findResumeToolbarButton()
   if (!btn) {
     diag('CHAT', '未找到「发送简历」按钮')
