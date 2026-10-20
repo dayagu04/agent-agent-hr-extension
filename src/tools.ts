@@ -79,7 +79,16 @@ const TOOLS: ToolSpec[] = [
     description: '列出左侧会话（公司/岗位/未读/bossId）',
     async run() {
       if (needChatPage()) return needChatPage()!
-      return { ok: true, data: listThreads() }
+      // listThreads 的每项带 el（DOM 节点），直接回传会 JSON 序列化失败，
+      // 导致 tool result 上传失败、agent 拿不到结果。只回纯数据字段。
+      const threads = listThreads().map((t) => ({
+        company: t.company,
+        jobTitle: t.jobTitle,
+        name: t.name,
+        unread: t.unread,
+        bossId: t.bossId,
+      }))
+      return { ok: true, data: threads }
     },
   },
   {

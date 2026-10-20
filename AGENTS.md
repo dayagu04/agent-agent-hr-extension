@@ -143,7 +143,7 @@ tool name=delete_thread status=error ms=120 error=not-found
 | 处理 HR 卡片（要简历/地点/联系方式） | `list_pending_cards` + `click_card` | 已验证（索要简历卡片 → 真实发出简历） |
 | 发消息 | `send_message` | 已验证（真实发到 HR 会话） |
 | 发简历 | `send_resume`、`click_card` | 已验证（BOSS 出现「点击查看附件」系统卡片）；失败原因码已细分 |
-| 删会话 | `delete_thread` | 未验证（会真实删除 BOSS 会话，需指定一条可删的） |
+| 删会话 | `delete_thread` | 已验证（京北方会话删除成功，重新打开返回 not-found） |
 
 判定「封装完成」的标准：agent 只靠工具 + `/tools/result` 就能完成该环节，不依赖页面手动操作。
 

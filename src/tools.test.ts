@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 vi.mock('./logger', () => ({ diag: vi.fn() }))
 vi.mock('./platforms/boss-chat', () => ({
-  listThreads: vi.fn(() => [{ company: 'A', jobTitle: 'B', unread: true, bossId: 'x' }]),
+  listThreads: vi.fn(() => [{ company: 'A', jobTitle: 'B', name: 'HR', unread: true, bossId: 'x', el: {} }]),
   readMessages: vi.fn(async () => [{ sender: 'hr', content: 'hi' }]),
   currentThreadInfo: vi.fn(() => ({ company: 'A', jobTitle: 'B', salary: '', city: '' })),
   onChatPage: vi.fn(() => true),
@@ -127,5 +127,13 @@ describe('job id lookup tolerance', () => {
     const r = await callTool('read_job_detail', { jobId: '628b8fca4a28278e0n' })
     expect(r.ok).toBe(true)
     expect(readJobDetail).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('tool results must be JSON-serializable', () => {
+  it('list_threads strips DOM references', async () => {
+    const r = await callTool('list_threads', {})
+    expect(() => JSON.stringify(r)).not.toThrow()
+    expect(r.data).toEqual([{ company: 'A', jobTitle: 'B', name: 'HR', unread: true, bossId: 'x' }])
   })
 })
