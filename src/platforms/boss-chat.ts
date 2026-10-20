@@ -2445,6 +2445,12 @@ export async function completeResumeSend(
           diag('CHAT', `已发送简历（${targetName ? '使用配置的默认简历' : '使用平台当前选中简历'}）`)
           return true
         }
+        // 弹窗还没关，但消息区已经出现「已发送给Boss」= 实际已发出，
+        // 不能因为弹窗动画慢就判失败（否则会重复点发送）。
+        if (sentNow()) {
+          diag('CHAT', 'resume_send status=sent via=chat_mark dialog_still_open=1')
+          return true
+        }
         if (resumeDialogKind(current) !== kind) break
       }
       const current = findResumeDialog()
