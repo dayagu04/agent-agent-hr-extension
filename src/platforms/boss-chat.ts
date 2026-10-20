@@ -1153,16 +1153,22 @@ async function sendText(content: string, expectThread?: string): Promise<boolean
     }
     await delay(400, 800)
 
-    // 兜底：找「发送」按钮（文本/aria/title/图标型，限定输入框附近，避免误点）
-    const sendBtn = findSendButton(input)
-    if (sendBtn) {
-      sendBtn.click()
-      await delay(300, 600)
+    // 先看 Enter 是否已经发出；发出了就不要再点「发送」按钮，避免重复发送
+    let via = ''
+    if (messageOnScreen(content)) via = 'enter'
+    else {
+      // 兜底：找「发送」按钮（文本/aria/title/图标型，限定输入框附近，避免误点）
+      const sendBtn = findSendButton(input)
+      if (sendBtn) {
+        sendBtn.click()
+        await delay(300, 600)
+        if (messageOnScreen(content)) via = 'button'
+      }
     }
 
     // 校验上屏：读会话区最后几条「我方」气泡是否包含发送内容（比全文 contains 可靠）
-    const ok = await confirmMessageSent(content)
-    diag('CHAT', `发送${ok ? '成功' : '未确认'}`, { contentLength: content.length })
+    const ok = via !== '' || (await confirmMessageSent(content))
+    diag('CHAT', `send status=${ok ? 'sent' : 'unconfirmed'} via=${via || 'none'} length=${content.length}`)
 
     // 发送成功后，检查并恢复列表滚动位置
     if (ok && container) {
@@ -2383,7 +2389,26 @@ function findSendButton(input: HTMLElement): HTMLElement | null {
   return null
 }
 
-/** 确认消息已上屏：轮询会话区最后几条「我方」气泡是否包含发送内容 */
+/**
+ * 确认消息已上屏：轮询会话区最后几条「我方」气泡是否包含发送内容。
+ *
+ * 只在 .item-myself 气泡里核对。旧实现在找不到气泡时退回「整页文本包含」，
+ * 而输入框本身在发送失败时仍保留原文——整页包含必然成立，会把没发出去的
+ * 消息判成已发送（HR 收不到，日志却显示成功）。宁可报未确认。
+ */
+/** 会话区最后几条我方的气泡里是否已出现这段文字（只读一次，不轮询） */
+function messageOnScreen(content: string): boolean {
+  const needle = content.replace(/\s+/g, '').slice(0, 12)
+  if (!needle) return false
+  const panel = findChatPanel()
+  if (!panel) return false
+  const mine = Array.from(panel.querySelectorAll('.item-myself'))
+  for (let j = mine.length - 1; j >= Math.max(0, mine.length - 3); j--) {
+    if ((mine[j].textContent || '').replace(/\s+/g, '').includes(needle)) return true
+  }
+  return false
+}
+
 async function confirmMessageSent(content: string): Promise<boolean> {
   const needle = content.replace(/\s+/g, '').slice(0, 12)
   if (!needle) return false
@@ -2397,8 +2422,6 @@ async function confirmMessageSent(content: string): Promise<boolean> {
         if (t.includes(needle)) return true
       }
     }
-    // 兜底：全文包含（BOSS 改版选择器失效时仍能确认）
-    if ((document.body.textContent || '').includes(content.slice(0, 10))) return true
   }
   return false
 }
