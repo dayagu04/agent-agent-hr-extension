@@ -1213,6 +1213,10 @@ async function sendText(content: string, expectThread?: string): Promise<boolean
     }
     await delay(250, 500)
 
+    // 发送前记下我方气泡数：新气泡是「这次发的」唯一可靠标识（文本匹配会被
+    // 历史同文消息、输入框残留文字误判）。
+    const baseline = countMyBubbles()
+
     // 发送：Enter 键盘事件（keydown+keyup，补 keyCode/which 兼容旧 handler）
     for (const type of ['keydown', 'keyup'] as const) {
       input.dispatchEvent(new KeyboardEvent(type, {
@@ -1228,20 +1232,28 @@ async function sendText(content: string, expectThread?: string): Promise<boolean
 
     // 先看 Enter 是否已经发出；发出了就不要再点「发送」按钮，避免重复发送
     let via = ''
-    if (messageOnScreen(content)) via = 'enter'
+    if (countMyBubbles() > baseline) via = 'enter'
     else {
       // 兜底：找「发送」按钮（文本/aria/title/图标型，限定输入框附近，避免误点）
       const sendBtn = findSendButton(input)
       if (sendBtn) {
         sendBtn.click()
         await delay(300, 600)
-        if (messageOnScreen(content)) via = 'button'
+        if (countMyBubbles() > baseline) via = 'button'
       }
     }
 
-    // 校验上屏：读会话区最后几条「我方」气泡是否包含发送内容（比全文 contains 可靠）
-    const ok = via !== '' || (await confirmMessageSent(content))
-    diag('CHAT', `send status=${ok ? 'sent' : 'unconfirmed'} via=${via || 'none'} length=${content.length}`)
+    // 结果以 BOSS 自己给新气泡打的投递状态为准（送达/已读），不靠文本匹配：
+    // 历史里有同文消息、或发送失败时输入框残留原文，文本匹配都会误判。
+    const delivery = await waitForDelivery(baseline, content)
+    lastSendDelivery = delivery
+    // sending = 新气泡已上屏但回执未到：页面已经发出，绝不能报失败（agent 会重发）
+    const ok = delivery === 'delivered' || delivery === 'read' || delivery === 'sending'
+    diag(
+      'CHAT',
+      `send status=${delivery} via=${via || 'none'} length=${content.length} ` +
+        `bubbles=${baseline}->${countMyBubbles()}`,
+    )
 
     // 发送成功后，检查并恢复列表滚动位置
     if (ok && container) {
@@ -1602,6 +1614,11 @@ export async function sendMessageText(content: string): Promise<boolean> {
     return false
   }
   return sendText(text_, id)
+}
+
+/** 最近一次 sendText 的投递结论（工具层回传给 agent：区分「确认送达」与「已发出待回执」） */
+export function lastDeliveryState(): DeliveryState {
+  return lastSendDelivery
 }
 
 /**
@@ -2849,41 +2866,96 @@ function findSendButton(input: HTMLElement): HTMLElement | null {
 }
 
 /**
- * 确认消息已上屏：轮询会话区最后几条「我方」气泡是否包含发送内容。
+ * 消息投递状态（BOSS 在每条我方气泡上标的 i.message-status）。
  *
- * 只在 .item-myself 气泡里核对。旧实现在找不到气泡时退回「整页文本包含」，
- * 而输入框本身在发送失败时仍保留原文——整页包含必然成立，会把没发出去的
- * 消息判成已发送（HR 收不到，日志却显示成功）。宁可报未确认。
+ * 2026-10-21 实测：class 为 status-delivery（文案「送达」）、status-read（「已读」）。
+ * 这是 BOSS 服务端回执后才打上的标记，比「文本出现在页面上」可靠得多。
  */
-/** 会话区最后几条我方的气泡里是否已出现这段文字（只读一次，不轮询） */
-function messageOnScreen(content: string): boolean {
-  const needle = content.replace(/\s+/g, '').slice(0, 12)
-  if (!needle) return false
-  const panel = findChatPanel()
-  if (!panel) return false
-  const mine = Array.from(panel.querySelectorAll('.item-myself'))
-  for (let j = mine.length - 1; j >= Math.max(0, mine.length - 3); j--) {
-    if ((mine[j].textContent || '').replace(/\s+/g, '').includes(needle)) return true
-  }
-  return false
+export type DeliveryState = 'delivered' | 'read' | 'sending' | 'failed' | 'none'
+
+/** 最近一次 sendText 的投递结果（供工具层回报给 agent） */
+let lastSendDelivery: DeliveryState = 'none'
+
+export function getLastSendDelivery(): DeliveryState {
+  return lastSendDelivery
 }
 
-async function confirmMessageSent(content: string): Promise<boolean> {
-  const needle = content.replace(/\s+/g, '').slice(0, 12)
-  if (!needle) return false
-  for (let i = 0; i < 4; i++) {
-    await delay(300, 500)
-    const panel = findChatPanel()
-    if (panel) {
-      const mine = Array.from(panel.querySelectorAll('.item-myself'))
-      for (let j = mine.length - 1; j >= Math.max(0, mine.length - 3); j--) {
-        const t = (mine[j].textContent || '').replace(/\s+/g, '')
-        if (t.includes(needle)) return true
-      }
-    }
-  }
-  return false
+function myBubbles(): HTMLElement[] {
+  const panel = findChatPanel()
+  if (!panel) return []
+  return Array.from(panel.querySelectorAll('.item-myself')) as HTMLElement[]
 }
+
+/** 当前会话里我方气泡数量（发送前后对比，判断是否出现了这次的新气泡） */
+function countMyBubbles(): number {
+  return myBubbles().length
+}
+
+/** 读一条我方气泡的投递状态 */
+export function readDeliveryState(bubble: Element): DeliveryState {
+  const st = bubble.querySelector('.message-status, [class*="status-"]') as HTMLElement | null
+  if (!st) return 'none'
+  const cls = String(st.className || '')
+  const txt = (st.textContent || '').replace(/\s+/g, '')
+  if (/status-read/.test(cls) || txt === '已读') return 'read'
+  if (/status-delivery|status-deliver|status-sent/.test(cls) || txt === '送达') return 'delivered'
+  if (/fail|error/.test(cls) || /失败|重发/.test(txt)) return 'failed'
+  if (/sending|loading|pending/.test(cls) || /发送中/.test(txt)) return 'sending'
+  return 'none'
+}
+
+/**
+ * 等这次发送的新气泡出现并拿到 BOSS 的投递回执。
+ *
+ * 事件驱动（MutationObserver），不是固定轮询：气泡/状态一变化立刻判定，
+ * 最长等 timeoutMs。返回：
+ *   delivered/read — BOSS 已回执，确定发出
+ *   sending        — 新气泡出现了但还没回执（页面已发出，结果待定，不能重发）
+ *   failed         — BOSS 标了发送失败
+ *   none           — 没出现新气泡（确定没发出去）
+ */
+async function waitForDelivery(baseline: number, content: string, timeoutMs = 8000): Promise<DeliveryState> {
+  const needle = content.replace(/\s+/g, '').slice(0, 12)
+  // 这次的新气泡：排在 baseline 之后、且文本吻合的那一条（防止 HR 同时发消息干扰）
+  const pick = (): HTMLElement | null => {
+    const fresh = myBubbles().slice(baseline)
+    for (let i = fresh.length - 1; i >= 0; i--) {
+      const t = (fresh[i].textContent || '').replace(/\s+/g, '')
+      if (!needle || t.includes(needle)) return fresh[i]
+    }
+    return null
+  }
+  const verdict = (): DeliveryState | null => {
+    const b = pick()
+    if (!b) return null
+    const s = readDeliveryState(b)
+    if (s === 'delivered' || s === 'read' || s === 'failed') return s
+    return null
+  }
+  const now = verdict()
+  if (now) return now
+  const panel = findChatPanel()
+  if (!panel) return 'none'
+  return new Promise<DeliveryState>((resolve) => {
+    let done = false
+    const finish = (s: DeliveryState): void => {
+      if (done) return
+      done = true
+      obs.disconnect()
+      clearTimeout(timer)
+      resolve(s)
+    }
+    const obs = new MutationObserver(() => {
+      const v = verdict()
+      if (v) finish(v)
+    })
+    // 状态是改 class/文案，不只是增删节点，所以三类变化都要监听
+    obs.observe(panel, { childList: true, subtree: true, attributes: true, characterData: true })
+    // 超时：有新气泡但没回执 = sending（已发出、结果待定）；没有新气泡 = none
+    const timer = setTimeout(() => finish(pick() ? 'sending' : 'none'), timeoutMs)
+  })
+}
+
 
 /**
  * 会话身份键：用于跨滚动窗口去重（虚拟列表节点会被复用，引用不可靠）

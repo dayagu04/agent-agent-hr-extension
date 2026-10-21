@@ -22,6 +22,7 @@ import {
   probeRowObject,
   readRowJobInfo,
   sendMessageText,
+  lastDeliveryState,
   sendResumeDetailed,
   type ChatCardKind,
 } from './platforms/boss-chat'
@@ -168,7 +169,12 @@ const TOOLS: ToolSpec[] = [
       const text = str(args, 'text')
       if (!text) return { ok: false, error: 'text_required' }
       const ok = await sendMessageText(text)
-      return { ok, error: ok ? undefined : 'send_unconfirmed' }
+      // delivery：delivered/read=BOSS 已回执；sending=已上屏待回执（已发出，勿重发）；
+      // failed=BOSS 标了失败；none=没出现新气泡（确定没发出）
+      const delivery = lastDeliveryState()
+      return ok
+        ? { ok: true, data: { delivery } }
+        : { ok: false, data: { delivery }, error: delivery === 'failed' ? 'send_failed' : 'send_not_sent' }
     },
   },
   {
