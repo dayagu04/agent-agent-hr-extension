@@ -125,7 +125,7 @@ tool name=delete_thread status=error ms=120 error=not-found
 | `list_pending_cards` | — | | 列出待处理卡片 |
 | `open_thread` | `company`, `jobTitle?` | | 打开指定会话 |
 | `click_card` | `kind`, `accept`, `resumeName?`, `resumeIndex?` | ✓ | 点卡片同意/拒绝；同意索要简历时走完发送 |
-| `send_message` | `text` | ✓ | 给当前会话发文本 |
+| `send_message` | `text` | ✓ | 给当前会话发文本；返回 `data.delivery` = delivered/read/sending/failed/none |
 | `send_resume` | `resumeName?`, `resumeIndex?` | ✓ | 发附件简历；失败返回具体原因码 |
 | `delete_thread` | `company`, `jobTitle?` | ✓ | 删除会话 |
 | `probe_overlays` | — | | 读可见浮层结构（排障用） |
@@ -149,6 +149,30 @@ tool name=delete_thread status=error ms=120 error=not-found
 | 删会话 | `delete_thread` | 已验证（京北方会话删除成功，重新打开返回 not-found） |
 
 判定「封装完成」的标准：agent 只靠工具 + `/tools/result` 就能完成该环节，不依赖页面手动操作。
+
+### 不可撤回工具的结果判定（agent 必读）
+
+`GET /api/plugin/tools/result/{id}`：
+
+| HTTP | `state` | 含义 | agent 该做什么 |
+|---|---|---|---|
+| 200 | `done` | 结果已回传，看 `ok` / `data` | 按结果处理 |
+| 202 | `queued` | 插件还没取走 | 继续等；可安全撤销重发 |
+| 202 | `delivered` | 插件已取走、正在执行 | **继续等，绝不重发** |
+| 202 | `acked` | 插件执行完但结果没传回 | **不重发**，用 `read_messages` 核实 |
+| 404 | — | 命令不存在 | 重新下发 |
+
+`send_message` 的 `data.delivery`：
+
+| 值 | 页面证据 | 是否已发出 |
+|---|---|---|
+| `delivered` | 新气泡上 `i.message-status.status-delivery`「送达」 | 是 |
+| `read` | `i.message-status.status-read`「已读」 | 是 |
+| `sending` | 新气泡已出现，回执 8 秒内未到 | 是（视为已发出，**不重发**） |
+| `failed` | BOSS 标了失败/重发 | 否 |
+| `none` | 没出现新气泡 | 否 |
+
+判定只看「发送前后我方气泡数 + BOSS 回执标记」，不靠文本匹配（历史同文消息、输入框残留都会误判）。
 
 ## 9. BOSS 页面的真实标记（2026-10-20 实测，别再猜）
 
