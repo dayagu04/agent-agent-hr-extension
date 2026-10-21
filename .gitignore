@@ -3,11 +3,3 @@ dist/
 *.local
 .DS_Store
 *.tsbuildinfo
-__pycache__/
-# 截图工具的临时暂存目录（tools/shoot.py 每次运行重建）
-tools/.shot-stage/
-# 截图工具产出（tools/shoot.py 可随时重新生成，不入库）
-docs/screenshots/
-# 截图工具生成的临时 bundle / 本地依赖副本（不入库）
-tools/bundle.user.js
-tools/vue.global.prod.js

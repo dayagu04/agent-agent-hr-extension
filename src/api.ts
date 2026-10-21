@@ -379,43 +379,6 @@ export async function fetchChatPlan(
   }
 }
 
-/** POST /api/plugin/chat/audit — 只读会话审计上报（测试阶段人工核对，不做回复/删除） */
-export interface ChatAuditItem {
-  key: string
-  company: string
-  job_title: string
-  encrypt_job_id: string
-  unread_count: number
-  plan_action: string          // reply / cleanup / none（后端计划判定，供对比）
-  last_sender: string          // hr / me / system / none
-  last_text: string
-  messages: Array<{ sender: string; content: string }>
-}
-
-export async function reportChatAudit(
-  cfg: PluginConfig,
-  payload: {
-    run_id?: string
-    scope: string
-    plan_pending: number
-    items: ChatAuditItem[]
-    summary: Record<string, number>
-  },
-): Promise<boolean> {
-  try {
-    const resp = await network.request({
-      method: 'POST',
-      url: `${cfg.apiBase}/api/plugin/chat/audit`,
-      headers: authHeaders(cfg),
-      data: JSON.stringify(payload),
-      timeout: 30000,
-    })
-    return resp.status === 200
-  } catch (e) {
-    diag('API', 'chat/audit 上报异常', { errorType: (e as Error).name || 'Error' })
-    return false
-  }
-}
 
 /**
  * POST /api/plugin/judge-jobs — LLM 判断岗位是否低质量（外包/批量招聘）。

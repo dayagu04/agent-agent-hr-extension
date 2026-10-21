@@ -9,7 +9,6 @@ import { diag } from '../logger'
 import type { AgentPolicy, ContactChannel, PluginConfig } from '../types'
 import {
   markChatSent,
-  reportChatAudit,
   reportChatOutcome,
   syncChatOne,
   reconcileThreads,
@@ -2761,93 +2760,6 @@ export async function runChatRound(
   }
 }
 
-/**
- * 只读会话审计（测试阶段人工核对用）：逐条读取会话消息，区分 系统/HR/我方 三类，
- * 连同后端计划的判定（reply/cleanup/none）一并上报，供核对「待回复」是否准确。
- * 全程不发送、不删除、不调用 sync（不写任何对话记录）。
- */
-export async function runChatAudit(
-  cfg: PluginConfig,
-  log: (m: string) => void,
-  opts: { runId?: string; replyScope?: 'this_round' | 'all' } = {},
-): Promise<{ collected: number }> {
-  const replyScope = opts.replyScope || 'all'
-  const { pending, targets } = await loadChatPlan(cfg, { replyScope })
-  log(`开始只读会话审计（后端计划待回复 ${pending}，仅采集不上报不回复不删除）...`)
-  diag('AUDIT', `只读审计开始 plan_pending=${pending} scope=${replyScope}`)
-
-  const sources = readChatSources()
-  if (!sources || sources.length === 0) {
-    log('未找到零滚动数据源：请确认当前在 BOSS 聊天页且列表已加载')
-    return { collected: 0 }
-  }
-
-  const items: Array<{
-    key: string
-    company: string
-    job_title: string
-    encrypt_job_id: string
-    unread_count: number
-    plan_action: string
-    last_sender: string
-    last_text: string
-    messages: Array<{ sender: string; content: string }>
-  }> = []
-  const summary: Record<string, number> = {
-    total: 0, hr: 0, me: 0, system: 0, none: 0,
-    plan_reply: 0, plan_cleanup: 0, plan_match: 0,
-  }
-
-  for (const s of sources) {
-    if (shouldAbortChatRound()) break
-    const boss = s.boss
-    const rowInfo = bossRowInfo(boss)
-    const target = findPlanTarget(targets, rowInfo, { lenient: true })
-    const t = await openThreadByIndex(s.index)
-    if (!t) {
-      diag('AUDIT', `打开失败 idx=${s.index}，跳过`)
-      continue
-    }
-    const messages = await readMessages()
-    const last = messages[messages.length - 1]
-    const lastSender = last?.sender || 'none'
-    summary.total++
-    summary[lastSender] = (summary[lastSender] || 0) + 1
-    const planAction = target?.action || 'none'
-    if (target) {
-      summary.plan_match++
-      summary[`plan_${planAction}`] = (summary[`plan_${planAction}`] || 0) + 1
-    }
-    items.push({
-      key: chatTargetKey(rowInfo),
-      company: rowInfo.company || boss.name || '',
-      job_title: rowInfo.jobTitle || '',
-      encrypt_job_id: rowInfo.encryptJobId || '',
-      unread_count: Number(boss.unreadCount || 0),
-      plan_action: planAction,
-      last_sender: lastSender,
-      last_text: (last?.content || '').slice(0, 80),
-      messages: messages.slice(-12).map((m) => ({
-        sender: m.sender,
-        content: (m.content || '').slice(0, 120),
-      })),
-    })
-  }
-
-  const ok = await reportChatAudit(cfg, {
-    run_id: opts.runId || '',
-    scope: replyScope,
-    plan_pending: pending,
-    items,
-    summary,
-  })
-  log(
-    `审计完成：采集 ${summary.total} 个会话，最后发送方 HR=${summary.hr} 我方=${summary.me} ` +
-      `系统=${summary.system}；已${ok ? '上报后端' : '上报失败（请检查网络）'}`,
-  )
-  diag('AUDIT', `只读审计完成 total=${summary.total} hr=${summary.hr} me=${summary.me} sys=${summary.system} upload=${ok}`)
-  return { collected: summary.total }
-}
 
 /** 找输入框附近的「发送」按钮（文本/aria/title/图标 class，可见才算） */
 function findSendButton(input: HTMLElement): HTMLElement | null {
@@ -3290,8 +3202,6 @@ function findThreadScrollContainer(): HTMLElement | null {
   }
   return fallback
 }
-
-// 时间解析见 boss-time.ts（跨天边界修正 + 相对时间，独立可测）。
 
 /** 删除当前已打开的会话（头部菜单 → 确认弹窗）。 */
 async function deleteCurrentThread(): Promise<boolean> {

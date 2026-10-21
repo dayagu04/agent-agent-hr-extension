@@ -1,124 +1,100 @@
-# 智能求职助手 — 社招自动投递油猴插件
+# BOSS 直聘 Agent 工具层（油猴插件）
 
-基于匹配度模型，在招聘平台自动筛选投递岗位、托管 HR 会话的油猴（Tampermonkey）插件。
+**本仓库的核心目标：把 BOSS 直聘页面上能做的每一件事，封装成标准工具，供上游 agent 调用。**
 
-是 `agent-agent-hr` 主项目的子模块，复用主项目的匹配引擎（规则 + 语义 + LLM），
-通过 `/api/plugin/*` HTTP 接口与后端通信；请求入口见 [src/api.ts](src/api.ts) 和 [src/remote.ts](src/remote.ts)。
+agent 负责决策（投哪个岗位、回什么话、发哪份简历、删不删会话），本插件只负责在用户真实的 BOSS 页面里**执行**并**如实回报结果**。插件里不放业务策略。
 
-## 功能
+工具规范、清单、调用协议和 BOSS 页面的真实标记见 **[AGENTS.md](./AGENTS.md)**（工具层的唯一规范）。
 
-- **匹配度筛选投递**：扫描搜索页岗位 → 后端批量评分 → 按阈值与过滤规则（黑名单/最低薪资）筛选 → 拟人间隔逐个投递，实时标记每张卡片的结果。
-- **智能编排**：决策由后端 LangGraph 统一完成，插件只按指令执行（搜索 → 逐页投递 → 定期回会话页自动回复），跨页持续运行直到目标达成，页面刷新自动恢复。
-- **会话托管**：自动读取 HR 消息、交后端分类生成回复、页面内发送并回报结果；处理「索要简历」「工作地点确认」卡片。联系方式卡片按网页端 Agent 策略执行：已配置并允许的手机、微信或邮箱可自动交换，未识别、拒绝或要求人工确认的卡片会跳过并记录原因。
-- **HR 消息列表**：以 BOSS 页面 DOM 为真相源渲染会话列表，后端只做富化（内容摘要/时间/匹配分），低分/未评分会话标注跳过原因。
-- **DOM 诊断**：日志 Tab 可采集页面真实 DOM 结构并导出，用于平台改版后的适配。
+## 产品形态
 
-## 平台支持
-
-| 平台 | 状态 |
-|------|------|
-| BOSS 直聘 | ✅ 主平台：投递 + 会话托管 + 智能编排全链路 |
-| 智联招聘 | ✅ 手动启动的列表页投递；⏸ 暂不接入后端智能编排（需真实页面回归后再开放） |
-| 51前程无忧 / 猎聘 | ⏸ 暂停投入：适配器选择器未在真实页面验证，`@match` 未启用 |
-
-### 智能编排执行协议
-
-后端是任务状态机的唯一决策方，插件只执行动作并回报事实：
-
-1. 页面端创建运行目标，插件把 `started` 事件写入本地事件 outbox。
-2. 心跳拉取 `apply_batch`、`chat_snapshot`、`chat_reply` 等动作；动作在执行前写入持久化的 `pendingAction`，页面跳转后由新页面恢复。
-3. 批次完成、会话快照和回复结果带稳定 `event_id` 上报。网络失败、页面刷新或 API 重启时，outbox 会在下一次心跳重试；服务端按事件键幂等处理，避免重复计数。
-4. 执行器未恢复、正在执行其他动作或发现跨标签页租约冲突时不会确认命令，后端会继续投递该命令。
-
-当前只有 BOSS 直聘开放跨页智能编排，因为它同时具备已验证的搜索导航、投递确认和会话托管链路。其他平台仍可单页手动投递；完成真实页面回归、结果确认和风控处理后，才会加入编排白名单。
-
-## 安装
-
-### 1. 安装 Tampermonkey
-
-Chrome/Edge 安装 [Tampermonkey](https://www.tampermonkey.net/)，并在扩展详情里开启「开发者模式」和「允许用户脚本 / Allow user scripts on all sites」（Manifest V3 权限门槛，默认关闭会导致脚本静默失效）。
-
-### 2. 安装脚本
-
-**从 Release 安装（推荐）**：下载 [Releases](https://github.com/dayagu04/agent-agent-hr-tampermonkey/releases) 页最新的 `agent-agent-hr-tampermonkey.user.js`，拖入 Tampermonkey「添加新脚本」。脚本头带 `@updateURL`，新版本会自动提示更新。
-
-**本地构建**：
-
-```bash
-npm install
-npm run build
-# 产物：dist/agent-agent-hr-tampermonkey.user.js，内容拖入 Tampermonkey
+```
+上游 agent（服务端决策）
+   │  POST /api/plugin/tools/call {name, args}      GET /api/plugin/tools/result/{id}
+   ▼
+agent-agent-hr 后端（命令队列 + 结果暂存，见主仓 server/routers/plugin.py）
+   │  插件每秒心跳：上报工具清单 / 取走命令 / 回传结果
+   ▼
+本插件（运行在用户浏览器的 BOSS 页面里）── 执行页面动作 → BOSS 直聘
 ```
 
-本机联调后端时使用固定的本地构建命令，不会改动生产构建默认地址：
+- **为什么跑在用户浏览器里**：BOSS 的风控、登录态、字体混淆都绑在真实浏览器会话上。插件复用用户自己的登录态，以人的方式点页面，不碰 BOSS 私有接口。
+- **两种使用方式**：
+  1. **agent 驱动（主形态）**：插件常驻在 BOSS 页面，上游 agent 通过 HTTP 调工具，无需人工操作。
+  2. **面板驱动**：页面右侧「投」悬浮面板，用户登录、选简历、一键开始自动投递（内部走后端编排，同一套页面能力）。面板标题栏 🧪 是工具调试入口。
+
+## 工具一览
+
+20 个工具，全部在真实账号上验证过（详细参数、返回值与验证记录见 [AGENTS.md §7–§8](./AGENTS.md)）：
+
+| 环节 | 工具 |
+|---|---|
+| 搜索与岗位 | `open_search` `scan_jobs` `read_job_detail` `apply_job` |
+| 筛选条件 | `read_filters` `select_filters` |
+| 会话与消息 | `list_threads` `read_thread_header` `open_thread` `read_messages` `send_message` |
+| HR 卡片与简历 | `list_pending_cards` `click_card` `send_resume` |
+| 会话管理 | `delete_thread` |
+| 状态与排障 | `get_page_state` `probe_dom` `probe_overlays` `probe_row` `list_tools` |
+
+不可撤回的工具（`apply_job` `select_filters` `click_card` `send_message` `send_resume` `delete_thread`）在清单里带 `irreversible: true`。
+
+## 快速开始（开发 / 联调）
 
 ```bash
-npm run build:local
-# 默认连接 http://127.0.0.1:8010；也可用 VITE_API_BASE 覆盖
+npm ci
+npm run build:local          # 连本地后端 http://127.0.0.1:8010
+# 把 dist/agent-agent-hr-tampermonkey.user.js 拖进 Tampermonkey，打开 BOSS 聊天页并登录面板
 ```
 
-本地构建产物只应安装到开发浏览器配置中；生产验证仍使用 Release 产物。
+后端在主仓用 `./scripts/start-local-test.sh` 启动（开启账号密码登录、建本地测试账号）。
 
-**开发热更新**：`npm run dev`，在油猴里安装 vite 提供的 install 链接，改代码自动更新。
+然后直接调工具，**与上游 agent 走完全相同的接口**：
 
-## 配置与使用
+```bash
+npm run tool -- list                                   # 插件上报的工具清单
+npm run tool -- get_page_state                         # 当前页面/会话
+npm run tool -- read_thread_header '{"company":"某公司"}'
+npm run tool -- send_message '{"text":"您好"}'          # 不可撤回
+```
 
-打开任一支持平台的页面，右下角出现蓝色「投」悬浮球：
+`scripts/tool.mjs` 实现了结果协议（`202 queued/delivered/acked`），超时只报告状态、**从不自动重发**。环境变量见脚本头注释。
 
-1. 设置 Tab：确认“连接环境”和只读 API 地址 → 邮箱密码登录（或粘贴网页端 Token）→ 选简历 → 从网站同步求职偏好。地址由构建目标决定，不能在生产脚本里临时改写。
-2. 调整匹配阈值、投递上限、投递间隔、会话托管回复阈值等。
-3. 投递 Tab：在搜索结果页点「投当前页」只投本页；或配置目标与关键词后启动「智能编排」。
-4. 会话 Tab：在 BOSS 聊天页点「开始会话托管」自动回复 HR；会话列表点击卡片可跳转打开对应会话。
+## 安装（用户）
 
-卡片左边框颜色标记处理状态：绿 = 匹配通过，蓝 = 已投，灰 = 跳过，橙 = 失败，紫 = 待核对。
-
-### Agent 联系方式策略
-
-联系方式权限在网页端「我的助手」中配置，保存后通过「从网站同步配置」下发到插件。全自动模式也只会交换明确勾选的渠道；可分别关闭手机、微信和邮箱，或将联系方式卡片设为通知后执行、执行前确认、拒绝。未知渠道和未知卡片不会盲点，插件会保留跳过原因供后台复盘。
-
-平台验证、登录失效、验证码等异常由后端编排器记录并通过通知渠道提醒；密码、验证码、支付信息和证件信息不会由插件自动发送。
+1. Chrome/Edge 装 [Tampermonkey](https://www.tampermonkey.net/)，在扩展详情里开启「开发者模式」与「允许用户脚本」（MV3 权限，默认关闭会让脚本静默失效）。
+2. 从 [Releases](https://github.com/dayagu04/agent-agent-hr-tampermonkey/releases) 下载最新 `agent-agent-hr-tampermonkey.user.js` 拖入 Tampermonkey。脚本带 `@updateURL`，会自动提示更新。
+3. 打开 BOSS 直聘，右侧出现「投」悬浮球，登录后即可。
 
 ## 项目结构
 
 ```
-tampermonkey-plugin/
-├── vite.config.ts          # vite-plugin-monkey 配置（@match/@grant/版本）
-├── src/
-│   ├── main.ts             # 入口：注入 Vue 面板
-│   ├── App.vue             # 悬浮面板 UI（投递/会话/设置/日志）
-│   ├── api.ts              # 后端通信（统一走 platform-bridge 网络层）
-│   ├── platform-bridge.ts  # GM API 隔离层（存储/网络/通知）
-│   ├── engine.ts           # 投递引擎（扫描→过滤→匹配→投递→上报）
-│   ├── orchestrator.ts     # 执行器（执行后端编排指令 + 事件上报 + 跨页恢复）
-│   ├── remote.ts           # 网页端远程管理（心跳上报 + 命令轮询）
-│   ├── chat-store.ts       # 会话低分判定缓存
-│   ├── ledger.ts           # 会话本地镜像 + 岗位缓存
-│   ├── dom-events.ts       # 合成点击工具（pointer+mouse 事件序列）
-│   ├── domprobe.ts         # 通用 DOM 定位（文本/角色锚点）
-│   ├── dom-collector.ts    # 结构化 DOM 采集
-│   ├── logger.ts           # 页面内诊断日志（持久化 + 面板展示）
-│   ├── search-filter.ts    # BOSS 搜索页筛选选项动态读取/应用
-│   ├── config.ts / types.ts / version.ts
-│   └── platforms/
-│       ├── base.ts         # 平台抽象基类
-│       ├── factory.ts      # URL → 平台实例
-│       ├── boss.ts         # BOSS 投递
-│       ├── boss-chat.ts    # BOSS 会话托管/删除
-│       ├── boss-delete.ts  # BOSS 删除链路（行组件/列表菜单/头部菜单）
-│       ├── boss-probe.ts   # BOSS 聊天页 DOM 采集
-│       ├── zhaopin.ts / liepin.ts / qiancheng.ts
-└── dist/                   # 构建产物（git 忽略）
+src/
+├── tools.ts            # ★ 工具注册表：agent 可调用的全部原子操作
+├── remote.ts           # 心跳 / 命令轮询 / tool.call 执行与结果回传
+├── platforms/
+│   ├── boss.ts         # 搜索页：扫描岗位、读 JD、立即沟通
+│   ├── boss-chat.ts    # 聊天页：会话、消息、卡片、发消息/简历、投递回执
+│   ├── boss-delete.ts  # 删除会话链路
+│   ├── base.ts / factory.ts
+│   └── zhaopin.ts / liepin.ts / qiancheng.ts   # 其他平台适配（未开放 agent 工具）
+├── search-filters.ts   # 搜索页筛选区读取与点选
+├── nav-unread.ts       # 导航未读角标
+├── orchestrator.ts / engine.ts   # 面板「自动投递」：执行后端编排指令
+├── api.ts / platform-bridge.ts   # 后端通信 / GM API 隔离层
+├── dom-events.ts / domprobe.ts   # 合成点击（含遮挡处理）/ 通用 DOM 定位
+├── logger.ts           # 脱敏诊断日志，批量上报后端（落盘 logs/plugin/）
+├── App.vue / TestTools.vue        # 悬浮面板 / 🧪 工具调试区
+└── ledger.ts / chat-*.ts / contact-policy.ts / config.ts / types.ts
+scripts/
+├── tool.mjs            # 命令行调用工具（开发联调 / 验收）
+└── build-local.mjs     # 本地构建（连 127.0.0.1:8010）
 ```
 
-## 开发
+## 开发约束
 
-```bash
-npm install        # 装依赖
-npm run dev        # 开发模式（热更新）
-npm run build      # 生产构建 → dist/*.user.js
-npm run typecheck  # vue-tsc 类型检查
-```
+- **读页面结构用工具，不开 DevTools**：BOSS 检测到 F12 会关页。用 `probe_dom` / `probe_overlays` / `probe_row` 拿真实结构。
+- **页面判断以 BOSS 自己的标记为准**（按钮禁用态、投递回执、系统卡片），不靠文本猜。已确认的标记记在 AGENTS.md §9。
+- **日志脱敏**：只记数量、状态、长度，不记消息正文、简历文件名、联系方式。
+- 开发规范、版本与发布流程见 [CONTRIBUTING.md](./CONTRIBUTING.md)。
 
-技术栈：Vue 3 + TypeScript + Vite + vite-plugin-monkey。
-
-平台改版导致选择器失效时，用日志 Tab 的「采集当前页 / 聊天页结构」采集真实 DOM 并导出日志，再据实适配。
+技术栈：Vue 3 + TypeScript + Vite + vite-plugin-monkey，测试用 Vitest（jsdom）。

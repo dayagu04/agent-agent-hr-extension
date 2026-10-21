@@ -9,11 +9,9 @@ import { VERSION } from './version'
 import { loadConfig, saveConfig, isConfigReady, applyPluginPreferences } from './config'
 import { network, storage } from './platform-bridge'
 import { diag, flushLogs } from './logger'
-import { startDebugCapture } from './debug'
 import {
   flushOrchestratorEvents, getCurrentJob, getOrchestrator, getOrchestratorSnapshot, resumeOrchestrator,
 } from './orchestrator'
-import { runChatAudit } from './platforms/boss-chat'
 import { callTool, toolCatalog } from './tools'
 import { reportToolResult } from './api'
 import { detectPlatform } from './platforms/factory'
@@ -304,13 +302,6 @@ async function executeCommand(
       case 'orchestrator.action':
         // 后端 LangGraph 下发的执行指令（apply_batch / chat_snapshot / chat_reply / stop / pause）
         return await orch.applyBackendAction((cmd.payload || {}) as Record<string, unknown>)
-      case 'chat.audit':
-        // 只读会话审计（测试阶段人工核对）：采集分类消息，不回复不删除
-        await runChatAudit(cfg, (m) => diag('AUDIT', m), {
-          runId: typeof cmd.payload?.run_id === 'string' ? cmd.payload.run_id : '',
-          replyScope: cmd.payload?.reply_scope === 'this_round' ? 'this_round' : 'all',
-        })
-        break
       case 'tool.call': {
         // agent 直接调用一个原子工具。参数：{ name, args }
         // 不论工具成败都 ACK（返回 true）：不可撤回的工具不能因为 ACK 丢失而重试一次。
@@ -331,11 +322,6 @@ async function executeCommand(
         // 网页端改了核心配置(单轮投递上限/阈值等):通知面板静默重拉配置,实时生效
         window.dispatchEvent(new CustomEvent('aah:config-reload'))
         break
-      case 'debug.start': {
-        // 手动调试：采集当前页 DOM + 30s 内操作记录（DBG 标签进日志）
-        startDebugCapture()
-        break
-      }
       default:
         console.warn('[remote] 未知命令', cmd.action)
         return false
@@ -351,14 +337,38 @@ async function executeCommand(
   }
 }
 
+/**
+ * 心跳节拍器：优先用 Worker 里的定时器驱动。
+ *
+ * 实测（2026-10-21）：BOSS 标签页切到后台（visibility=hidden）后，页面主线程的
+ * setInterval 被 Chrome 节流到约 1 分钟一跳，agent 调一个工具要等 60s 才被取走。
+ * Worker 内的定时器不受这条节流约束，主线程只在收到 tick 时干活。
+ * 创建 Worker 失败（CSP 禁 blob: 等）时退回主线程 setInterval，功能不变、只是后台会慢。
+ */
+function startTicker(intervalMs: number, onTick: () => void): void {
+  try {
+    const src = `setInterval(() => postMessage(0), ${Math.max(200, intervalMs)})`
+    const url = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }))
+    const worker = new Worker(url)
+    worker.onmessage = onTick
+    worker.onerror = () => {
+      worker.terminate()
+      window.setInterval(onTick, intervalMs)
+    }
+    return
+  } catch {
+    window.setInterval(onTick, intervalMs)
+  }
+}
+
 /** 启动远程管理循环（心跳 + 命令轮询），页面挂载后调用一次 */
 // 心跳间隔即"网页端指令生效延迟"上限：1s 一跳，指令最坏 1s 内执行。
 // 后端 heartbeat 端点是纯内存操作（无 DB 写），1s 频率无数据库风险；
 // 访问日志已对 heartbeat/status/config 降噪（server/main.py），日志量可控。
 export function startRemoteLoop(intervalMs = 1000): void {
-  window.setInterval(() => {
+  startTicker(intervalMs, () => {
     void reportHeartbeatAndPoll()
-  }, intervalMs)
+  })
   void reportHeartbeatAndPoll()
 
   // 休眠唤醒恢复：浏览器后台标签页的定时器会被节流（可能 1 分钟才一跳），

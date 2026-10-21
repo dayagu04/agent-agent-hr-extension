@@ -1,33 +1,31 @@
-# AGENTS.md — 插件工具（原子操作）标准模板
+# AGENTS.md — 工具层规范（唯一来源）
 
-本文件是插件「工具层」的规范。新增任何面向 agent 的页面能力，都必须按这里的模板做，
-不要另起一套。分支与提交规范见 [CONTRIBUTING.md](./CONTRIBUTING.md)。
+本仓库的目的是**把 BOSS 直聘页面能力封装成标准工具供上游 agent 调用**（产品形态见 [README](./README.md)）。
+本文件定义：工具是什么、怎么调、怎么新增、返回值怎么判、BOSS 页面的真实标记。
+新增任何面向 agent 的页面能力都按这里做，不另起一套。分支与发布见 [CONTRIBUTING.md](./CONTRIBUTING.md)。
 
-## 0. 开发与验证方式（插件常驻，直接调接口）
+## 0. 怎么调用（插件常驻，直接调接口）
 
-插件在浏览器里保持启用即可。开发者和 agent **不需要**在页面上手动点按钮：
+插件在 BOSS 页面里保持启用即可，开发者和 agent 都**不需要**在页面上点任何东西。
 
 ```bash
-# 1) 登录本地服务端拿 token（本地测试账号）
-TOKEN=$(curl -s -X POST http://127.0.0.1:8010/api/auth/login \
-  -H 'Content-Type: application/json' \
-  -d '{"email":"test@local.dev","password":"test1234"}' | jq -r .token)
-
-# 2) 调一个工具（插件下次心跳取走执行）
-curl -s -X POST http://127.0.0.1:8010/api/plugin/tools/call \
-  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"name":"read_filters","args":{}}'
-# → {"queued":true,"command_id":16,...}
-
-# 3) 取结果（插件执行完回传）
-curl -s http://127.0.0.1:8010/api/plugin/tools/result/16 -H "Authorization: Bearer $TOKEN"
+npm run tool -- list                                    # 插件当前上报的工具清单
+npm run tool -- read_thread_header '{"company":"某公司"}'
 ```
 
-- 结果默认保留 10 分钟、上限 200 条、超过 200KB 截断；日志 `logs/plugin/YYYY-MM-DD.log` 只有摘要。
-- **读页面结构也用工具**，不要指望 DevTools（BOSS 会因开 F12 关页）：
-  `get_page_state`（当前网址/是否聊天页/当前会话）、`read_filters`（筛选分组与选项）、
-  `scan_jobs`（岗位字段）、`list_threads` / `read_messages`（会话与消息分类）。
-- 插件在页面上必须处于启用状态；心跳约 1 秒一次，命令最迟 1~2 秒被消费。
+`scripts/tool.mjs` 走的就是 agent 用的两个接口：
+
+```
+POST /api/plugin/tools/call    {name, args}  → {queued, command_id, irreversible}
+GET  /api/plugin/tools/result/{command_id}   → 200 结果 / 202 阶段（见 §8）
+```
+
+- 入队前服务端按插件上报的清单校验工具名，未知工具 400。
+- 结果保留 10 分钟、上限 200 条、超过 200KB 截断；`logs/plugin/YYYY-MM-DD.log` 只有摘要。
+- **读页面结构也用工具，不开 DevTools**（BOSS 检测到 F12 会关页）：
+  `get_page_state` `read_filters` `scan_jobs` `list_threads` `read_messages` `probe_dom` `probe_overlays` `probe_row`。
+- **时延**：插件约 1 秒一次心跳。标签页在后台时，0.6.56 起由 Worker 驱动心跳避开 Chrome 节流；
+  更早版本后台挂久了会退化成约 1 分钟才取一条命令（命令不会丢，只是慢）。
 
 ## 1. 什么是工具
 
@@ -96,17 +94,17 @@ tool name=delete_thread status=error ms=120 error=not-found
 1. 页面动作写到 `src/platforms/<平台>.ts` 或专题模块（如 `search-filters.ts`），导出纯函数；
 2. 在 `src/tools.ts` 的 `TOOLS` 加一项，按第 2 节模板填全字段；
 3. 在 `src/tools.test.ts` 补两条：目录里出现、关键失败分支返回正确原因码；
-4. `npm run typecheck && npm test && npm run build:local`；
-5. 在测试面板里手动跑一次（见第 6 节），确认真实页面可用再算完成。
+4. `npm run typecheck && npm test && npm run build:local`，刷新 BOSS 页面装上新版本；
+5. `npm run tool -- <新工具> '<args>'` 在真实页面跑通，再在 §7/§8 补上验证记录，才算完成。
 
-## 6. 测试面板（内嵌在投递面板里）
+## 6. 面板内调试区（辅助）
 
 - 入口：投递面板标题栏的 🧪 按钮（`src/TestTools.vue`，在面板内展开，不另开窗口）。
 - 打开后面板主体只显示测试工具，业务步骤暂时隐藏；点「关闭测试」回到正常投递流程。
 - 工具以两列卡片列出，选中后填 JSON 参数执行，结果就地显示。
 - 不可撤回工具需要点两次（第一次上膛，第二次执行）。
 - 结果同时写入 `logs/plugin/` 的 `[TOOL]` 行。
-- 这个区域只用于开发/验收，不承载业务逻辑。
+- 只用于人工点按排查；验收以 §0 的命令行调用为准。不承载业务逻辑。
 
 ## 7. 现有工具（以此为准）
 
@@ -150,7 +148,9 @@ tool name=delete_thread status=error ms=120 error=not-found
 
 判定「封装完成」的标准：agent 只靠工具 + `/tools/result` 就能完成该环节，不依赖页面手动操作。
 
-### 不可撤回工具的结果判定（agent 必读）
+**不可撤回工具超时后一律不自动重发**：先看 `state`，`delivered`/`acked` 时用只读工具（`read_messages` / `list_pending_cards` / `list_threads`）核实页面结果。
+
+### 结果判定协议（agent 必读）
 
 `GET /api/plugin/tools/result/{id}`：
 
@@ -160,7 +160,7 @@ tool name=delete_thread status=error ms=120 error=not-found
 | 202 | `queued` | 插件还没取走 | 继续等；可安全撤销重发 |
 | 202 | `delivered` | 插件已取走、正在执行 | **继续等，绝不重发** |
 | 202 | `acked` | 插件执行完但结果没传回 | **不重发**，用 `read_messages` 核实 |
-| 404 | — | 命令不存在 | 重新下发 |
+| 404 | — | 命令不存在（或不属于当前用户） | 重新下发 |
 
 `send_message` 的 `data.delivery`：
 

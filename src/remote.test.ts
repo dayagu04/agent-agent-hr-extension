@@ -11,7 +11,6 @@ vi.mock('./config', () => ({
   applyPluginPreferences: vi.fn((cfg) => cfg),
 }))
 vi.mock('./logger', () => ({ diag: vi.fn(), flushLogs: vi.fn() }))
-vi.mock('./debug', () => ({ startDebugCapture: vi.fn() }))
 vi.mock('./orchestrator', () => ({
   getCurrentJob: vi.fn(() => null),
   getOrchestratorSnapshot: vi.fn(async () => null),
@@ -23,7 +22,6 @@ vi.mock('./orchestrator', () => ({
   })),
   flushOrchestratorEvents: vi.fn(async () => undefined),
 }))
-vi.mock('./platforms/boss-chat', () => ({ runChatAudit: vi.fn() }))
 vi.mock('./platforms/factory', () => ({ detectPlatform: vi.fn(() => ({})) }))
 
 import { network, storage } from './platform-bridge'
