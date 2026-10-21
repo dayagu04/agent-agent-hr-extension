@@ -143,3 +143,15 @@ describe('tool results must be JSON-serializable', () => {
     }])
   })
 })
+
+describe('send_message preconditions', () => {
+  it('refuses with no_open_thread before touching the page', async () => {
+    const { currentThreadInfo, sendMessageText } = await import('./platforms/boss-chat')
+    vi.mocked(currentThreadInfo).mockReturnValueOnce({ company: '', hrName: '', jobTitle: '', salary: '', city: '' } as never)
+    vi.mocked(sendMessageText).mockClear()
+
+    const r = await callTool('send_message', { text: '你好' })
+    expect(r).toEqual({ ok: false, error: 'no_open_thread' })
+    expect(sendMessageText).not.toHaveBeenCalled()
+  })
+})

@@ -1601,6 +1601,9 @@ export async function clickCard(
 
 /** 给当前会话发一条文本（agent 工具用），发送前核对会话未被切换。 */
 export async function sendMessageText(content: string): Promise<boolean> {
+  // 每次发送先清空上一次的回执：前置条件不满足直接返回时，工具层读到的
+  // lastDeliveryState 必须是这次的 'none'，不能沿用上一条消息的 delivered。
+  lastSendDelivery = 'none'
   const text_ = (content || '').trim()
   if (!text_) return false
   if (!onChatPage()) {

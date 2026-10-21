@@ -123,7 +123,7 @@ tool name=delete_thread status=error ms=120 error=not-found
 | `list_pending_cards` | — | | 列出待处理卡片 |
 | `open_thread` | `company`, `jobTitle?` | | 打开指定会话 |
 | `click_card` | `kind`, `accept`, `resumeName?`, `resumeIndex?` | ✓ | 点卡片同意/拒绝；同意索要简历时走完发送 |
-| `send_message` | `text` | ✓ | 给当前会话发文本；返回 `data.delivery` = delivered/read/sending/failed/none |
+| `send_message` | `text` | ✓ | 给当前会话发文本；返回 `data.delivery` = delivered/read/sending/failed/none；未打开会话返回 `no_open_thread` |
 | `send_resume` | `resumeName?`, `resumeIndex?` | ✓ | 发附件简历；失败返回具体原因码 |
 | `delete_thread` | `company`, `jobTitle?` | ✓ | 删除会话 |
 | `probe_overlays` | — | | 读可见浮层结构（排障用） |
@@ -142,7 +142,7 @@ tool name=delete_thread status=error ms=120 error=not-found
 | 读会话与消息分类 | `list_threads`、`read_messages` | 已验证（含系统消息全文） |
 | 会话的岗位名/薪资/城市 | `read_thread_header` | 已验证（6 个会话实测，与页面头部一致） |
 | 处理 HR 卡片（要简历/地点/联系方式） | `list_pending_cards` + `click_card` | 已验证（索要简历卡片 → 真实发出简历） |
-| 发消息 | `send_message` | 已验证（真实发到 HR 会话） |
+| 发消息 | `send_message` | 已验证（2026-10-21：返回 `delivery=delivered`，读回确认最后一条是我方刚发的） |
 | 发简历 | `send_resume`、`click_card` | 已验证（BOSS 出现「点击查看附件」系统卡片）；失败原因码已细分 |
 | 删会话 | `delete_thread` | 已验证（京北方会话删除成功，重新打开返回 not-found） |
 

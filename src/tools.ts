@@ -168,6 +168,10 @@ const TOOLS: ToolSpec[] = [
       if (needChatPage()) return needChatPage()!
       const text = str(args, 'text')
       if (!text) return { ok: false, error: 'text_required' }
+      // 前置条件单独报错：「没打开会话」和「发了但没出现新气泡」对 agent 是两回事
+      // （前者该先 open_thread，后者要核实/排查），不能都归成 send_not_sent。
+      const info = currentThreadInfo()
+      if (!info.company && !info.jobTitle) return { ok: false, error: 'no_open_thread' }
       const ok = await sendMessageText(text)
       // delivery：delivered/read=BOSS 已回执；sending=已上屏待回执（已发出，勿重发）；
       // failed=BOSS 标了失败；none=没出现新气泡（确定没发出）
