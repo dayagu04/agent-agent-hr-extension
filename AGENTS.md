@@ -137,7 +137,7 @@ tool name=delete_thread status=error ms=120 error=not-found
 |---|---|---|
 | 搜岗位（关键词/城市/翻页） | `open_search` + `scan_jobs` | 已验证（scan 300 条上限） |
 | 选筛选条件（城市/类型/薪资/经验…） | `read_filters` + `select_filters` | 已验证（工作经验=3-5年 → URL 出现 experience） |
-| 取岗位数据（公司/岗位/JD/薪资/地点） | `scan_jobs`（`withDetail`）、`read_job_detail` | 字段齐；JD 读取待实测覆盖率 |
+| 取岗位数据（公司/岗位/JD/薪资/地点） | `scan_jobs`（`withDetail`）、`read_job_detail` | 已验证（2026-10-21：「客服」搜索 240 个岗位；JD 627 字，已剔除反爬水印） |
 | 投递（点立即沟通 + 打招呼 + 记账） | `apply_job` | 已验证（非计算机岗位真实投递并记账） |
 | 读会话与消息分类 | `list_threads`、`read_messages` | 已验证（含系统消息全文） |
 | 会话的岗位名/薪资/城市 | `read_thread_header` | 已验证（6 个会话实测，与页面头部一致） |
@@ -183,6 +183,8 @@ tool name=delete_thread status=error ms=120 error=not-found
 | 简历选择框 | `.boss-popup__content > .boss-dialog__body > .choose-resume-dialog`；选项 `ul.resume-list > li.list-item[.selected]`；发送 `button.btn-v2.btn-sure-v2` |
 | 工具栏发简历不可用 | `.toolbar-btn.tooltip.unable`（BOSS 未允许时），此时必须走 HR 卡片的「同意」 |
 | 离屏副本 | BOSS 保留一份视口外的 `.choose-resume-dialog`，宽高正常、位置在外，必须用 `inViewport` 过滤 |
+| JD 反爬水印 | `p.desc` 里夹着随机 class 的 `<span>`，文本「kanzhun」「BOSS直聘」「直聘」，渲染宽度为 0；必须在活 DOM 上按尺寸剔除（克隆后没有布局） |
+| 标题里的薪资残渣 | 薪资数字被字体混淆成私有区字符，标题末尾只剩「-K」「-K·薪」，需剥掉 |
 
 判定卡片状态一律看按钮禁用态；判定发送成功一律看上述系统痕迹，并与发送前基线比较。
 

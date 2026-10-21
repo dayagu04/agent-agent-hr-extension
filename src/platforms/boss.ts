@@ -125,9 +125,12 @@ export class BossPlatform extends BasePlatform {
 
       let title = this.text(card.querySelector('.job-name, .job-title, [class*="jobName"]'))
       // 标题里常被拼进薪资（如 "C＋＋开发工程师-K"），剥掉尾部薪资片段
+      // 标题里常被拼进薪资片段：数字被字体混淆成私有区字符后只剩「-K」「-K·薪」
+      // （实测 "早九晚六客服岗-K"、"大模型应用工程师-K·薪"），一并剥掉
       title = title
         .replace(/\d+(?:\.\d+)?\s*[-~]\s*\d+(?:\.\d+)?\s*[Kk万](?:·\d+薪)?/g, '')
-        .replace(/[-~]\s*[Kk万]$/, '')
+        .replace(/[\uE000-\uF8FF]+/g, '')
+        .replace(/\s*[-~]\s*[Kk万](?:\s*·\s*\d*\s*薪)?\s*$/, '')
         .trim()
 
       const company = this.text(
@@ -192,8 +195,23 @@ export class BossPlatform extends BasePlatform {
       document.querySelector('.job-detail-box, .job-detail, [class*="job-detail"]') ||
       document.querySelector('.job-detail-container, [class*="detail-content"]')
     if (!box) return ''
+    // 反爬水印（2026-10-21 probe_dom 实测）：JD 段落里夹着随机 class 的 <span>，
+    // 文本是「kanzhun」「BOSS直聘」「直聘」，渲染尺寸为 0（width=0 或 0x0）——
+    // 页面上看不见，但 textContent 会把它们拼进正文。只能在活 DOM 上按渲染尺寸判断
+    // （克隆后脱离文档，没有布局），先打标记，再在克隆里删掉。
+    const marked: HTMLElement[] = []
+    for (const el of Array.from(box.querySelectorAll('span, i, em, b')) as HTMLElement[]) {
+      if (el.children.length) continue
+      const r = el.getBoundingClientRect()
+      if (r.width === 0 && (el.textContent || '').trim()) {
+        el.setAttribute('data-aah-hidden', '1')
+        marked.push(el)
+      }
+    }
     // 去掉详情面板里的操作按钮文案，避免把「立即沟通」等算进 JD
     const clone = box.cloneNode(true) as HTMLElement
+    for (const el of marked) el.removeAttribute('data-aah-hidden')
+    clone.querySelectorAll('[data-aah-hidden]').forEach((el) => el.remove())
     // 详情里夹着反爬用的内联样式（隐藏字符/字体混淆），必须清掉，否则 JD 全是 CSS
     clone.querySelectorAll('style, script, noscript, svg, link, template').forEach((el) => el.remove())
     clone.querySelectorAll('button, a').forEach((el) => {
