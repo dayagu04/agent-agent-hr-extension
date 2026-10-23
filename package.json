@@ -1,6 +1,6 @@
 {
   "name": "agent-agent-hr-tampermonkey",
-  "version": "0.6.60",
+  "version": "0.6.61",
   "description": "社招四平台自动投递油猴插件（BOSS/智联/猎聘/51前程无忧）",
   "type": "module",
   "scripts": {
@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "typecheck": "vue-tsc --noEmit --project tsconfig.check.json",
     "test": "vitest run",
-    "tool": "node scripts/tool.mjs"
+    "tool": "node scripts/tool.mjs",
+    "dev:serve": "node scripts/dev-serve.mjs"
   },
   "dependencies": {
     "vue": "^3.4.21"

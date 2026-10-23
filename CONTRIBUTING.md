@@ -9,20 +9,25 @@
 - 开发分支：从最新 `main` 拉 `codex/YYYY-MM-DD-任务短名`（日期 = 创建当日北京时间，之后不改）。
 - 不直接在 `main` 上开发，不从别的 `codex/*` 分支拉新分支（除非依赖其未合并改动）。
 
-## 开发闭环
+## 开发闭环（全程不需要人工操作浏览器）
 
 ```bash
 npm ci
-npm run typecheck && npm test        # 每次改动后
-npm run build:local                  # 连本地后端 http://127.0.0.1:8010
+npm run dev:serve      # 后台常驻：源码改动自动重建，并给已安装插件提供最新构建（端口 8017）
 ```
 
-1. 改代码 → 本地检查通过。
-2. 装 `dist/agent-agent-hr-tampermonkey.user.js`，**刷新 BOSS 页面**（已打开的页面不会自动换新脚本）。
-3. 用 `npm run tool -- <工具> '<args>'` 在真实页面验证，以 `logs/plugin/` 日志和工具返回值为证据。
+**首次一次性**：在 Tampermonkey 里安装 `http://127.0.0.1:8017/agent-agent-hr-tampermonkey.user.js`
+（或拖入 `npm run build:local` 的产物），打开 BOSS 页面登录面板。之后：
+
+1. 改代码 → `npm run typecheck && npm test`；dev-serve 自动重建。
+2. `npm run tool -- reload_page` 刷新页面：已安装的脚本每次加载都会先拉 dev-serve 上的最新构建并由它接管
+   （同一个脚本条目，登录与配置不丢）。用 `get_page_state` 或心跳里的 `version` 确认新版本已生效。
+3. `npm run tool -- <工具> '<args>'` 在真实页面验证，以工具返回值和 `logs/plugin/` 日志为证据。
 4. 页面结构不确定时先用 `probe_dom` / `probe_overlays` / `probe_row` 读真实结构，再改选择器，不要猜。
 
-本地调试时关闭该脚本在 Tampermonkey 里的自动更新，避免生产版本覆盖本地构建。
+dev-serve 没开时，已安装的本地构建 1.5 秒内自动退回自身版本，照常可用。
+生产构建（`npm run build`）不含这段自动更新逻辑。本地调试时关闭该脚本在 Tampermonkey 里的远程自动更新，
+避免 Release 版本覆盖本地构建。
 
 ## 提交
 

@@ -94,7 +94,7 @@ tool name=delete_thread status=error ms=120 error=not-found
 1. 页面动作写到 `src/platforms/<平台>.ts` 或专题模块（如 `search-filters.ts`），导出纯函数；
 2. 在 `src/tools.ts` 的 `TOOLS` 加一项，按第 2 节模板填全字段；
 3. 在 `src/tools.test.ts` 补两条：目录里出现、关键失败分支返回正确原因码；
-4. `npm run typecheck && npm test && npm run build:local`，刷新 BOSS 页面装上新版本；
+4. `npm run typecheck && npm test`；`npm run dev:serve` 自动重建，`npm run tool -- reload_page` 让页面换上新版本；
 5. `npm run tool -- <新工具> '<args>'` 在真实页面跑通，再在 §7/§8 补上验证记录，才算完成。
 
 ## 6. 面板内调试区（辅助）
@@ -126,6 +126,7 @@ tool name=delete_thread status=error ms=120 error=not-found
 | `send_message` | `text` | ✓ | 给当前会话发文本；返回 `data.delivery` = delivered/read/sending/failed/none；未打开会话返回 `no_open_thread` |
 | `send_resume` | `resumeName?`, `resumeIndex?` | ✓ | 发附件简历；失败返回具体原因码 |
 | `delete_thread` | `company`, `jobTitle?` | ✓ | 删除会话 |
+| `reload_page` | `force?` | | 刷新页面以加载最新插件构建；自动投递运行中拒绝（`orchestrator_running`），除非 `force=true` |
 | `probe_overlays` | — | | 读可见浮层结构（排障用） |
 | `probe_dom` | `selector`, `depth?` | | 读指定选择器的 DOM 结构（排障用） |
 | `probe_row` | `company?` | | 读会话行组件字段（排障用） |

@@ -7,6 +7,10 @@ const viteCli = fileURLToPath(new URL('../node_modules/vite/bin/vite.js', import
 const env = {
   ...process.env,
   VITE_API_BASE: process.env.VITE_API_BASE || 'http://127.0.0.1:8010',
+  // 开发期自动更新：页面加载时先拉 dev-serve 上的最新构建（没开 dev-serve 时连接被拒、立即退回）。
+  // 设 VITE_DEV_UPDATE_URL= （空）可关闭。
+  VITE_DEV_UPDATE_URL:
+    process.env.VITE_DEV_UPDATE_URL ?? 'http://127.0.0.1:8017/agent-agent-hr-tampermonkey.user.js',
 }
 
 // 不使用 --mode local：Vite 保留 `.local` 作为 env 文件后缀，mode 名称会冲突。

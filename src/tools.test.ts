@@ -17,6 +17,7 @@ vi.mock('./platforms/boss-chat', () => ({
 }))
 vi.mock('./platforms/factory', () => ({ detectPlatform: vi.fn(() => null) }))
 vi.mock('./config', () => ({ loadConfig: vi.fn(() => ({})) }))
+vi.mock('./orchestrator', () => ({ getOrchestrator: vi.fn(() => ({ isRunning: () => true })) }))
 vi.mock('./api', () => ({ fetchGreeting: vi.fn(async () => ''), recordApplication: vi.fn(async () => ({})) }))
 
 import { diag } from './logger'
@@ -153,5 +154,11 @@ describe('send_message preconditions', () => {
     const r = await callTool('send_message', { text: '你好' })
     expect(r).toEqual({ ok: false, error: 'no_open_thread' })
     expect(sendMessageText).not.toHaveBeenCalled()
+  })
+})
+
+describe('reload_page', () => {
+  it('refuses while auto-apply is running unless forced', async () => {
+    expect(await callTool('reload_page', {})).toEqual({ ok: false, error: 'orchestrator_running' })
   })
 })

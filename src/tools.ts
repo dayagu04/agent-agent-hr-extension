@@ -29,6 +29,7 @@ import {
 import { readSearchFilters, selectSearchFilter } from './search-filters'
 import { detectPlatform } from './platforms/factory'
 import { loadConfig } from './config'
+import { getOrchestrator } from './orchestrator'
 import { fetchGreeting, recordApplication } from './api'
 import { setPendingOpen } from './chat-store'
 import type { ApplyOutcome } from './types'
@@ -467,6 +468,19 @@ const TOOLS: ToolSpec[] = [
       }
       const info = currentThreadInfo()
       return { ok: !!info.company || !!info.jobTitle, data: info, error: info.jobTitle ? undefined : 'header_incomplete' }
+    },
+  },
+  {
+    name: 'reload_page',
+    description: '刷新当前页面（加载最新插件构建）；自动投递运行中会拒绝，除非 force=true',
+    exampleArgs: { force: false },
+    async run(args) {
+      if (args.force !== true && getOrchestrator(loadConfig()).isRunning()) {
+        return { ok: false, error: 'orchestrator_running' }
+      }
+      // 先让结果回传，再刷新（刷新会销毁当前 JS 上下文）
+      setTimeout(() => location.reload(), 800)
+      return { ok: true, data: { reloading: true } }
     },
   },
   {

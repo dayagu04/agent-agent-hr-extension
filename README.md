@@ -25,7 +25,7 @@ agent-agent-hr 后端（命令队列 + 结果暂存，见主仓 server/routers/p
 
 ## 工具一览
 
-20 个工具，全部在真实账号上验证过（详细参数、返回值与验证记录见 [AGENTS.md §7–§8](./AGENTS.md)）：
+21 个工具，均在真实账号上验证（详细参数、返回值与验证记录见 [AGENTS.md §7–§8](./AGENTS.md)）：
 
 | 环节 | 工具 |
 |---|---|
@@ -34,7 +34,7 @@ agent-agent-hr 后端（命令队列 + 结果暂存，见主仓 server/routers/p
 | 会话与消息 | `list_threads` `read_thread_header` `open_thread` `read_messages` `send_message` |
 | HR 卡片与简历 | `list_pending_cards` `click_card` `send_resume` |
 | 会话管理 | `delete_thread` |
-| 状态与排障 | `get_page_state` `probe_dom` `probe_overlays` `probe_row` `list_tools` |
+| 状态与排障 | `get_page_state` `reload_page` `probe_dom` `probe_overlays` `probe_row` `list_tools` |
 
 不可撤回的工具（`apply_job` `select_filters` `click_card` `send_message` `send_resume` `delete_thread`）在清单里带 `irreversible: true`。
 
@@ -42,8 +42,9 @@ agent-agent-hr 后端（命令队列 + 结果暂存，见主仓 server/routers/p
 
 ```bash
 npm ci
-npm run build:local          # 连本地后端 http://127.0.0.1:8010
-# 把 dist/agent-agent-hr-tampermonkey.user.js 拖进 Tampermonkey，打开 BOSS 聊天页并登录面板
+npm run dev:serve            # 常驻：自动重建 + 给已安装插件提供最新构建（连本地后端 :8010）
+# 首次在 Tampermonkey 安装 http://127.0.0.1:8017/agent-agent-hr-tampermonkey.user.js，打开 BOSS 登录面板
+# 之后改代码只需 npm run tool -- reload_page，插件自动换成最新构建
 ```
 
 后端在主仓用 `./scripts/start-local-test.sh` 启动（开启账号密码登录、建本地测试账号）。
@@ -71,6 +72,7 @@ npm run tool -- send_message '{"text":"您好"}'          # 不可撤回
 src/
 ├── tools.ts            # ★ 工具注册表：agent 可调用的全部原子操作
 ├── remote.ts           # 心跳 / 命令轮询 / tool.call 执行与结果回传
+├── dev-loader.ts       # 本地构建的自动更新（生产构建不启用）
 ├── platforms/
 │   ├── boss.ts         # 搜索页：扫描岗位、读 JD、立即沟通
 │   ├── boss-chat.ts    # 聊天页：会话、消息、卡片、发消息/简历、投递回执
@@ -87,6 +89,7 @@ src/
 └── ledger.ts / chat-*.ts / contact-policy.ts / config.ts / types.ts
 scripts/
 ├── tool.mjs            # 命令行调用工具（开发联调 / 验收）
+├── dev-serve.mjs       # 开发服务：自动重建 + 已安装插件自动拉最新构建
 └── build-local.mjs     # 本地构建（连 127.0.0.1:8010）
 ```
 
