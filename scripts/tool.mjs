@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // 命令行调用插件工具 —— 与上游 agent 走完全相同的接口，用于开发联调与验收。
 //
+//   node scripts/tool.mjs functions                     获取 function-call JSON Schema
 //   node scripts/tool.mjs list                          列出插件上报的工具
 //   node scripts/tool.mjs <tool> ['{"json":"args"}']    调一个工具并等结果
 //
@@ -10,6 +11,7 @@
 //   AAH_EMAIL    默认 test@local.dev
 //   AAH_PASSWORD 默认 test1234
 //   AAH_WAIT     等结果的秒数，默认 90
+//   AAH_REQUEST_ID 可选：同一调用重试时复用，避免重复入队不可撤回动作
 //
 // 结果协议（GET /api/plugin/tools/result/{id}）：
 //   200 state=done      → 结果就绪
@@ -54,7 +56,10 @@ async function token() {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 async function callTool(tok, name, args) {
-  const q = await http('POST', '/api/plugin/tools/call', { name, args }, tok)
+  const q = await http('POST', '/api/plugin/tools/call', {
+    name, args,
+    ...(process.env.AAH_REQUEST_ID ? { request_id: process.env.AAH_REQUEST_ID } : {}),
+  }, tok)
   if (q.status !== 200) return { ok: false, error: `call_http_${q.status}`, detail: q.json?.detail }
   const id = q.json.command_id
   const deadline = Date.now() + WAIT_S * 1000
@@ -72,10 +77,16 @@ async function callTool(tok, name, args) {
 async function main() {
   const [cmd, rawArgs] = process.argv.slice(2)
   if (!cmd) {
-    console.error('用法: node scripts/tool.mjs list | <tool> [json-args]')
+    console.error('用法: node scripts/tool.mjs functions | list | <tool> [json-args]')
     process.exit(2)
   }
   const tok = await token()
+  if (cmd === 'functions') {
+    const r = await http('GET', '/api/plugin/tools', undefined, tok)
+    if (r.status !== 200) throw new Error(`工具目录不可用 HTTP ${r.status}`)
+    console.log(JSON.stringify(r.json, null, 2))
+    return
+  }
   if (cmd === 'list') {
     const r = await callTool(tok, 'list_tools', {})
     console.log(JSON.stringify(r, null, 2))
