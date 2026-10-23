@@ -11,7 +11,6 @@ vi.mock('./config', () => ({
   applyPluginPreferences: vi.fn((cfg) => cfg),
 }))
 vi.mock('./logger', () => ({ diag: vi.fn(), flushLogs: vi.fn() }))
-vi.mock('./debug', () => ({ startDebugCapture: vi.fn() }))
 vi.mock('./orchestrator', () => ({
   getCurrentJob: vi.fn(() => null),
   getOrchestratorSnapshot: vi.fn(async () => null),
@@ -23,7 +22,6 @@ vi.mock('./orchestrator', () => ({
   })),
   flushOrchestratorEvents: vi.fn(async () => undefined),
 }))
-vi.mock('./platforms/boss-chat', () => ({ runChatAudit: vi.fn() }))
 vi.mock('./platforms/factory', () => ({ detectPlatform: vi.fn(() => ({})) }))
 
 import { network, storage } from './platform-bridge'
@@ -71,7 +69,8 @@ describe('远程心跳命令协议', () => {
     const body = JSON.parse(String(request.data))
     expect(body.ack_command_id).toBe(0)
     expect(body.protocol_version).toBe(2)
-    expect(body.capabilities).toEqual(['command_ack_v2'])
+    expect(body.capabilities).toEqual(['command_ack_v2', 'tools_v1'])
+    expect(Array.isArray(body.tools)).toBe(true)
     expect(storage.set).toHaveBeenCalledWith(
       expect.any(String), { epoch: 'server-a', id: 7 },
     )

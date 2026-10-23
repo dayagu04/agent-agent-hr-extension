@@ -30,7 +30,8 @@ export abstract class BasePlatform {
    * 扫描当前页面的所有职位卡片。
    * 子类需根据各平台 DOM 结构实现选择器。
    */
-  abstract scanJobs(): Promise<JobCard[]>
+  /** 扫描岗位卡片。withDetail=true 时额外打开详情读取 JD 全文（较慢，非所有平台支持）。 */
+  abstract scanJobs(opts?: { withDetail?: boolean }): Promise<JobCard[]>
 
   /**
    * 对单个岗位执行投递动作（点击投递/沟通按钮 + 处理确认弹窗）。

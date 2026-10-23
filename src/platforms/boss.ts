@@ -48,7 +48,7 @@ export class BossPlatform extends BasePlatform {
   /** 与 onChatPage() 的路径判断保持一致（/web/geek/chat） */
   readonly chatUrl = 'https://www.zhipin.com/web/geek/chat'
 
-  async scanJobs(): Promise<JobCard[]> {
+  async scanJobs(opts: { withDetail?: boolean } = {}): Promise<JobCard[]> {
     // BOSS 搜索页是滚动加载：初始 DOM 只有 15 张卡片，滚动才加载更多，
     // 直接扫初始 15 张就翻页会浪费滚出来的岗位，故先滚动加载完全再扫描。
     await this.scrollJobListToLoadAll()
@@ -125,9 +125,12 @@ export class BossPlatform extends BasePlatform {
 
       let title = this.text(card.querySelector('.job-name, .job-title, [class*="jobName"]'))
       // 标题里常被拼进薪资（如 "C＋＋开发工程师-K"），剥掉尾部薪资片段
+      // 标题里常被拼进薪资片段：数字被字体混淆成私有区字符后只剩「-K」「-K·薪」
+      // （实测 "早九晚六客服岗-K"、"大模型应用工程师-K·薪"），一并剥掉
       title = title
         .replace(/\d+(?:\.\d+)?\s*[-~]\s*\d+(?:\.\d+)?\s*[Kk万](?:·\d+薪)?/g, '')
-        .replace(/[-~]\s*[Kk万]$/, '')
+        .replace(/[\uE000-\uF8FF]+/g, '')
+        .replace(/\s*[-~]\s*[Kk万](?:\s*·\s*\d*\s*薪)?\s*$/, '')
         .trim()
 
       const company = this.text(
@@ -176,7 +179,118 @@ export class BossPlatform extends BasePlatform {
           salaryPresent: !!jobs[0].salary,
         }
       : null)
+
+    if (opts.withDetail && jobs.length) await this.fillJobDetails(jobs)
     return jobs
+  }
+
+  /**
+   * 读右侧详情面板的岗位 JD。
+   *
+   * 列表页只有标签摘要；JD 正文在右侧 `.job-detail-box`（左列表右详情联动）。
+   * 这里只读不点「立即沟通」——点卡片只是切换详情，不会投递。
+   *
+   * 只取职位描述本身（2026-10-23 probe_dom 实测结构）：
+   *   .job-detail-box > .job-detail-body > h3.title「职位描述」+ p.desc
+   * 同一面板里还有 .job-boss-info（HR 名片、「去App与BOSS随时沟通」）、
+   * .job-address（地址/地图），页面底部还有 SEO 链接墙（「合肥保洁招聘…BOSS直聘招聘」）。
+   * 整块取 textContent 会把这些都混进 JD。找不到 p.desc 时才退回整块。
+   */
+  private readDetailJd(): string {
+    const panel =
+      document.querySelector('.job-detail-box, .job-detail, [class*="job-detail"]') ||
+      document.querySelector('.job-detail-container, [class*="detail-content"]')
+    const box =
+      panel?.querySelector('.job-detail-body p.desc, .job-sec-text, p.desc') || panel
+    if (!box) return ''
+    // 反爬水印（2026-10-21 probe_dom 实测）：JD 段落里夹着随机 class 的 <span>，
+    // 文本是「kanzhun」「BOSS直聘」「直聘」，渲染尺寸为 0（width=0 或 0x0）——
+    // 页面上看不见，但 textContent 会把它们拼进正文。只能在活 DOM 上按渲染尺寸判断
+    // （克隆后脱离文档，没有布局），先打标记，再在克隆里删掉。
+    // 注意不能用 width === 0：反爬 CSS 里有 width:0.1px / height:0.1px（四舍五入看是 0，
+    // 实际不等于 0，2026-10-23 实测漏掉）；也有 font-size:0、visibility:hidden 的写法。
+    const isHiddenText = (el: HTMLElement): boolean => {
+      const r = el.getBoundingClientRect()
+      if (r.width < 1 || r.height < 1) return true
+      const cs = getComputedStyle(el)
+      return cs.display === 'none' || cs.visibility === 'hidden' ||
+        cs.opacity === '0' || parseFloat(cs.fontSize) === 0
+    }
+    const marked: HTMLElement[] = []
+    for (const el of Array.from(box.querySelectorAll('span, i, em, b, font')) as HTMLElement[]) {
+      if (el.children.length || !(el.textContent || '').trim()) continue
+      if (isHiddenText(el)) {
+        el.setAttribute('data-aah-hidden', '1')
+        marked.push(el)
+      }
+    }
+    // 去掉详情面板里的操作按钮文案，避免把「立即沟通」等算进 JD
+    const clone = box.cloneNode(true) as HTMLElement
+    for (const el of marked) el.removeAttribute('data-aah-hidden')
+    clone.querySelectorAll('[data-aah-hidden]').forEach((el) => el.remove())
+    // 详情里夹着反爬用的内联样式（隐藏字符/字体混淆），必须清掉，否则 JD 全是 CSS
+    clone.querySelectorAll('style, script, noscript, svg, link, template').forEach((el) => el.remove())
+    clone.querySelectorAll('button, a').forEach((el) => {
+      const t = (el.textContent || '').replace(/\s/g, '')
+      if (/立即沟通|继续沟通|收藏|分享|举报|投诉|查看更多|展开/.test(t)) el.remove()
+    })
+    // 薪资数字被字体混淆成私有区字符，读出来是乱码，去掉（标题同理）
+    return (clone.textContent || '')
+      .replace(/[\uE000-\uF8FF]+/g, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 4000)
+  }
+
+  /**
+   * 读指定岗位的 JD 全文（只切换详情面板，不点「立即沟通」）。
+   * 供 agent 的 read_job_detail 工具使用。
+   */
+  async readJobDetail(card: JobCard): Promise<string> {
+    const el = card.cardElement
+    const clickTarget =
+      (el?.querySelector('a, .job-name, .job-title') as HTMLElement | null) || el || null
+    if (!clickTarget) return ''
+    clickTarget.scrollIntoView({ block: 'center' })
+    await this.delay(250, 450)
+    clickTarget.click()
+    let jd = ''
+    for (let i = 0; i < 10; i++) {
+      await this.delay(220, 300)
+      jd = this.readDetailJd()
+      if (jd.length > 80) break
+    }
+    diag('BOSS', `read_job_detail id=${card.platformJobId ? 'ok' : '-'} jdLen=${jd.length}`)
+    return jd
+  }
+
+  /** 逐个打开详情读 JD；失败不影响投递，按读取数量记日志。 */
+  private async fillJobDetails(jobs: JobCard[]): Promise<void> {
+    let ok = 0
+    let totalLen = 0
+    for (const job of jobs) {
+      const card = job.cardElement
+      const clickTarget =
+        (card?.querySelector('a, .job-name, .job-title') as HTMLElement | null) || card || null
+      if (!clickTarget) continue
+      clickTarget.scrollIntoView({ block: 'center' })
+      await this.delay(250, 450)
+      clickTarget.click()
+      // 等详情面板出现新内容：轮询 JD 文本长度，最多约 2.5s
+      let jd = ''
+      for (let i = 0; i < 10; i++) {
+        await this.delay(220, 300)
+        jd = this.readDetailJd()
+        if (jd.length > 80) break
+      }
+      if (jd) {
+        job.jd = jd
+        job.description = jd
+        ok++
+        totalLen += jd.length
+      }
+    }
+    diag('BOSS', `详情 JD 读取 ${ok}/${jobs.length} 个（平均 ${ok ? Math.round(totalLen / ok) : 0} 字）`)
   }
 
   async applyJob(card: JobCard, ctx?: ApplyContext): Promise<ApplyResult> {

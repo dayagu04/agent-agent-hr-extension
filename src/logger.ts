@@ -5,6 +5,7 @@
 // 由后端按用户（JWT）落库。console.log 保留供开发期排查。
 import { network } from './platform-bridge'
 import { loadConfig, isConfigReady } from './config'
+import { VERSION } from './version'
 
 /** 攒够多少条触发一次上报 */
 const FLUSH_THRESHOLD = 50
@@ -98,7 +99,12 @@ export function flushLogs(options: FlushLogsOptions = {}): Promise<void> {
             'Content-Type': 'application/json',
             Authorization: `Bearer ${cfg.token}`,
           },
-          data: JSON.stringify({ batch_id: batch.batchId, logs: batch.logs }),
+          // plugin_version 让服务端日志文件能标出这批日志出自哪个构建。
+          data: JSON.stringify({
+            batch_id: batch.batchId,
+            plugin_version: VERSION,
+            logs: batch.logs,
+          }),
           timeout: 15000,
         })
         accepted = resp.status === 200

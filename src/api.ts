@@ -78,6 +78,36 @@ export async function fetchPluginConfig(cfg: PluginConfig): Promise<{
 }
 
 /** POST /api/plugin/match — 批量匹配岗位 */
+/**
+ * 回传工具执行结果（agent 通过 GET /api/plugin/tools/result/{id} 读取）。
+ * 失败只记一条日志，不影响工具本身的结果。
+ */
+export async function reportToolResult(
+  cfg: PluginConfig,
+  commandId: number,
+  tool: string,
+  result: { ok: boolean; data?: unknown; error?: string },
+): Promise<void> {
+  try {
+    const resp = await network.request({
+      method: 'POST',
+      url: `${cfg.apiBase}/api/plugin/tools/result`,
+      headers: authHeaders(cfg),
+      data: JSON.stringify({
+        command_id: commandId,
+        tool,
+        ok: result.ok,
+        data: result.data ?? null,
+        error: result.error || '',
+      }),
+      timeout: 20000,
+    })
+    if (resp.status !== 200) diag('TOOL', `tool_result_upload status=${resp.status} tool=${tool}`)
+  } catch (e) {
+    diag('TOOL', `tool_result_upload status=error tool=${tool} error=${(e as Error).name || 'Error'}`)
+  }
+}
+
 export async function matchJobs(
   cfg: PluginConfig,
   platform: PlatformCode,
@@ -108,7 +138,8 @@ export async function matchJobs(
       company: j.company || '',
       city: j.city || '',
       salary: j.salary || '',
-      description: j.description || '',
+      // JD 全文优先（读详情才拿得到）；没有就退回列表页标签摘要
+      description: j.jd || j.description || '',
       url: j.url || '',
     })),
   }
@@ -287,7 +318,16 @@ export async function syncChatOne(
       timeout: 60000,
     })
     if (resp.status !== 200) {
-      diag('API', `chat/sync 失败 HTTP ${resp.status}`)
+      // 服务端用 404 表达业务拒绝（例如 reply_scope=this_round 时不回非我方投递的会话），
+      // 把 detail 带进日志，否则只有「HTTP 404」无法判断是路由不存在还是策略跳过。
+      let reason = ''
+      try {
+        const body = JSON.parse(resp.responseText || '{}')
+        reason = String(body.detail || '').slice(0, 160)
+      } catch {
+        reason = ''
+      }
+      diag('API', `chat/sync 失败 HTTP ${resp.status} reason=${reason || '-'}`)
       return null
     }
     return JSON.parse(resp.responseText)
@@ -339,43 +379,6 @@ export async function fetchChatPlan(
   }
 }
 
-/** POST /api/plugin/chat/audit — 只读会话审计上报（测试阶段人工核对，不做回复/删除） */
-export interface ChatAuditItem {
-  key: string
-  company: string
-  job_title: string
-  encrypt_job_id: string
-  unread_count: number
-  plan_action: string          // reply / cleanup / none（后端计划判定，供对比）
-  last_sender: string          // hr / me / system / none
-  last_text: string
-  messages: Array<{ sender: string; content: string }>
-}
-
-export async function reportChatAudit(
-  cfg: PluginConfig,
-  payload: {
-    run_id?: string
-    scope: string
-    plan_pending: number
-    items: ChatAuditItem[]
-    summary: Record<string, number>
-  },
-): Promise<boolean> {
-  try {
-    const resp = await network.request({
-      method: 'POST',
-      url: `${cfg.apiBase}/api/plugin/chat/audit`,
-      headers: authHeaders(cfg),
-      data: JSON.stringify(payload),
-      timeout: 30000,
-    })
-    return resp.status === 200
-  } catch (e) {
-    diag('API', 'chat/audit 上报异常', { errorType: (e as Error).name || 'Error' })
-    return false
-  }
-}
 
 /**
  * POST /api/plugin/judge-jobs — LLM 判断岗位是否低质量（外包/批量招聘）。
@@ -407,7 +410,8 @@ export async function judgeJobs(
           platform_job_id: j.platformJobId || '',
           company: j.company || '',
           title: j.title,
-          description: j.description || '',
+          // JD 全文优先（读详情才拿得到）；没有就退回列表页标签摘要
+      description: j.jd || j.description || '',
           salary: j.salary || '',
         })),
       }),
@@ -613,6 +617,16 @@ export async function recordApplication(
     timeout: DEFAULT_TIMEOUT,
   })
   if (resp.status !== 200) {
+    // 引擎的 log() 只进面板，不上报；这里补一条 diag，否则台账记不进去时
+    // 服务端日志里只有 access 400，看不到原因（如「请先创建 Agent」）。
+    let detail = ''
+    try {
+      const d = JSON.parse(resp.responseText)?.detail
+      detail = typeof d === 'string' ? d.slice(0, 80) : ''
+    } catch {
+      /* ignore */
+    }
+    diag('API', `plugin/record 失败 HTTP ${resp.status} outcome=${outcome} 原因=${detail || '-'}`)
     throw new Error(`记录投递失败 (${resp.status})`)
   }
   return JSON.parse(resp.responseText)

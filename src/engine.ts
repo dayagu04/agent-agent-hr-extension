@@ -167,7 +167,7 @@ export class ApplyEngine {
     try {
       // 1. 扫描岗位
       log(`开始扫描 ${this.platform.name} 岗位...`)
-      const jobs = await this.platform.scanJobs()
+      const jobs = await this.platform.scanJobs({ withDetail: this.config.scanWithDetail })
       progress.scanned = jobs.length
       progress.scanComplete = true
       log(`扫描到 ${jobs.length} 个岗位`)

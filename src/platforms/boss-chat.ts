@@ -9,7 +9,6 @@ import { diag } from '../logger'
 import type { AgentPolicy, ContactChannel, PluginConfig } from '../types'
 import {
   markChatSent,
-  reportChatAudit,
   reportChatOutcome,
   syncChatOne,
   reconcileThreads,
@@ -236,7 +235,16 @@ function listThreadsQuiet(): ChatThread[] {
 
 export function listThreads(): ChatThread[] {
   const threads = listThreadsQuiet()
-  diag('CHAT', `会话列表 ${threads.length} 个（未读 ${threads.filter((t) => t.unread).length}）`)
+  const src = threadUnreadFromSources()
+  // DOM 只数到「当前渲染出来的行」（虚拟列表滚走的行不在 DOM 里），
+  // 所以和导航角标对不上；dataSources 是完整会话列表，以它为准。
+  diag(
+    'CHAT',
+    `会话列表 ${threads.length} 个（未读 ${threads.filter((t) => t.unread).length}）` +
+      (src
+        ? ` sources=${src.threads} unreadThreads=${src.unreadThreads} unreadMessages=${src.unreadMessages}`
+        : ' sources=none'),
+  )
   if (!threads.length) {
     const guess = Array.from(document.querySelectorAll('li, div'))
       .map((e) => String((e as HTMLElement).className || ''))
@@ -344,6 +352,42 @@ export function readRowJobInfo(li: HTMLElement): {
     return { title: '', salary: '', jobId: '', brandName, hrName }
   }
   return { title: '', salary: '', jobId: '', brandName: '', hrName: '' }
+}
+
+/**
+ * 读取某一行的 boss 对象结构（键名 + 短字符串值），供工具 probe_row 使用。
+ * 只用于开发期适配，不参与业务逻辑。
+ */
+export function probeRowObject(li: HTMLElement): {
+  path: string
+  keys: string[]
+  strings: Array<{ key: string; len: number; value: string }>
+} | null {
+  const hosts = [
+    li.querySelector('.gray.last-msg'),
+    li.querySelector('.last-msg'),
+    li.querySelector('.friend-content'),
+    li,
+  ].filter(Boolean) as HTMLElement[]
+  for (const host of hosts) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const vm = (host as any).__vue__
+    if (!vm) continue
+    const boss = findBossObject(vm)
+    if (!boss?.obj) continue
+    const obj = boss.obj as Record<string, unknown>
+    const strings: Array<{ key: string; len: number; value: string }> = []
+    for (const [k, v] of Object.entries(obj)) {
+      if (typeof v !== 'string' || !v.trim() || v.length > 60) continue
+      strings.push({ key: k, len: v.length, value: v.trim() })
+    }
+    return {
+      path: boss.path,
+      keys: Object.keys(obj).filter((k) => !k.startsWith('_')).slice(0, 40),
+      strings,
+    }
+  }
+  return null
 }
 
 /** 页面加载内只 dump 一次 boss 对象键 */
@@ -513,15 +557,34 @@ async function deleteThreadImpl(
  * - bossId：在已渲染行里按 data-user-id 精确找；
  * - 兜底：公司名子串滚动查找（旧行为）。
  */
+/**
+ * 会话行是否匹配「公司 + 岗位名」。
+ *
+ * BOSS 列表行常常没有独立岗位字段，岗位名被拼进公司文本
+ * （实测 company="江苏迈泉科技人事专员"、jobTitle=""），所以岗位名要在
+ * 整行文本里找，不能只看 jobTitle。
+ */
+export function threadRowMatchesText(
+  t: { company?: string; jobTitle?: string; name?: string },
+  company: string,
+  jobTitle = '',
+): boolean {
+  const norm = (v?: string) => (v || '').replace(/\s+/g, '').toLowerCase()
+  const target = norm(company)
+  if (!target) return false
+  if (!norm(t.company).includes(target)) return false
+  const wantJob = norm(jobTitle)
+  if (!wantJob) return true
+  return norm(`${t.company || ''}${t.jobTitle || ''}${t.name || ''}`).includes(wantJob)
+}
+
 async function findThreadForDelete(
   company: string,
   jobTitle: string,
   identity?: { bossId?: string; encryptJobId?: string },
 ): Promise<ChatThread | null> {
-  const target = (company || '').replace(/\s+/g, '').toLowerCase()
   const jobId = (identity?.encryptJobId || '').trim()
   const bossId = identity?.bossId || ''
-  const wantJob = (jobTitle || '').replace(/\s+/g, '').toLowerCase()
 
   // 1) 全量数据源按岗位 ID 精确定位（最稳）；inbound 虚拟 id 与 BOSS 真实
   //    jobId 对不上，跳过精确匹配，走公司兜底。
@@ -549,11 +612,7 @@ async function findThreadForDelete(
       const row = readRowJobInfo(t.el)
       if (row.jobId && row.jobId === jobId) return true
     }
-    const companyHit =
-      !!target && (t.company || '').replace(/\s+/g, '').toLowerCase().includes(target)
-    // 公司命中后若已知岗位名，再加一道岗位名过滤（同公司多会话时减少误删）
-    if (!companyHit || !wantJob) return companyHit
-    return (t.jobTitle || '').replace(/\s+/g, '').toLowerCase().includes(wantJob)
+    return threadRowMatchesText(t, company, jobTitle)
   }
   return findThreadByScrolling(match)
 }
@@ -753,7 +812,7 @@ export function openThread(company: string, jobTitle = ''): 'ok' | 'not-found' |
 
 /** 读当前打开会话的消息（区分 hr / me）。会先滚动到底部确保全部加载。 */
 /** BOSS 系统通知文本模式（不是 HR 说话，不能当 HR 消息回复/统计） */
-const SYSTEM_MSG_RE = /对方已(查看|同意|接受|拒绝)|附件简历已(发送|送达)|撤回了一条消息|已交换联系方式|职位(已下线|已关闭)|系统消息/
+const SYSTEM_MSG_RE = /^(对方已(查看|同意|接受|拒绝)|附件简历已(发送|送达)|撤回了一条消息|已交换联系方式|职位(已下线|已关闭)|系统消息)/
 
 /**
  * 会话已在 BOSS 端删除：同步标记后端记录（status=deleted，跨轮次不再残留）
@@ -786,7 +845,34 @@ async function afterConversationDeleted(
   }
 }
 
-async function readMessages(): Promise<Array<{ sender: 'hr' | 'me' | 'system'; content: string }>> {
+export interface ChatMessage {
+  sender: 'hr' | 'me' | 'system'
+  content: string
+  /** card = 交互卡片（索要简历/交换联系方式/确认地点等，带同意/拒绝按钮），没有 text-content 正文 */
+  kind?: 'text' | 'card'
+  /** 卡片类型：与自动处理用的 classifyCard 同一套判据，便于区分「索要简历 / 确认工作地点 / 交换联系方式」 */
+  cardKind?: 'resume_request' | 'location_confirm' | 'contact_exchange' | 'unknown'
+}
+
+/** 卡片里的按钮/附属文字，不算卡片正文 */
+const CARD_CHROME_RE = /^(同意|拒绝|可以接受|暂不考虑|已同意|已拒绝|查看|去查看|立即查看|送达|已读|未读)$/
+
+/** 交互卡片正文：去掉按钮、头像、时间、已读标记，剩下的叶子文本拼起来 */
+function cardText(bubble: HTMLElement): string {
+  const parts: string[] = []
+  for (const el of Array.from(bubble.querySelectorAll('*')) as HTMLElement[]) {
+    if (el.children.length) continue
+    if (el.closest('.message-status, .image-circle, [class*="avatar"], [class*="time"]')) continue
+    const t = (el.textContent || '').trim()
+    if (!t || CARD_CHROME_RE.test(t)) continue
+    parts.push(t)
+  }
+  return parts.join(' ').replace(/\s+/g, ' ').trim()
+}
+
+export async function readMessages(
+  opts: { verbose?: boolean } = {},
+): Promise<ChatMessage[]> {
   // 滚到消息区底部，确保读到最后一条。findChatPanel() 返回的容器不一定是
   // 可滚动节点，需从消息节点往上找真正可滚动的祖先。
   const panel = findChatPanel()
@@ -803,7 +889,9 @@ async function readMessages(): Promise<Array<{ sender: 'hr' | 'me' | 'system'; c
     }
   }
 
-  const out: Array<{ sender: 'hr' | 'me' | 'system'; content: string }> = []
+  const out: ChatMessage[] = []
+  /** 每条消息对应的 DOM 节点，最后按文档顺序排序（卡片和文本是分两轮收集的） */
+  const anchors: HTMLElement[] = []
   const dbg: string[] = []
   if (!panel) return out
   const pr = panel.getBoundingClientRect()
@@ -815,27 +903,123 @@ async function readMessages(): Promise<Array<{ sender: 'hr' | 'me' | 'system'; c
     const r = el.getBoundingClientRect()
     if (r.width === 0) continue
 
-    // 收发方判断：优先用 BOSS 自己的语义标记，几何位置只作最后兜底
-    // （我方气泡中心仅比中线右移十几像素，纯几何判断会误判）。
-    const bubble = el.closest('.item-friend, .item-myself, [class*="item-"]') || el.parentElement
+    // 收发方判断：精确匹配 class token，避免模糊匹配导致误判
+    const bubble = el.closest('.item-friend, .item-myself, .item-system') || el.parentElement
     const scope = (bubble || el) as HTMLElement
-    const cls = String((scope as HTMLElement).className || '')
-    let isMe: boolean
+    const clsList = Array.from((scope as Element).classList || [])
+    let isMe: boolean | null = null
     const hasStatus = !!scope.querySelector('.message-status')
     const hasAvatar = !!scope.querySelector('.image-circle')
-    if (/item-myself|myself/.test(cls)) isMe = true
-    else if (/item-friend|friend/.test(cls)) isMe = false
+
+    // 精确匹配 item-myself/item-friend/item-system
+    if (clsList.includes('item-myself')) isMe = true
+    else if (clsList.includes('item-friend')) isMe = false
+    else if (clsList.includes('item-system')) isMe = null // system message
     else if (hasStatus) isMe = true
     else if (hasAvatar) isMe = false
     else isMe = r.left > mid
-    // 系统通知单独归类：优先用 BOSS 的 item-system 类（2026-08 实测 DOM），
-    // 再退回文本模式（对方已查看/同意发送/撤回消息等）
-    const isSystem = /item-system|system/.test(cls) || (!isMe && SYSTEM_MSG_RE.test(content))
-    const sender = isMe ? 'me' : isSystem ? 'system' : 'hr'
-    out.push({ sender, content })
-    dbg.push(`${isMe ? 'ME' : isSystem ? 'SYS' : 'HR'}|cls=${cls.slice(0, 24)}|st=${hasStatus ? 1 : 0}|av=${hasAvatar ? 1 : 0}|x=${Math.round(r.left)}`)
+
+    // 系统通知单独归类：优先用精确 class；只有 class/状态/头像都没有、只能靠几何
+    // 位置猜的气泡，才用（锚定开头的）系统文案兜底，避免 HR 正文里提到「撤回」被误判
+    const geometryOnly =
+      !clsList.includes('item-myself') && !clsList.includes('item-friend') &&
+      !clsList.includes('item-system') && !hasStatus && !hasAvatar
+    const isSystem =
+      clsList.includes('item-system') || (geometryOnly && SYSTEM_MSG_RE.test(content))
+    const sender = isSystem ? 'system' : isMe ? 'me' : 'hr'
+    out.push({ sender, content, kind: 'text' })
+    anchors.push(el)
+    // 判定依据（不含正文）：靠哪条规则判的、气泡 class、横坐标。
+    // 纯 k=v 文本——带 [ / { 的 JSON 会被服务端整体脱敏，日志里就看不到依据了。
+    const via = clsList.includes('item-myself') || clsList.includes('item-friend') || clsList.includes('item-system')
+      ? 'class'
+      : hasStatus ? 'status' : hasAvatar ? 'avatar' : 'geometry'
+    const bubbleCls = clsList.filter((c) => /^item-/.test(c)).join('+') || '-'
+    dbg.push(
+      `msg sender=${sender} kind=text via=${via} bubble=${bubbleCls} ` +
+        `x=${Math.round(r.left)} length=${content.length}`,
+    )
   }
-  if (dbg.length) diag("CHAT", "消息判定 mid=" + Math.round(mid), dbg.slice(0, 8))
+
+  // 交互卡片（HR 索要简历/交换联系方式/确认地点…）没有 span.text-content，
+  // 上面那轮收不到。按气泡收：同一气泡里已有文本消息的跳过，避免重复。
+  let orphanButtons = 0
+  let orphanChain = ''
+  const seenBubbles = new Set<Element>()
+  for (const bubble of Array.from(panel.querySelectorAll('.item-friend, .item-myself, .item-system')) as HTMLElement[]) {
+    if (seenBubbles.has(bubble)) continue
+    seenBubbles.add(bubble)
+    if (firstMatch(SEL.msgText, bubble)) continue
+    const r = bubble.getBoundingClientRect()
+    if (r.width === 0) continue
+    const clsList = Array.from(bubble.classList)
+    const sender: ChatMessage['sender'] = clsList.includes('item-system')
+      ? 'system'
+      : clsList.includes('item-myself') ? 'me' : 'hr'
+    // 系统提示要看全文：「您的附件简历 261011 已发送给Boss点击查看附件」——
+    // cardText 只取叶子会丢掉前半句，agent 就看不出「发了什么」。
+    const content = (sender === 'system'
+      ? (bubble.textContent || '').replace(/\s+/g, ' ').trim()
+      : cardText(bubble)
+    ).slice(0, 300)
+    if (!content) continue
+    // 卡片类型沿用自动处理时的同一套判据，读和点不会各判一套
+    const cardKind = classifyCard(content)
+    out.push({ sender, content, kind: 'card', cardKind })
+    anchors.push(bubble)
+    dbg.push(
+      `msg sender=${sender} kind=card card_kind=${cardKind} via=class ` +
+        `bubble=${clsList.filter((c) => /^item-/.test(c)).join('+')} ` +
+        `x=${Math.round(r.left)} length=${content.length}`,
+    )
+  }
+  // 兜底取证：消息区里有「同意/拒绝」按钮却不在任何已识别气泡里，说明卡片结构变了
+  for (const btn of Array.from(panel.querySelectorAll('*')) as HTMLElement[]) {
+    if (btn.children.length || !/^(同意|拒绝)$/.test((btn.textContent || '').trim())) continue
+    if (!btn.closest('.item-friend, .item-myself, .item-system')) {
+      orphanButtons++
+      // 第一次取证：按钮不在任何已知气泡里，说明卡片结构变了。
+      // 记标签链（不含文案），下次据此适配选择器。
+      if (!orphanChain) {
+        const parts: string[] = []
+        let cur: HTMLElement | null = btn
+        for (let i = 0; i < 5 && cur && cur !== panel; i++) {
+          const cls = Array.from(cur.classList).slice(0, 2).map((c) => c.slice(0, 20)).join('.')
+          parts.push(cls ? `${cur.tagName.toLowerCase()}.${cls}` : cur.tagName.toLowerCase())
+          cur = cur.parentElement
+        }
+        orphanChain = parts.join(' < ')
+      }
+    }
+  }
+
+  // 两轮收集后恢复页面上的先后顺序
+  const order = anchors.map((a, i) => ({ a, i }))
+  order.sort((x, y) =>
+    x.a === y.a ? 0 : x.a.compareDocumentPosition(y.a) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1,
+  )
+  const sorted = order.map(({ i }) => out[i])
+  const sortedDbg = order.map(({ i }, n) => dbg[i].replace(/^msg /, `msg index=${n} `))
+  out.splice(0, out.length, ...sorted)
+  dbg.splice(0, dbg.length, ...sortedDbg)
+  const counts = {
+    hr: out.filter((m) => m.sender === 'hr').length,
+    me: out.filter((m) => m.sender === 'me').length,
+    system: out.filter((m) => m.sender === 'system').length,
+  }
+  const geometryCount = dbg.filter((l) => l.includes('via=geometry')).length
+  const cards = out.filter((m) => m.kind === 'card')
+  const kinds = (k: string) => cards.filter((m) => m.cardKind === k).length
+  diag(
+    'CHAT',
+    `消息判定 total=${out.length} hr=${counts.hr} me=${counts.me} system=${counts.system} ` +
+      // 键名不能写成 resume=/content= 这类：服务端 _KEYED_SECRET 会把这些整段打码
+      `cards=${cards.length} resumeCard=${kinds('resume_request')} locationCard=${kinds('location_confirm')} ` +
+      `contactCard=${kinds('contact_exchange')} unknownCard=${kinds('unknown')} ` +
+      `geometry=${geometryCount} orphanButtons=${orphanButtons} ` +
+      `orphanChain=${orphanChain || '-'} mid=${Math.round(mid)}`,
+  )
+  if (opts.verbose) for (const line of dbg.slice(0, 40)) diag('CHAT', line)
   return out
 }
 
@@ -887,7 +1071,7 @@ function headerNameIn(root: HTMLElement): HTMLElement | null {
   return all.find((el) => !insideThreadList(el)) || null
 }
 
-function currentThreadId(): string {
+export function currentThreadId(): string {
   const header = findChatHeader()
   // 必须排掉列表项里的 .name-text，否则拿到的恒是列表第一项的姓名，
   // 会话指纹就永远不变 —— 切换检测（sendText 的 expectThread 核对）随之失效
@@ -904,6 +1088,7 @@ function currentThreadId(): string {
  */
 export function currentThreadInfo(): {
   company: string
+  hrName: string
   jobTitle: string
   salary: string
   city: string
@@ -925,7 +1110,7 @@ export function currentThreadInfo(): {
   const city = pickHeaderField(SEL.headerCity)
 
   const header = findChatHeader()
-  if (!header) return { company: '', jobTitle, salary, city }
+  if (!header) return { company: '', hrName: '', jobTitle, salary, city }
 
   const nameEl = headerNameIn(header)
   const nameTxt = text(nameEl)
@@ -973,7 +1158,7 @@ export function currentThreadInfo(): {
         })),
     })
   }
-  return { company, jobTitle, salary, city }
+  return { company, hrName: nameTxt, jobTitle, salary, city }
 }
 
 /**
@@ -1027,6 +1212,10 @@ async function sendText(content: string, expectThread?: string): Promise<boolean
     }
     await delay(250, 500)
 
+    // 发送前记下我方气泡数：新气泡是「这次发的」唯一可靠标识（文本匹配会被
+    // 历史同文消息、输入框残留文字误判）。
+    const baseline = countMyBubbles()
+
     // 发送：Enter 键盘事件（keydown+keyup，补 keyCode/which 兼容旧 handler）
     for (const type of ['keydown', 'keyup'] as const) {
       input.dispatchEvent(new KeyboardEvent(type, {
@@ -1040,16 +1229,30 @@ async function sendText(content: string, expectThread?: string): Promise<boolean
     }
     await delay(400, 800)
 
-    // 兜底：找「发送」按钮（文本/aria/title/图标型，限定输入框附近，避免误点）
-    const sendBtn = findSendButton(input)
-    if (sendBtn) {
-      sendBtn.click()
-      await delay(300, 600)
+    // 先看 Enter 是否已经发出；发出了就不要再点「发送」按钮，避免重复发送
+    let via = ''
+    if (countMyBubbles() > baseline) via = 'enter'
+    else {
+      // 兜底：找「发送」按钮（文本/aria/title/图标型，限定输入框附近，避免误点）
+      const sendBtn = findSendButton(input)
+      if (sendBtn) {
+        sendBtn.click()
+        await delay(300, 600)
+        if (countMyBubbles() > baseline) via = 'button'
+      }
     }
 
-    // 校验上屏：读会话区最后几条「我方」气泡是否包含发送内容（比全文 contains 可靠）
-    const ok = await confirmMessageSent(content)
-    diag('CHAT', `发送${ok ? '成功' : '未确认'}`, { contentLength: content.length })
+    // 结果以 BOSS 自己给新气泡打的投递状态为准（送达/已读），不靠文本匹配：
+    // 历史里有同文消息、或发送失败时输入框残留原文，文本匹配都会误判。
+    const delivery = await waitForDelivery(baseline, content)
+    lastSendDelivery = delivery
+    // sending = 新气泡已上屏但回执未到：页面已经发出，绝不能报失败（agent 会重发）
+    const ok = delivery === 'delivered' || delivery === 'read' || delivery === 'sending'
+    diag(
+      'CHAT',
+      `send status=${delivery} via=${via || 'none'} length=${content.length} ` +
+        `bubbles=${baseline}->${countMyBubbles()}`,
+    )
 
     // 发送成功后，检查并恢复列表滚动位置
     if (ok && container) {
@@ -1117,23 +1320,47 @@ export function classifyCard(question: string): ChatCard['kind'] {
  * 判据：卡片垂直位置之下已有我方消息（消息流自上而下按时间排列），
  * 或结果文本已出现在消息流中。
  */
-function isCardAnswered(cardEl: HTMLElement, panel: HTMLElement): boolean {
-  const cardBottom = cardEl.getBoundingClientRect().bottom
+/**
+ * 卡片是否已答 —— 以 BOSS 自己的状态为准：答过之后卡片按钮会被禁用。
+ *
+ * 2026-10-20 probe_dom 实测：
+ *   已答（用户点了「可以接受」）：span.btn-v2.disabled 两个按钮都带 disabled
+ *   未答（简历卡）：            span.card-btn 无任何禁用标记
+ * 早期实现用「卡片下方有我方消息」判重，会把我方普通回复误当成已答；
+ * 用消息文案判断也分不清「用户手打的同一句话」和「点卡片产生的结果」。
+ */
+function isCardAnswered(cardEl: HTMLElement, _panel: HTMLElement): boolean {
+  const buttons = Array.from(
+    cardEl.querySelectorAll('.card-btn, .btn-v2, [role="button"], button, span, a'),
+  ).filter((el) => /^(同意|拒绝|可以接受|暂不考虑)$/.test((el.textContent || '').replace(/\s/g, '')))
 
-  // 卡片之后是否有我方消息（item-myself / 带已读送达标记）
-  const mine = Array.from(panel.querySelectorAll('.item-myself, [class*="item-myself"]'))
-  for (const el of mine) {
-    const r = (el as HTMLElement).getBoundingClientRect()
-    if (r.height > 0 && r.top >= cardBottom - 4) return true
+  if (!buttons.length) {
+    // 找不到按钮：可能是已答后被 BOSS 换成纯文本，也可能结构未知。
+    // 不猜「已答」，交给上层按未知处理，避免把待处理卡片永久跳过。
+    return false
   }
+  return buttons.every((el) => isDialogButtonDisabled(el as HTMLElement))
+}
 
-  // 兜底：卡片结果文本已出现在消息流（「已发送给Boss」「工作地点我可以接受」）
-  const flow = (panel.textContent || '').replace(/\s/g, '')
-  const cardText = (cardEl.textContent || '').replace(/\s/g, '')
-  if (/是否同意/.test(cardText) && /已发送给Boss|已发送给boss/i.test(flow)) return true
-  if (/是否接受此工作地点/.test(cardText) && /工作地点我可以接受/.test(flow)) return true
+/** 把消息区滚到底，保证卡片按钮已经渲染/可见（否则 visible() 判定为 0 会漏卡） */
+async function revealLatestMessages(): Promise<void> {
+  const panel = findChatPanel()
+  if (!panel) return
+  const anchor = firstMatch(SEL.msgText, panel) || panel
+  let sc: HTMLElement | null = anchor
+  for (let i = 0; i < 8 && sc; i++) {
+    if (sc.scrollHeight > sc.clientHeight + 4) break
+    sc = sc.parentElement
+  }
+  if (!sc) return
+  sc.scrollTo({ top: sc.scrollHeight })
+  await delay(150, 250)
+}
 
-  return false
+/** 待处理卡片（会先滚动到消息底部，检测更稳定） */
+export async function listPendingCardsStable(): Promise<Array<{ kind: ChatCardKind; questionLength: number }>> {
+  await revealLatestMessages()
+  return listPendingCardKinds()
 }
 
 function findPendingCards(): ChatCard[] {
@@ -1314,8 +1541,86 @@ function extractContactDecision(
   }
 }
 
-function markCardHandled(card: ChatCard): void {
-  card.element?.setAttribute('data-aah-card-handled', '1')
+function markCardHandled(card: ChatCard, handled = true): void {
+  if (!card.element) return
+  if (handled) card.element.setAttribute('data-aah-card-handled', '1')
+  else card.element.removeAttribute('data-aah-card-handled')
+}
+
+export type ChatCardKind = 'resume_request' | 'contact_exchange' | 'location_confirm' | 'unknown'
+
+/** 当前会话里待处理的交互卡片（只读，不点击）。 */
+export function listPendingCardKinds(): Array<{ kind: ChatCardKind; questionLength: number }> {
+  return findPendingCards().map((c) => ({ kind: c.kind, questionLength: c.question.length }))
+}
+
+/**
+ * 直接点一张待处理卡片的「同意 / 拒绝」按钮（agent 工具用）。
+ *
+ * 不套用本地策略：回不回、同不同意由 agent 决策；这里只负责执行并记账，
+ * 点击前打 handled 标记，避免同一张卡重复点。
+ */
+export async function clickCard(
+  kind: ChatCardKind,
+  accept: boolean,
+  opts: { resumeName?: string | null; resumeIndex?: number | null } = {},
+): Promise<boolean> {
+  await revealLatestMessages()
+  const card = findPendingCards().find((c) => c.kind === kind)
+  if (!card) {
+    diag('CHAT', `card_click status=not_found kind=${kind}`)
+    return false
+  }
+  const btn = accept ? card.acceptBtn : card.rejectBtn
+  if (!btn) {
+    diag('CHAT', `card_click status=no_button kind=${kind} accept=${accept}`)
+    return false
+  }
+  // 先占位防止并发重复点击，但失败必须回滚：标记一旦留下，findPendingCards
+  // 会永远跳过这张卡，agent 再也没有重试机会（2026-10-20 实测踩到）。
+  markCardHandled(card)
+  const baseline = kind === 'resume_request' && accept ? countResumeSentMarks() : null
+  const hit = realClick(btn)
+  diag('CHAT', `card_click status=clicked kind=${kind} accept=${accept} hit=${hit}`)
+
+  if (kind === 'resume_request' && accept) {
+    await delay(1200, 2000)
+    const cfg = loadConfig()
+    const target =
+      opts.resumeName ||
+      (cfg.defaultSendResumeId && cfg.resumeNames
+        ? cfg.resumeNames[String(cfg.defaultSendResumeId)] || null
+        : null)
+    const sent = await completeResumeSend(target, false, baseline, opts.resumeIndex ?? null)
+    if (!sent) markCardHandled(card, false) // 简历没发出去 = 卡片没处理，允许重试
+    diag('CHAT', `card_click resume_send status=${sent ? 'sent' : 'failed_retryable'} target=${target ? 'named' : 'none'}`)
+    return sent
+  }
+  return true
+}
+
+/** 给当前会话发一条文本（agent 工具用），发送前核对会话未被切换。 */
+export async function sendMessageText(content: string): Promise<boolean> {
+  // 每次发送先清空上一次的回执：前置条件不满足直接返回时，工具层读到的
+  // lastDeliveryState 必须是这次的 'none'，不能沿用上一条消息的 delivered。
+  lastSendDelivery = 'none'
+  const text_ = (content || '').trim()
+  if (!text_) return false
+  if (!onChatPage()) {
+    diag('CHAT', 'send_message status=not_chat_page')
+    return false
+  }
+  const id = currentThreadId()
+  if (id === '|') {
+    diag('CHAT', 'send_message status=no_thread')
+    return false
+  }
+  return sendText(text_, id)
+}
+
+/** 最近一次 sendText 的投递结论（工具层回传给 agent：区分「确认送达」与「已发出待回执」） */
+export function lastDeliveryState(): DeliveryState {
+  return lastSendDelivery
 }
 
 /**
@@ -1414,16 +1719,20 @@ async function handleCard(
     log(`  ↳ HR 索要附件简历 → 点「同意」`)
     // The card is also handled by BOSS's delegated Vue listener. The old
     // bare click() could leave the follow-up resume picker unopened.
+    const sentBaseline = countResumeSentMarks()
     realClick(card.acceptBtn)
     await delay(1200, 2000)
     diag('CHAT', '已同意发送附件简历')
-    // 同意后 BOSS 弹简历选择框（多简历时）：选默认简历并发送
+    // 同意后 BOSS 弹简历选择框（多简历时）：选默认简历并发送；
+    // 只有一份时直接发出，靠消息区新出现的「已发送给Boss」确认
     const resumeCfg = loadConfig()
     const targetName =
       resumeCfg.defaultSendResumeId && resumeCfg.resumeNames
         ? resumeCfg.resumeNames[String(resumeCfg.defaultSendResumeId)] || null
         : null
-    return await completeResumeSend(targetName)
+    const sent = await completeResumeSend(targetName, false, sentBaseline)
+    if (!sent) markCardHandled(card, false)
+    return sent
   }
 
   if (card.kind === 'location_confirm') {
@@ -1553,6 +1862,14 @@ function compactText(el: Element): string {
   return (el.textContent || '').replace(/\s+/g, '')
 }
 
+/** 元素是否真的在视口内（离屏副本宽高正常，只有位置能区分） */
+function inViewport(el: HTMLElement): boolean {
+  const r = el.getBoundingClientRect()
+  return r.width > 0 && r.height > 0 &&
+    r.right > 0 && r.bottom > 0 &&
+    r.left < window.innerWidth && r.top < window.innerHeight
+}
+
 function isVisibleDialog(el: HTMLElement): boolean {
   if (el.hidden || el.getAttribute('aria-hidden') === 'true') return false
   const style = getComputedStyle(el)
@@ -1572,6 +1889,17 @@ const RESUME_DIALOG_ACTION_RE = /^(发送|发送给Boss|发送简历|确认发�
 
 /** 定位简历弹窗：语义锚点优先，允许选择框同时带「上传简历」入口。 */
 export function findResumeDialog(): HTMLElement | null {
+  // 简历选择框的确定特征（2026-10-20 probe_dom 实测）：
+  //   .choose-resume-dialog > .resume-choose-container > ul.resume-list > li.list-item
+  //   .footer button.btn-sure-v2「发送」
+  // 必须放在「多弹窗就保险退出」之前：聊天里的卡片层（.message-dialog-both /
+  // .item-dialog）也会命中 [class*=dialog]，会被误当成竞争弹窗导致直接返回 null。
+  const chooseDialog = findChooseResumeDialog()
+  if (chooseDialog) {
+    diag('CHAT', 'resume_dialog via=choose-resume')
+    return chooseDialog
+  }
+
   const cands = Array.from(document.querySelectorAll(
     '[role="dialog"], [class*="dialog"], [class*="modal"], [class*="layer"], [class*="popup"]',
   )) as HTMLElement[]
@@ -1615,7 +1943,172 @@ export function findResumeDialog(): HTMLElement | null {
   const innermostFallback = fallback.filter((candidate) =>
     !fallback.some((other) => other !== candidate && candidate.contains(other)),
   )
-  return innermostFallback.length === 1 ? innermostFallback[0] : null
+  if (innermostFallback.length === 1) return innermostFallback[0]
+
+  // 新版选择框（2026-10 实测）：标题「请选择要发送的简历」+ 附件行（文件名/更新于/大小）
+  // + 「管理附件」，没有发送按钮、没有 role=dialog，上面几条规则都认不出。
+  // 依次尝试：标题锚点 → 文件名锚点 → 同源 iframe 里的标题锚点。
+  // 实测（2026-10-20 probe_overlays）：索要简历卡片点同意后弹出的选择框是
+  // .dialog-wrap.active > .boss-popup__content > .choose-resume-dialog，
+  // 附件名被字体混淆（DOM 文本里没有 .pdf），所以按文件名找必然失败。
+  const known = Array.from(document.querySelectorAll(
+    '.choose-resume-dialog, [class*="choose-resume"], [class*="chooseResume"]',
+  )) as HTMLElement[]
+  const visibleKnown = known.filter(isVisibleDialog)
+  if (visibleKnown.length === 1) {
+    const el = visibleKnown[0]
+    const container = (el.closest('.boss-popup__content') as HTMLElement | null) || el
+    diag('CHAT', 'resume_dialog via=choose-resume')
+    return container
+  }
+
+  const byTitle = findResumePickerByTitle()
+  if (byTitle) return byTitle
+  const byFiles = findResumePickerByFiles()
+  if (byFiles) {
+    diag('CHAT', `resume_dialog via=files chain=${describeForLog(byFiles)}`)
+    return byFiles
+  }
+  for (const doc of sameOriginFrames().slice(1)) {
+    const t = findTitleIn(doc)
+    if (t) {
+      diag('CHAT', 'resume_dialog via=iframe')
+      return t
+    }
+  }
+  return null
+}
+
+/** 标签链（tag.class，不含文案），用于弹窗识别取证 */
+function describeForLog(el: Element): string {
+  const parts: string[] = []
+  let cur: Element | null = el
+  for (let i = 0; i < 5 && cur && cur !== document.body; i++) {
+    const cls = Array.from(cur.classList).slice(0, 2).map((c) => c.slice(0, 20)).join('.')
+    parts.push(cls ? `${cur.tagName.toLowerCase()}.${cls}` : cur.tagName.toLowerCase())
+    cur = cur.parentElement
+  }
+  return parts.join(' < ')
+}
+
+/** 在指定 document 里按标题找选择框 */
+function findTitleIn(doc: Document): HTMLElement | null {
+  const titles = (Array.from(doc.querySelectorAll('*')) as HTMLElement[]).filter((el) => {
+    if (el.children.length) return false
+    if (!/^请选择(?:要发送的)?(?:附件)?简历$/.test((el.textContent || '').replace(/\s/g, ''))) return false
+    const r = el.getBoundingClientRect()
+    return r.width > 0 && r.height > 0
+  })
+  for (const title of titles) {
+    let cur: HTMLElement | null = title.parentElement
+    for (let i = 0; i < 8 && cur && cur !== doc.body; i++) {
+      if (countFileLeaves(cur)) return cur
+      cur = cur.parentElement
+    }
+  }
+  return null
+}
+
+/** 简历附件文件名（BOSS 附件行里的 xxx.pdf / .doc / .docx） */
+const RESUME_FILE_RE = /\.(pdf|docx?|jpe?g|png)$/i
+
+/**
+ * 兜底：按「附件文件名」找选择框容器。
+ *
+ * 2026-10-20 实测：会话里挂着索要简历卡片时点同意/发简历，BOSS 弹出一个
+ * 视觉上是浮层的选择框，但它既没有 role=dialog、class 里也没有 dialog/modal，
+ * 标题兜底也没命中（findResumeDialog 返回 null，插件以为没弹窗）。
+ * 这里不依赖任何 class：找可见的 .pdf/.doc 叶子，向上取「包含 1~10 个文件名」
+ * 的最大容器，通常就是选择框本体。
+ */
+function countFileLeaves(root: Element): number {
+  let n = 0
+  for (const el of Array.from(root.querySelectorAll('*'))) {
+    if (el.children.length) continue
+    const t = (el.textContent || '').trim()
+    if (!RESUME_FILE_RE.test(t) || t.length > 120) continue
+    const r = el.getBoundingClientRect()
+    if (r.width > 0 && r.height > 0) n++
+    if (n > 12) return n
+  }
+  return n
+}
+
+function findResumePickerByFiles(): HTMLElement | null {
+  const leaves = (Array.from(document.querySelectorAll('*')) as HTMLElement[]).filter((el) => {
+    if (el.children.length || el.closest('.aah-root')) return false
+    const t = (el.textContent || '').trim()
+    if (!RESUME_FILE_RE.test(t) || t.length > 120) return false
+    const r = el.getBoundingClientRect()
+    return r.width > 0 && r.height > 0
+  })
+  if (!leaves.length || leaves.length > 12) return null
+  // 从第一个文件名往上爬，取仍然只包住这几个文件名的最大祖先
+  let best: HTMLElement | null = null
+  let cur: HTMLElement | null = leaves[0].parentElement
+  for (let i = 0; i < 10 && cur && cur !== document.body; i++) {
+    const n = countFileLeaves(cur)
+    if (n === 0 || n > 12) break
+    best = cur
+    cur = cur.parentElement
+  }
+  if (!best) return null
+  const r = best.getBoundingClientRect()
+  // 太小的容器（只有文件名本身）不算选择框
+  if (r.width < 200 || r.height < 80) return null
+  // 必须像弹层：含「发送/确定」按钮，或 class 命中 popup/dialog/layer。
+  // 否则会话列表里出现过的附件名会把整个列表当成选择框（实测踩到）。
+  const hasSend = !!findDialogButton(best, /^(发送|确定|确认发送)$/)
+  const looksLikeLayer = /popup|dialog|layer|modal/i.test(String(best.className || ''))
+  if (!hasSend && !looksLikeLayer) return null
+  if (best.closest('[class*="chat-user"], [class*="user-list"], [class*="list-warp"]')) return null
+  return best
+}
+
+/** 同源 iframe 的 document（BOSS 有些浮层挂在 iframe 里） */
+function sameOriginFrames(): Document[] {
+  const docs: Document[] = [document]
+  for (const f of Array.from(document.querySelectorAll('iframe'))) {
+    try {
+      const d = f.contentDocument
+      if (d && d !== document) docs.push(d)
+    } catch {
+      /* 跨域 iframe 读不到，跳过 */
+    }
+  }
+  return docs
+}
+
+function findResumePickerByTitle(): HTMLElement | null {
+  const titles = (Array.from(document.querySelectorAll('*')) as HTMLElement[]).filter((el) => {
+    if (el.children.length || el.closest('.aah-root')) return false
+    if (!/^请选择(?:要发送的)?(?:附件)?简历$/.test((el.textContent || '').replace(/\s/g, ''))) return false
+    return isVisibleDialog(el)
+  })
+  const hits: HTMLElement[] = []
+  for (const title of titles) {
+    let cur: HTMLElement | null = title.parentElement
+    for (let i = 0; i < 8 && cur && cur !== document.body; i++) {
+      if (resumeFileLeaves(cur).length) {
+        hits.push(cur)
+        break
+      }
+      cur = cur.parentElement
+    }
+  }
+  // 两个互不包含的可见选择框：说不清哪个在最上层，安全停止
+  return hits.length === 1 ? hits[0] : null
+}
+
+/** 容器里可见的附件文件名叶子 */
+function resumeFileLeaves(root: HTMLElement): HTMLElement[] {
+  return (Array.from(root.querySelectorAll('*')) as HTMLElement[]).filter((el) => {
+    if (el.children.length) return false
+    const t = (el.textContent || '').trim()
+    if (!RESUME_FILE_RE.test(t) || t.length > 120) return false
+    const r = el.getBoundingClientRect()
+    return r.width > 0 && r.height > 0
+  })
 }
 
 /** 在简历选择弹窗里选目标简历：按归一化名称模糊匹配列表项，点其可点祖先；
@@ -1623,6 +2116,36 @@ export function findResumeDialog(): HTMLElement | null {
 export function selectResumeInDialog(dialog: HTMLElement, targetName: string): boolean {
   const targetNorm = normResumeName(targetName)
   if (!targetNorm) return false
+  // 新版附件行（文件名 + 更新时间 + 大小，没有 radio/label）：按文件名匹配整行。
+  // 点整行而不是文件名文字——文件名本身可能是「预览」链接，会打开 PDF 而不是选中。
+  const fileRows = resumeFileRows(dialog)
+  if (fileRows.length) {
+    const scored = fileRows
+      .map(({ row, name }) => {
+        const norm = normResumeName(name)
+        const score = norm === targetNorm ? 2 : norm.includes(targetNorm) || targetNorm.includes(norm) ? 1 : 0
+        return { row, score }
+      })
+      .filter((x) => x.score > 0 && !isDialogButtonDisabled(x.row))
+    const best = Math.max(0, ...scored.map((x) => x.score))
+    const top = scored.filter((x) => x.score === best)
+    if (top.length !== 1) {
+      diag('CHAT', `resume_select status=${top.length ? 'ambiguous' : 'not_found'} rows=${fileRows.length} matches=${top.length}`)
+      return false
+    }
+    const { row } = top[0]
+    if (optionState(row).selected) {
+      diag('CHAT', `resume_select status=already_selected rows=${fileRows.length}`)
+    } else {
+      // 行里有 radio/checkbox 时直接点控件：点 label 会被浏览器再转发一次给 input，
+      // 行上的 Vue handler 收到两次（与下方旧版行逻辑同一处理）
+      const formControl = row.querySelector('input[type="radio"], input[type="checkbox"]') as HTMLElement | null
+      if (formControl) clickDirect(formControl)
+      else realClick(row)
+      diag('CHAT', `resume_select status=clicked rows=${fileRows.length} score=${best} control=${formControl ? 1 : 0}`)
+    }
+    return true
+  }
   // 只扫叶子节点（自身文本），避免父容器把整弹窗文本算进去
   const leaves = Array.from(dialog.querySelectorAll('*')) as HTMLElement[]
   const matchesByRow = new Map<HTMLElement, { score: number; delta: number }>()
@@ -1708,6 +2231,51 @@ export function selectResumeInDialog(dialog: HTMLElement, targetName: string): b
   return false
 }
 
+/** 不依赖文件名的行元素（字体混淆时的兜底） */
+function genericRowEls(dialog: HTMLElement): HTMLElement[] {
+  const NON_ROW = /请选择|发送|取消|确定|关闭|管理附件|上传|在线简历|附件简历/
+  const rows: HTMLElement[] = []
+  for (const el of Array.from(dialog.querySelectorAll('[class*="resume"], [class*="item"], li, [role="radio"], label')) as HTMLElement[]) {
+    if (!isVisibleDialog(el)) continue
+    const r = el.getBoundingClientRect()
+    if (r.height < 36 || r.width < 120) continue
+    const t = (el.textContent || '').replace(/\s+/g, ' ').trim()
+    if (!t || t.length < 4 || t.length > 120) continue
+    if (NON_ROW.test(t)) continue
+    rows.push(el)
+  }
+  // 只留最内层：包住别的行的容器不算一行
+  return rows.filter((r) => !rows.some((o) => o !== r && r.contains(o))).slice(0, 10)
+}
+
+function listRowsGeneric(dialog: HTMLElement): ResumeOption[] {
+  return genericRowEls(dialog).map((row) => ({ name: 'row', ...optionState(row) }))
+}
+
+/** 按序号点选（字体混淆导致名字不可靠时用） */
+export function selectResumeRowByIndex(dialog: HTMLElement, index: number): boolean {
+  const listItems = Array.from(dialog.querySelectorAll('li.list-item')) as HTMLElement[]
+  const pick = listItems[index]
+  if (pick) {
+    if (!pick.classList.contains('selected')) realClick(pick)
+    diag('CHAT', `resume_select status=clicked_list_item index=${index} rows=${listItems.length}`)
+    return true
+  }
+  const rows = genericRowEls(dialog)
+  const row = rows[index]
+  if (!row) {
+    diag('CHAT', `resume_select status=index_out_of_range index=${index} rows=${rows.length}`)
+    return false
+  }
+  const input = row.querySelector('input[type="radio"], input[type="checkbox"]') as HTMLElement | null
+  if (!optionState(row).selected) {
+    if (input) clickDirect(input)
+    else realClick(row)
+  }
+  diag('CHAT', `resume_select status=clicked_by_index index=${index} rows=${rows.length}`)
+  return true
+}
+
 /** picker 出现未识别的可见必填控件时，不猜字段语义，不继续发送。 */
 function hasUnknownRequiredField(dialog: HTMLElement): boolean {
   const controls = Array.from(dialog.querySelectorAll(
@@ -1731,6 +2299,136 @@ function dumpDialogCandidates(): string[] {
   }).slice(0, 10)
 }
 
+/** 简历选择框里的一行（名字只给面板显示，不进日志） */
+export interface ResumeOption {
+  name: string
+  selected: boolean
+  disabled: boolean
+}
+
+const RESUME_ROW_SEL =
+  '[role="radio"], [role="option"], [role="checkbox"], label, li, [data-resume-id], ' +
+  '[class*="resume-item"], [class*="resume-row"], [class*="resume-card"]'
+/** 弹窗里的标题/按钮/说明文案，不是简历行 */
+const RESUME_NON_OPTION_RE = /请选择|选择.*简历|上传|管理|发送|确定|确认|取消|关闭|同意|拒绝|在线简历|附件简历$|已上传附件/
+/** 纯日期/大小/页数这类附属信息 */
+const RESUME_META_RE = /^(\d{4}[./-]\d{1,2}[./-]\d{1,2}.*|\d+(\.\d+)?\s*(kb|mb|k|m)|\d+页|更新于.*)$/i
+
+/**
+ * 附件行：从文件名叶子往上爬，取「只包含这一个文件名」的最大祖先。
+ * 新版选择框的行没有 li/label/radio，只能这样圈出整行（含更新时间和大小）。
+ */
+/**
+ * 可见的简历选择框：优先带已选行的那个（页面里可能出现两份实例）。
+ */
+function findChooseResumeDialog(): HTMLElement | null {
+  const cands = (Array.from(document.querySelectorAll('.choose-resume-dialog')) as HTMLElement[])
+    .filter((el) => !el.closest('.aah-root') && isVisibleDialog(el))
+    .filter((el) => el.querySelectorAll('li.list-item').length > 0)
+    // BOSS 会保留一份离屏副本（宽高都正常，但 left/top 在视口外）。
+    // 点到副本等于没点 —— 只留真正在视口里的那一份。
+    .filter(inViewport)
+  if (!cands.length) return null
+  const withSelected = cands.filter((el) => el.querySelector('li.list-item.selected'))
+  const pick = withSelected[0] || cands[cands.length - 1]
+  // 标题「请选择要发送的简历」在 .boss-dialog__header 里，不在 .choose-resume-dialog 内部；
+  // 返回整个 popup content，才能同时拿到标题（判类型）和「发送」按钮。
+  const wrapper = pick.closest('.boss-popup__content') as HTMLElement | null
+  return wrapper || pick
+}
+
+function resumeFileRows(dialog: HTMLElement): Array<{ row: HTMLElement; name: string }> {
+  const leaves = resumeFileLeaves(dialog)
+  return leaves.map((leaf) => {
+    let row: HTMLElement = leaf
+    let cur = leaf.parentElement
+    while (cur && cur !== dialog && resumeFileLeaves(cur).length === 1) {
+      row = cur
+      cur = cur.parentElement
+    }
+    return { row, name: (leaf.textContent || '').trim() }
+  })
+}
+
+function optionState(row: HTMLElement): { selected: boolean; disabled: boolean } {
+  const input = row.querySelector('input[type="radio"], input[type="checkbox"]') as HTMLInputElement | null
+  const selected =
+    row.getAttribute('aria-checked') === 'true' ||
+    row.getAttribute('aria-selected') === 'true' ||
+    !!input?.checked ||
+    /(?:^|[-_\s])(selected|active|checked|current)(?:$|[-_\s])/.test(String(row.className || ''))
+  return { selected, disabled: isDialogButtonDisabled(row) }
+}
+
+/**
+ * 读出简历选择框里的候选行（只读，不点击）。
+ *
+ * 优先按附件文件名（xxx.pdf）圈行——这是 2026-10 实测的新版结构；
+ * 没有文件名时退回旧版 li/label/radio 行。
+ */
+export function listResumeOptions(dialog: HTMLElement): ResumeOption[] {
+  // 实测结构：li.list-item，.item-body 是名字/更新时间/大小，.selected 表示选中
+  const listItems = Array.from(dialog.querySelectorAll('li.list-item')) as HTMLElement[]
+  if (listItems.length) {
+    return listItems.map((li) => {
+      const body = li.querySelector('.item-body')
+      const raw = (body?.textContent || li.textContent || '').replace(/\s+/g, ' ').trim()
+      // 去掉「更新于 …」「xxxKB」等附属信息，只留文件名
+      const name = raw.split(/更新于|\d+(?:\.\d+)?\s*(?:KB|MB|K|M)\b/i)[0].trim().slice(0, 120)
+      return {
+        name: name || 'row',
+        selected: li.classList.contains('selected'),
+        disabled: false,
+      }
+    })
+  }
+  const fileRows = resumeFileRows(dialog)
+  if (fileRows.length) {
+    return fileRows.map(({ row, name }) => ({ name, ...optionState(row) }))
+  }
+  // 附件名被字体混淆时没有 ".pdf" 字样，按结构找行：
+  // 选择框内可见、高度够、文本短、可点击的行，按 DOM 顺序编号。
+  const structural = listRowsGeneric(dialog)
+  if (structural.length) return structural
+  const rows = new Map<HTMLElement, string>()
+  for (const el of Array.from(dialog.querySelectorAll('*')) as HTMLElement[]) {
+    if (el.children.length) continue
+    const own = (el.textContent || '').trim()
+    if (!own || own.length < 2 || own.length > 80) continue
+    if (RESUME_NON_OPTION_RE.test(own) || RESUME_META_RE.test(own)) continue
+    const r = el.getBoundingClientRect()
+    if (r.width <= 0 || r.height <= 0) continue
+    const anc = el.closest(RESUME_ROW_SEL) as HTMLElement | null
+    if (!anc || anc === dialog || !dialog.contains(anc)) continue
+    const prev = rows.get(anc)
+    if (!prev || own.length > prev.length) rows.set(anc, own)
+  }
+  // 嵌套行（li > label）只留最内层，避免同一份简历数两次
+  const entries = Array.from(rows.entries()).filter(
+    ([row]) => !Array.from(rows.keys()).some((other) => other !== row && row.contains(other)),
+  )
+  return entries.map(([row, name]) => ({ name, ...optionState(row) }))
+}
+
+/** 工具栏「发简历」入口。跳过消息流里 HR 卡片上的同名文字，避免误点卡片。 */
+function findResumeToolbarButton(): HTMLElement | null {
+  const panel = findChatPanel()
+  const inCard = (el: HTMLElement): boolean =>
+    !!panel && panel.contains(el) && !!el.closest('[class*="item-friend"], [class*="card"]')
+  const first = findByText(/^(发简历|发送简历|附件简历)$/, { clickable: true })
+  if (!first || !inCard(first)) return first
+  // 第一个命中在卡片里：按文档顺序继续找卡片外的
+  for (const el of Array.from(document.querySelectorAll('*')) as HTMLElement[]) {
+    if (el.children.length || inCard(el) || el.closest('.aah-root')) continue
+    if (!/^(发简历|发送简历|附件简历)$/.test((el.textContent || '').replace(/\s/g, ''))) continue
+    const r = el.getBoundingClientRect()
+    if (r.width <= 0 || r.height <= 0) continue
+    const clickable = el.closest('button, a, [role=button]') as HTMLElement | null
+    return clickable || el
+  }
+  return null
+}
+
 /**
  * 简历发送弹窗流：确认（同意/确定）→ 选择默认简历 → 发送。
  *
@@ -1742,14 +2440,29 @@ function dumpDialogCandidates(): string[] {
 export async function completeResumeSend(
   targetName: string | null,
   alreadyAgreed = false,
+  /** 点「发简历/同意」之前消息区里「已发送给Boss」的条数；传了才能识别「没弹窗直接发出」 */
+  sentBaseline: number | null = null,
+  /** 按序号选（附件名被字体混淆、无法按名字匹配时用） */
+  targetIndex: number | null = null,
 ): Promise<boolean> {
   let agreed = alreadyAgreed
   const selectedPickers = new WeakSet<HTMLElement>()
   let waitingForEnabledLogged = false
+  let sawDialog = false
+  const sentNow = (): boolean => sentBaseline !== null && countResumeSentMarks() > sentBaseline
   for (let i = 0; i < 24; i++) {
     await delay(400, 600)
     const dialog = findResumeDialog()
-    if (!dialog) continue
+    if (!dialog) {
+      // 只有一份附件时 BOSS 不弹选择框、直接发出；选中附件行后选择框也会直接关闭。
+      // 这两种情况都靠消息区新出现的「附件简历…已发送给Boss」确认，不靠弹窗。
+      if (sentNow()) {
+        diag('CHAT', `resume_send status=sent via=chat_mark dialog=${sawDialog}`)
+        return true
+      }
+      continue
+    }
+    sawDialog = true
 
     const kind = resumeDialogKind(dialog)
     if (kind === 'unknown') {
@@ -1769,6 +2482,21 @@ export async function completeResumeSend(
         ).length,
       })
       return false
+    }
+    if (kind === 'picker' && !targetName && targetIndex === null) {
+      // 没指定发哪份：只有一份时可以直接发；多份时 BOSS 的「当前选中」
+      // 只是它自己的默认值，不代表用户意图。简历不可撤回，宁可停下交给人工。
+      const options = listResumeOptions(dialog)
+      if (options.length !== 1) {
+        diag('CHAT', `resume_send status=ambiguous options=${options.length} target=none`)
+        return false
+      }
+    }
+    if (kind === 'picker' && targetIndex !== null && !selectedPickers.has(dialog)) {
+      selectedPickers.add(dialog)
+      if (!selectResumeRowByIndex(dialog, targetIndex)) return false
+      await delay(350, 550)
+      continue
     }
     if (kind === 'picker' && targetName && !selectedPickers.has(dialog)) {
       selectedPickers.add(dialog)
@@ -1792,7 +2520,15 @@ export async function completeResumeSend(
       // BOSS uses delegated Vue handlers for the portal button. A bare
       // HTMLElement.click() can update nothing even though the button is
       // visible; dispatch the same pointer/mouse sequence as a user click.
-      realClick(sendBtn)
+      const sendHit = realClick(sendBtn)
+      const sendRect = sendBtn.getBoundingClientRect()
+      diag(
+        'CHAT',
+        `resume_send step=click_send hit=${sendHit} disabled=${isDialogButtonDisabled(sendBtn) ? 1 : 0} ` +
+          `tag=${sendBtn.tagName.toLowerCase()} ` +
+          `x=${Math.round(sendRect.left)} y=${Math.round(sendRect.top)} ` +
+          `inChatPanel=${!!findChatPanel()?.contains(sendBtn)}`,
+      )
       // 不重试点击同一个发送按钮：第一次可能已到服务端但页面关闭稍慢，
       // 再点会重复发送。只轮询弹窗是否关闭/切到下一阶段。
       for (let wait = 0; wait < 12; wait++) {
@@ -1800,6 +2536,12 @@ export async function completeResumeSend(
         const current = findResumeDialog()
         if (!current) {
           diag('CHAT', `已发送简历（${targetName ? '使用配置的默认简历' : '使用平台当前选中简历'}）`)
+          return true
+        }
+        // 弹窗还没关，但消息区已经出现「已发送给Boss」= 实际已发出，
+        // 不能因为弹窗动画慢就判失败（否则会重复点发送）。
+        if (sentNow()) {
+          diag('CHAT', 'resume_send status=sent via=chat_mark dialog_still_open=1')
           return true
         }
         if (resumeDialogKind(current) !== kind) break
@@ -1823,33 +2565,107 @@ export async function completeResumeSend(
       }
     }
   }
-  diag('CHAT', '⚠ 简历弹窗处理失败：未找到发送/确认按钮', dumpDialogCandidates())
+  if (sentNow()) {
+    diag('CHAT', `resume_send status=sent via=chat_mark dialog=${sawDialog}`)
+    return true
+  }
+  diag(
+    'CHAT',
+    `resume_send status=failed dialog=${sawDialog} baseline=${sentBaseline ?? 'none'} ` +
+      `marks=${countResumeSentMarks()} candidates=${dumpDialogCandidates().length}`,
+  )
   return false
 }
 
-/** 点「发简历」（HR 要简历时用）→ 确认 + 选择默认简历 + 发送 */
-async function sendResume(): Promise<boolean> {
-  // 按可见文本定位（"发简历" 这类文案比 class 稳定得多）
-  const btn = findByText(/^(发简历|发送简历|附件简历)$/, { clickable: true })
+/** 消息区里「附件简历…已发送给Boss」系统提示的条数（发送成功的确凿证据） */
+export function countResumeSentMarks(): number {
+  const panel = findChatPanel()
+  if (!panel) return 0
+  // BOSS 发简历成功后的两种系统痕迹（2026-10-20 实测）：
+  //   1) 文本：「您的附件简历 xxx 已发送给Boss」
+  //   2) 系统卡片链接：「点击查看附件」（新版选择框路径走的是这个）
+  const MARK = /已发送给boss|点击查看附件|查看附件|对方已查看.{0,4}附件/i
+  return (Array.from(panel.querySelectorAll('*')) as HTMLElement[]).filter((el) => {
+    if (el.children.length) return false // 只数叶子，避免父容器重复计数
+    const t = (el.textContent || '').replace(/\s/g, '')
+    return MARK.test(t) && t.length <= 80
+  }).length
+}
+
+/**
+ * 点「发简历」→ 确认 + 选择简历 + 发送。
+ *
+ * @param targetName 要发的简历名（BOSS 弹窗里显示的那份）。不传则用配置的默认简历；
+ *                   两者都没有且弹窗里有多份时安全停止，不发 BOSS 预选的那份。
+ */
+export type ResumeSendReason =
+  | 'not_allowed'   // BOSS 侧暂不允许发简历（工具栏 unable、也没有索要简历卡片）
+  | 'no_button'     // 找不到工具栏按钮
+  | 'send_failed'   // 走了选择框但没确认发出
+
+export interface ResumeSendOutcome {
+  ok: boolean
+  reason?: ResumeSendReason
+}
+
+/** sendResume 的带原因版本（工具层用它给出稳定错误码） */
+export async function sendResumeDetailed(
+  targetName?: string | null,
+  targetIndex?: number | null,
+): Promise<ResumeSendOutcome> {
+  // 选择框已经开着（例如刚点过卡片同意）：直接处理它，不要再点工具栏把框关掉
+  const open = findResumeDialog()
+  if (open && resumeDialogKind(open) === 'picker') {
+    const baseline = countResumeSentMarks()
+    diag('CHAT', 'resume_send step=reuse_open_picker')
+    const okReuse = await completeResumeSend(targetName || null, false, baseline, targetIndex ?? null)
+    return { ok: okReuse, reason: okReuse ? undefined : 'send_failed' }
+  }
+  const btn = findResumeToolbarButton()
+  // 有未处理的「索要简历」卡片时，工具栏「发简历」是灰的：必须走卡片上的同意
+  const cardFallback = async (reason: string): Promise<boolean> => {
+    const cards = listPendingCardKinds().filter((c) => c.kind === 'resume_request')
+    if (!cards.length) return false
+    diag('CHAT', `resume_send step=fallback_card reason=${reason}`)
+    return clickCard('resume_request', true, { resumeName: targetName || null, resumeIndex: targetIndex ?? null })
+  }
   if (!btn) {
+    if (await cardFallback('no_toolbar_button')) return { ok: true }
     diag('CHAT', '未找到「发送简历」按钮')
-    return false
+    return { ok: false, reason: 'no_button' }
   }
   if (isDialogButtonDisabled(btn)) {
-    diag('CHAT', '「发简历」按钮处于禁用态，跳过', { cls: String(btn.className || '').slice(0, 60) })
-    return false
+    diag('CHAT', '「发简历」按钮处于禁用态，尝试卡片路径', { cls: String(btn.className || '').slice(0, 60) })
+    if (await cardFallback('toolbar_disabled')) return { ok: true }
+    // 工具栏禁用且没有索要简历卡片 = BOSS 当前不允许给这个会话发简历
+    diag('CHAT', 'resume_send status=not_allowed reason=toolbar_disabled_no_card')
+    return { ok: false, reason: 'not_allowed' }
   }
   // The toolbar button is Vue-controlled as well; use the full pointer
   // sequence so the resume picker is opened in the same way as a user click.
+  const baseline = countResumeSentMarks()
   realClick(btn)
   await delay(1200, 1800)
 
+  if (targetName || targetIndex != null) {
+    const ok = await completeResumeSend(targetName || null, false, baseline, targetIndex ?? null)
+    return { ok, reason: ok ? undefined : 'send_failed' }
+  }
   const cfg = loadConfig()
-  const targetName =
+  const configured =
     cfg.defaultSendResumeId && cfg.resumeNames
       ? cfg.resumeNames[String(cfg.defaultSendResumeId)] || null
       : null
-  return completeResumeSend(targetName)
+  const ok = await completeResumeSend(configured, false, baseline)
+  return { ok, reason: ok ? undefined : 'send_failed' }
+}
+
+/** 兼容旧调用：只要成败 */
+export async function sendResume(
+  targetName?: string | null,
+  targetIndex?: number | null,
+): Promise<boolean> {
+  return (await sendResumeDetailed(targetName, targetIndex)).ok
 }
 
 /**
@@ -1947,93 +2763,6 @@ export async function runChatRound(
   }
 }
 
-/**
- * 只读会话审计（测试阶段人工核对用）：逐条读取会话消息，区分 系统/HR/我方 三类，
- * 连同后端计划的判定（reply/cleanup/none）一并上报，供核对「待回复」是否准确。
- * 全程不发送、不删除、不调用 sync（不写任何对话记录）。
- */
-export async function runChatAudit(
-  cfg: PluginConfig,
-  log: (m: string) => void,
-  opts: { runId?: string; replyScope?: 'this_round' | 'all' } = {},
-): Promise<{ collected: number }> {
-  const replyScope = opts.replyScope || 'all'
-  const { pending, targets } = await loadChatPlan(cfg, { replyScope })
-  log(`开始只读会话审计（后端计划待回复 ${pending}，仅采集不上报不回复不删除）...`)
-  diag('AUDIT', `只读审计开始 plan_pending=${pending} scope=${replyScope}`)
-
-  const sources = readChatSources()
-  if (!sources || sources.length === 0) {
-    log('未找到零滚动数据源：请确认当前在 BOSS 聊天页且列表已加载')
-    return { collected: 0 }
-  }
-
-  const items: Array<{
-    key: string
-    company: string
-    job_title: string
-    encrypt_job_id: string
-    unread_count: number
-    plan_action: string
-    last_sender: string
-    last_text: string
-    messages: Array<{ sender: string; content: string }>
-  }> = []
-  const summary: Record<string, number> = {
-    total: 0, hr: 0, me: 0, system: 0, none: 0,
-    plan_reply: 0, plan_cleanup: 0, plan_match: 0,
-  }
-
-  for (const s of sources) {
-    if (shouldAbortChatRound()) break
-    const boss = s.boss
-    const rowInfo = bossRowInfo(boss)
-    const target = findPlanTarget(targets, rowInfo, { lenient: true })
-    const t = await openThreadByIndex(s.index)
-    if (!t) {
-      diag('AUDIT', `打开失败 idx=${s.index}，跳过`)
-      continue
-    }
-    const messages = await readMessages()
-    const last = messages[messages.length - 1]
-    const lastSender = last?.sender || 'none'
-    summary.total++
-    summary[lastSender] = (summary[lastSender] || 0) + 1
-    const planAction = target?.action || 'none'
-    if (target) {
-      summary.plan_match++
-      summary[`plan_${planAction}`] = (summary[`plan_${planAction}`] || 0) + 1
-    }
-    items.push({
-      key: chatTargetKey(rowInfo),
-      company: rowInfo.company || boss.name || '',
-      job_title: rowInfo.jobTitle || '',
-      encrypt_job_id: rowInfo.encryptJobId || '',
-      unread_count: Number(boss.unreadCount || 0),
-      plan_action: planAction,
-      last_sender: lastSender,
-      last_text: (last?.content || '').slice(0, 80),
-      messages: messages.slice(-12).map((m) => ({
-        sender: m.sender,
-        content: (m.content || '').slice(0, 120),
-      })),
-    })
-  }
-
-  const ok = await reportChatAudit(cfg, {
-    run_id: opts.runId || '',
-    scope: replyScope,
-    plan_pending: pending,
-    items,
-    summary,
-  })
-  log(
-    `审计完成：采集 ${summary.total} 个会话，最后发送方 HR=${summary.hr} 我方=${summary.me} ` +
-      `系统=${summary.system}；已${ok ? '上报后端' : '上报失败（请检查网络）'}`,
-  )
-  diag('AUDIT', `只读审计完成 total=${summary.total} hr=${summary.hr} me=${summary.me} sys=${summary.system} upload=${ok}`)
-  return { collected: summary.total }
-}
 
 /** 找输入框附近的「发送」按钮（文本/aria/title/图标 class，可见才算） */
 function findSendButton(input: HTMLElement): HTMLElement | null {
@@ -2051,25 +2780,97 @@ function findSendButton(input: HTMLElement): HTMLElement | null {
   return null
 }
 
-/** 确认消息已上屏：轮询会话区最后几条「我方」气泡是否包含发送内容 */
-async function confirmMessageSent(content: string): Promise<boolean> {
-  const needle = content.replace(/\s+/g, '').slice(0, 12)
-  if (!needle) return false
-  for (let i = 0; i < 4; i++) {
-    await delay(300, 500)
-    const panel = findChatPanel()
-    if (panel) {
-      const mine = Array.from(panel.querySelectorAll('.item-myself'))
-      for (let j = mine.length - 1; j >= Math.max(0, mine.length - 3); j--) {
-        const t = (mine[j].textContent || '').replace(/\s+/g, '')
-        if (t.includes(needle)) return true
-      }
-    }
-    // 兜底：全文包含（BOSS 改版选择器失效时仍能确认）
-    if ((document.body.textContent || '').includes(content.slice(0, 10))) return true
-  }
-  return false
+/**
+ * 消息投递状态（BOSS 在每条我方气泡上标的 i.message-status）。
+ *
+ * 2026-10-21 实测：class 为 status-delivery（文案「送达」）、status-read（「已读」）。
+ * 这是 BOSS 服务端回执后才打上的标记，比「文本出现在页面上」可靠得多。
+ */
+export type DeliveryState = 'delivered' | 'read' | 'sending' | 'failed' | 'none'
+
+/** 最近一次 sendText 的投递结果（供工具层回报给 agent） */
+let lastSendDelivery: DeliveryState = 'none'
+
+export function getLastSendDelivery(): DeliveryState {
+  return lastSendDelivery
 }
+
+function myBubbles(): HTMLElement[] {
+  const panel = findChatPanel()
+  if (!panel) return []
+  return Array.from(panel.querySelectorAll('.item-myself')) as HTMLElement[]
+}
+
+/** 当前会话里我方气泡数量（发送前后对比，判断是否出现了这次的新气泡） */
+function countMyBubbles(): number {
+  return myBubbles().length
+}
+
+/** 读一条我方气泡的投递状态 */
+export function readDeliveryState(bubble: Element): DeliveryState {
+  const st = bubble.querySelector('.message-status, [class*="status-"]') as HTMLElement | null
+  if (!st) return 'none'
+  const cls = String(st.className || '')
+  const txt = (st.textContent || '').replace(/\s+/g, '')
+  if (/status-read/.test(cls) || txt === '已读') return 'read'
+  if (/status-delivery|status-deliver|status-sent/.test(cls) || txt === '送达') return 'delivered'
+  if (/fail|error/.test(cls) || /失败|重发/.test(txt)) return 'failed'
+  if (/sending|loading|pending/.test(cls) || /发送中/.test(txt)) return 'sending'
+  return 'none'
+}
+
+/**
+ * 等这次发送的新气泡出现并拿到 BOSS 的投递回执。
+ *
+ * 事件驱动（MutationObserver），不是固定轮询：气泡/状态一变化立刻判定，
+ * 最长等 timeoutMs。返回：
+ *   delivered/read — BOSS 已回执，确定发出
+ *   sending        — 新气泡出现了但还没回执（页面已发出，结果待定，不能重发）
+ *   failed         — BOSS 标了发送失败
+ *   none           — 没出现新气泡（确定没发出去）
+ */
+async function waitForDelivery(baseline: number, content: string, timeoutMs = 8000): Promise<DeliveryState> {
+  const needle = content.replace(/\s+/g, '').slice(0, 12)
+  // 这次的新气泡：排在 baseline 之后、且文本吻合的那一条（防止 HR 同时发消息干扰）
+  const pick = (): HTMLElement | null => {
+    const fresh = myBubbles().slice(baseline)
+    for (let i = fresh.length - 1; i >= 0; i--) {
+      const t = (fresh[i].textContent || '').replace(/\s+/g, '')
+      if (!needle || t.includes(needle)) return fresh[i]
+    }
+    return null
+  }
+  const verdict = (): DeliveryState | null => {
+    const b = pick()
+    if (!b) return null
+    const s = readDeliveryState(b)
+    if (s === 'delivered' || s === 'read' || s === 'failed') return s
+    return null
+  }
+  const now = verdict()
+  if (now) return now
+  const panel = findChatPanel()
+  if (!panel) return 'none'
+  return new Promise<DeliveryState>((resolve) => {
+    let done = false
+    const finish = (s: DeliveryState): void => {
+      if (done) return
+      done = true
+      obs.disconnect()
+      clearTimeout(timer)
+      resolve(s)
+    }
+    const obs = new MutationObserver(() => {
+      const v = verdict()
+      if (v) finish(v)
+    })
+    // 状态是改 class/文案，不只是增删节点，所以三类变化都要监听
+    obs.observe(panel, { childList: true, subtree: true, attributes: true, characterData: true })
+    // 超时：有新气泡但没回执 = sending（已发出、结果待定）；没有新气泡 = none
+    const timer = setTimeout(() => finish(pick() ? 'sending' : 'none'), timeoutMs)
+  })
+}
+
 
 /**
  * 会话身份键：用于跨滚动窗口去重（虚拟列表节点会被复用，引用不可靠）
@@ -2135,6 +2936,26 @@ function readChatSources(): ChatSourceItem[] | null {
   const sources = vl?.$props?.dataSources
   if (!Array.isArray(sources) || sources.length === 0) return null
   return sources.map((boss: AnyVm, index: number) => ({ boss, index }))
+}
+
+/** 按完整会话列表统计未读（不依赖哪些行恰好渲染在 DOM 里）。 */
+export function threadUnreadFromSources(): {
+  threads: number
+  unreadThreads: number
+  unreadMessages: number
+} | null {
+  const sources = readChatSources()
+  if (!sources) return null
+  let unreadThreads = 0
+  let unreadMessages = 0
+  for (const { boss } of sources) {
+    const n = Number(boss?.unreadCount || 0)
+    if (n > 0) {
+      unreadThreads++
+      unreadMessages += n
+    }
+  }
+  return { threads: sources.length, unreadThreads, unreadMessages }
 }
 
 /** 让虚拟列表渲染到指定下标（优先原生 scrollToIndex，退化为 scrollToOffset / 容器滚动）。 */
@@ -2384,8 +3205,6 @@ function findThreadScrollContainer(): HTMLElement | null {
   }
   return fallback
 }
-
-// 时间解析见 boss-time.ts（跨天边界修正 + 相对时间，独立可测）。
 
 /** 删除当前已打开的会话（头部菜单 → 确认弹窗）。 */
 async function deleteCurrentThread(): Promise<boolean> {

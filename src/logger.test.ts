@@ -18,6 +18,8 @@ describe('plugin log grouping metadata', () => {
     await vi.waitFor(() => expect(request).toHaveBeenCalled())
     const payload = JSON.parse(request.mock.calls[0][0].data)
     expect(payload.batch_id).toMatch(/^b-[a-z0-9-]+$/)
+    // 服务端日志文件按版本号标注来源，缺了就无法区分新旧构建的现场。
+    expect(payload.plugin_version).toMatch(/^\d+\.\d+\.\d+$/)
     expect(payload.logs[0].run_id).toBe('run-1')
     expect(payload.logs[0].event_at).toMatch(/^\d{4}-\d{2}-\d{2}T/)
     setLogRunId('')
