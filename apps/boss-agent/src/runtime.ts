@@ -8,6 +8,7 @@ const BOSS_ORIGIN = 'https://www.zhipin.com'
 const MAX_PENDING = 20
 const MAX_RESULT_BYTES = 200_000
 const MAX_STATE_BYTES = 7_000_000
+const PAGE_TIMEOUT_MS = 180_000
 const DIAGNOSTIC_TOOLS = new Set(['get_page_state', 'scan_jobs', 'read_job_detail', 'read_filters', 'list_threads', 'read_messages', 'list_pending_cards', 'read_thread_header', 'probe_overlays', 'probe_dom', 'probe_row', 'list_tools'])
 
 interface Config {
@@ -48,6 +49,7 @@ export interface RuntimeDependencies {
 }
 interface PageConnection { tabId: number; documentId: string; visibility: string; seenAt: number }
 interface Session { accountKey: string; config: Config; revision: number }
+export interface SchedulerTarget { enabled: boolean; tabId: number | null; documentId: string | null; generation: string }
 interface RemoteCommand { id: number; action: string; payload?: Record<string, unknown> }
 
 function object(value: unknown): Record<string, unknown> {
@@ -159,8 +161,11 @@ export class BossRuntime {
   private loaded: Promise<void>
   private queue: Promise<unknown> = Promise.resolve()
   private revision = 0
+  private readonly schedulerEpoch = crypto.randomUUID()
   private requestController: AbortController | null = null
   private cancellation: Promise<void> = Promise.resolve()
+  private activePageCall: { connection: PageConnection; key: string; controller: AbortController } | null = null
+  private pageLifecycle = new Map<string, { version: number; frozen: boolean }>()
   private connection: PageConnection | null = null
   private pageReady = ''
   private ticking = false
@@ -180,10 +185,10 @@ export class BossRuntime {
     const saved = (await this.api.storage.local.get(STORAGE_KEY))[STORAGE_KEY] as State | undefined
     if (saved && typeof saved === 'object' && saved.accounts) this.state = saved
     // A restarted worker has no proof whether a started page action completed. Never replay it.
-    for (const account of Object.values(this.state.accounts)) {
+    for (const [namespace, account] of Object.entries(this.state.accounts)) {
       for (const receipt of Object.values(account.receipts)) {
         if (receipt.state === 'started') {
-          if (receipt.document) await this.cancelPage(receipt.document)
+          if (receipt.document) await this.cancelPage(receipt.document, await pageCommandKey(`${namespace}|${receiptKey(receipt.epoch, receipt.commandId)}`))
           receipt.state = 'done'
           receipt.result = this.reconciliation(receipt.tool)
           receipt.uploaded = false
@@ -203,12 +208,26 @@ export class BossRuntime {
     return sender.id === this.api.runtime.id && !sender.tab && sender.url === this.api.runtime.getURL('popup.html')
   }
   private trustedPage(sender: chrome.runtime.MessageSender): boolean {
-    return sender.id === this.api.runtime.id && sender.frameId === 0 && number(sender.tab?.id) !== null &&
+    return sender.id === this.api.runtime.id && sender.frameId === 0 && (!sender.documentLifecycle || sender.documentLifecycle === 'active') && number(sender.tab?.id) !== null &&
       typeof sender.documentId === 'string' && !!sender.documentId && bossUrl(sender.url) && bossUrl(sender.tab?.url)
   }
   /** Controls invalidate an in-flight session immediately, before waiting for its queue. */
   async handle(message: unknown, sender: chrome.runtime.MessageSender): Promise<unknown> {
     const payload = object(message)
+    if (payload.type === 'boss.lifecycle') {
+      if (!this.trustedPage(sender)) throw new Error('untrusted_sender')
+      await this.loaded
+      if (payload.state !== 'frozen' || !this.state.config?.enabled || this.state.config.tabId !== sender.tab!.id || (this.connection && this.connection.documentId !== sender.documentId)) return { ok: false }
+      const version = payload.lifecycleVersion
+      if (typeof version !== 'number' || !Number.isSafeInteger(version) || version < 0) return { ok: false }
+      const documentKey = `${sender.tab!.id}:${sender.documentId}`
+      if ((this.pageLifecycle.get(documentKey)?.version ?? -1) > version) return { ok: false }
+      this.pageLifecycle.set(documentKey, { version, frozen: true })
+      this.interrupt() // Invalidate the session and cancel the captured MAIN lease before dropping the document proof.
+      this.connection = null
+      this.phase = 'page_frozen'
+      return { ok: true }
+    }
     if (payload.type === 'boss.tick') {
       if (!this.trustedPage(sender)) throw new Error('untrusted_sender')
       if (this.ticking) return { ok: true, phase: this.phase }
@@ -250,10 +269,19 @@ export class BossRuntime {
       }
     })
   }
+  async schedulerTarget(): Promise<SchedulerTarget> {
+    await this.loaded
+    const config = this.state.config
+    return { enabled: !!config?.enabled, tabId: config?.tabId ?? null, documentId: this.connection?.documentId ?? null, generation: `${this.schedulerEpoch}:${this.revision}` }
+  }
   private interrupt(): void {
     this.revision += 1
     this.requestController?.abort()
-    if (this.connection) this.cancellation = this.cancelPage(this.connection)
+    const active = this.activePageCall
+    if (active) {
+      this.cancellation = this.cancelPage(active.connection, active.key)
+      active.controller.abort() // Release the serial command queue even when MAIN is suspended by page freeze.
+    }
   }
   private cancelDeferredActions(): void {
     if (!this.state.config) return
@@ -270,14 +298,17 @@ export class BossRuntime {
       }
     }
   }
-  private async cancelPage(connection: { tabId: number; documentId: string }): Promise<void> {
-    await this.api.scripting.executeScript({
+  private async cancelPage(connection: { tabId: number; documentId: string }, commandKey: string): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const cancellation = this.api.scripting.executeScript({
       target: { tabId: connection.tabId, documentIds: [connection.documentId] }, world: 'MAIN',
-      func: (key: string) => {
-        const runtime = (globalThis as unknown as Record<string, { cancel?: () => void }>)[key]
-        runtime?.cancel?.()
-      }, args: [PAGE_RUNTIME_KEY],
+      func: (key: string, command: string) => {
+        const runtime = (globalThis as unknown as Record<string, { cancel?: (commandKey?: string) => void }>)[key]
+        runtime?.cancel?.(command)
+      }, args: [PAGE_RUNTIME_KEY, commandKey],
     }).catch(() => undefined)
+    try { await Promise.race([cancellation, new Promise<void>(resolve => { timer = setTimeout(resolve, 1000) })]) }
+    finally { if (timer !== undefined) clearTimeout(timer) }
   }
   private requireConfig(): Config {
     if (!this.state.config?.token) throw new Error('login_required')
@@ -392,6 +423,14 @@ export class BossRuntime {
   private async tick(payload: Record<string, unknown>, sender: chrome.runtime.MessageSender): Promise<unknown> {
     const config = this.state.config
     if (!config?.enabled || config.tabId !== sender.tab!.id) return { ok: false, phase: 'disabled_or_unselected_tab' }
+    if (payload.wakeGeneration !== undefined && payload.wakeGeneration !== `${this.schedulerEpoch}:${this.revision}`) return { ok: false, phase: 'stale_wake' }
+    const version = payload.lifecycleVersion === undefined ? 0 : payload.lifecycleVersion
+    if (typeof version !== 'number' || !Number.isSafeInteger(version) || version < 0) return { ok: false, phase: 'invalid_lifecycle' }
+    const documentKey = `${sender.tab!.id}:${sender.documentId}`
+    const lifecycle = this.pageLifecycle.get(documentKey)
+    if (lifecycle && (version < lifecycle.version || (lifecycle.frozen && version <= lifecycle.version))) return { ok: false, phase: 'page_frozen' }
+    this.pageLifecycle.set(documentKey, { version, frozen: false })
+    if (this.pageLifecycle.size > 20) this.pageLifecycle.delete(this.pageLifecycle.keys().next().value!)
     const now = this.now()
     const next = { tabId: sender.tab!.id!, documentId: sender.documentId!, visibility: payload.visibility === 'hidden' ? 'hidden' : 'visible', seenAt: now }
     this.connection = next
@@ -482,20 +521,39 @@ export class BossRuntime {
     }
   }
   private async page(session: Session, connection: PageConnection, method: 'run' | 'prepare', invocation: PageInvocation): Promise<PageExecution | ToolResult> {
-    await this.ensurePage(session, connection)
-    this.assertActive(session)
-    const results = await this.api.scripting.executeScript({
-      target: { tabId: connection.tabId, documentIds: [connection.documentId] }, world: 'MAIN',
-      func: async (key: string, mode: 'run' | 'prepare', call: PageInvocation) => {
-        const runtime = (globalThis as unknown as Record<string, { run: (value: PageInvocation) => Promise<PageExecution>; prepare: (value: PageInvocation) => Promise<ToolResult> }>)[key]
-        if (!runtime) throw new Error('page_runtime_unavailable')
-        return runtime[mode](call)
-      }, args: [PAGE_RUNTIME_KEY, method, invocation],
+    const call = { connection, key: invocation.commandKey, controller: new AbortController() }
+    this.activePageCall = call
+    const deadline = setTimeout(() => {
+      void this.cancelPage(connection, invocation.commandKey)
+      call.controller.abort()
+    }, PAGE_TIMEOUT_MS)
+    let removeAbort: (() => void) | undefined
+    const cancelled = new Promise<never>((_resolve, reject) => {
+      const abort = () => reject(new Error('session_changed'))
+      call.controller.signal.addEventListener('abort', abort, { once: true })
+      removeAbort = () => call.controller.signal.removeEventListener('abort', abort)
     })
-    // We preserve returned evidence even when a control interrupt raced with the final response.
-    const result = results[0]?.result
-    if (!result || typeof result !== 'object') throw new Error('page_result_missing')
-    return result
+    const execution = (async () => {
+      await this.ensurePage(session, connection)
+      this.assertActive(session)
+      const results = await this.api.scripting.executeScript({
+        target: { tabId: connection.tabId, documentIds: [connection.documentId] }, world: 'MAIN',
+        func: async (key: string, mode: 'run' | 'prepare', request: PageInvocation) => {
+          const runtime = (globalThis as unknown as Record<string, { run: (value: PageInvocation) => Promise<PageExecution>; prepare: (value: PageInvocation) => Promise<ToolResult> }>)[key]
+          if (!runtime) throw new Error('page_runtime_unavailable')
+          return runtime[mode](request)
+        }, args: [PAGE_RUNTIME_KEY, method, invocation],
+      })
+      const result = results[0]?.result
+      if (!result || typeof result !== 'object') throw new Error('page_result_missing')
+      return result
+    })()
+    try { return await Promise.race([execution, cancelled]) }
+    finally {
+      clearTimeout(deadline)
+      removeAbort?.()
+      if (this.activePageCall === call) this.activePageCall = null
+    }
   }
   private async execute(session: Session, _account: AccountState, receipt: Receipt, rawArgs: unknown, connection: PageConnection): Promise<void> {
     try {

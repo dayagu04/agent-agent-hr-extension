@@ -1,5 +1,7 @@
 // @vitest-environment node
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import { BossHeartbeatScheduler, RECOVERY_ALARM } from '../src/background-scheduler'
+import { BossContentHeartbeat } from '../src/runtime-content'
 import { BossRuntime, STORAGE_KEY } from '../src/runtime'
 import type { PageExecution, PageInvocation } from '../src/contracts'
 
@@ -7,7 +9,7 @@ const API = 'https://gudaya.chat'
 const ACCOUNT = `${API}|1`
 const TOKEN = 'old-account-auth-token-long-value'
 const popup = { id: 'extension-id', url: 'chrome-extension://extension-id/popup.html' } as chrome.runtime.MessageSender
-const page = { id: 'extension-id', frameId: 0, documentId: 'doc-1', url: 'https://www.zhipin.com/web/geek/chat', tab: { id: 12, url: 'https://www.zhipin.com/web/geek/chat' } } as chrome.runtime.MessageSender
+const page = { id: 'extension-id', frameId: 0, documentLifecycle: 'active', documentId: 'doc-1', url: 'https://www.zhipin.com/web/geek/chat', tab: { id: 12, url: 'https://www.zhipin.com/web/geek/chat' } } as chrome.runtime.MessageSender
 const command = (id = 8, name = 'send_message', args: Record<string, unknown> = { text: 'message' }) => ({ id, action: 'tool.call', payload: { name, args } })
 const heartbeat = (commands: unknown[]) => ({ command_epoch: 'db-outbox-v2', plugin_compatibility: { can_receive_commands: true }, commands })
 function deferred<T>() {
@@ -25,6 +27,7 @@ function harness(accounts: Record<string, unknown> = {}) {
   const calls: Array<{ path: string; body: Record<string, unknown>; token: string }> = []
   const pageCalls: PageInvocation[] = []
   const navigations: unknown[] = []
+  const cancellations: unknown[][] = []
   let onPage: (invocation: PageInvocation, method: string) => Promise<unknown> = async () => ({ result: { ok: true, data: { delivery: 'delivered' } } })
   let onRequest: (path: string, body: Record<string, unknown>) => Promise<unknown> = async path => path.endsWith('/heartbeat') ? heartbeat([]) : { stored: true }
   const chromeMock = {
@@ -38,7 +41,8 @@ function harness(accounts: Record<string, unknown> = {}) {
     tabs: { get: async (id: number) => ({ id, url: 'https://www.zhipin.com/web/geek/chat' }), update: async (...args: unknown[]) => { navigations.push(args) }, reload: async (...args: unknown[]) => { navigations.push(args) } },
     scripting: { executeScript: async (details: { files?: string[]; args?: unknown[]; target: { tabId: number; documentIds: string[] } }) => {
       expect(details.target).toEqual({ tabId: 12, documentIds: ['doc-1'] })
-      if (details.files || details.args?.length === 1) return []
+      if (details.files) return []
+      if ((details.args?.length ?? 0) <= 2) { cancellations.push(details.args || []); return [] }
       const invocation = details.args![2] as PageInvocation
       pageCalls.push(structuredClone(invocation))
       return [{ result: await onPage(invocation, String(details.args![1])) }]
@@ -52,9 +56,10 @@ function harness(accounts: Record<string, unknown> = {}) {
     return new Response(JSON.stringify(data), { status: 200, headers: { 'Content-Type': 'application/json' } })
   }) as typeof fetch
   return {
+    chrome: chromeMock,
     create: () => new BossRuntime({ chrome: chromeMock, fetch: fetchMock, now: () => time }),
     disk: () => disk[STORAGE_KEY] as { config: unknown; accounts: Record<string, { ack: number; receipts: Record<string, { state: string; result?: { error?: string }; uploaded: boolean }> }> },
-    accesses, calls, pageCalls, navigations,
+    accesses, calls, pageCalls, navigations, cancellations,
     advance: (milliseconds = 1000) => { time += milliseconds }, denyPermission: () => { permission = false },
     request: (handler: typeof onRequest) => { onRequest = handler }, page: (handler: typeof onPage) => { onPage = handler },
   }
@@ -119,6 +124,7 @@ describe('MV3 production message dispatcher persistence and trust', () => {
     await expect(runtime.handle({ type: 'boss.logout' }, page)).rejects.toThrow('untrusted_sender')
     await expect(runtime.handle({ type: 'boss.tick' }, { ...page, id: 'other-extension' })).rejects.toThrow('untrusted_sender')
     await expect(runtime.handle({ type: 'boss.tick' }, { ...page, frameId: 3 })).rejects.toThrow('untrusted_sender')
+    await expect(runtime.handle({ type: 'boss.tick' }, { ...page, documentLifecycle: 'cached' })).rejects.toThrow('untrusted_sender')
     await expect(runtime.handle({ type: 'boss.tick' }, { ...page, url: 'https://www.zhipin.com.attacker.test/' })).rejects.toThrow('untrusted_sender')
     expect(await runtime.handle({ type: 'boss.tick' }, { ...page, tab: { id: 13, url: page.url } } as chrome.runtime.MessageSender)).toMatchObject({ ok: false })
     for (const apiBase of ['http://[::1]:8010', 'https://[::1]', 'http://example.com', 'https://user:password@example.com', 'https://example.com/path', 'file:///etc/passwd', 'javascript:alert(1)']) {
@@ -183,4 +189,143 @@ describe('MV3 production message dispatcher persistence and trust', () => {
     expect(h.calls.filter(call => call.path.endsWith('/tools/result'))).toHaveLength(0)
     expect(h.disk().accounts[ACCOUNT].receipts['db-outbox-v2:8'].uploaded).toBe(false)
   })
+
+  it('drives actual hidden-page heartbeats through the production scheduler, stops on freeze/timeout, and fences a late session wake', async () => {
+    vi.useFakeTimers()
+    try {
+      const h = harness()
+      const runtime = h.create()
+      const wakes: Array<{ generation: string; options: unknown }> = []
+      const alarms: unknown[] = []
+      let held = false
+      const pendingWake = deferred<unknown>()
+      let content!: BossContentHeartbeat
+      const scheduler = new BossHeartbeatScheduler({
+        target: () => runtime.schedulerTarget(),
+        chrome: {
+          tabs: { ...h.chrome.tabs, sendMessage: async (_tab: number, request: { generation: string }, options: unknown) => {
+            wakes.push({ generation: request.generation, options })
+            return held ? pendingWake.promise : content.wake(request, { id: 'extension-id' })
+          } },
+          alarms: { get: async () => undefined, create: async (...args: unknown[]) => { alarms.push(args) }, clear: async () => true, onAlarm: { addListener: () => undefined } },
+        } as unknown as Pick<typeof chrome, 'tabs' | 'alarms'>,
+      })
+      content = new BossContentHeartbeat({
+        visibility: () => 'hidden',
+        runtime: { id: 'extension-id', sendMessage: async (message: { type: string; wakeGeneration?: string }) => {
+          const response = await runtime.handle(message, page)
+          await scheduler.refresh(message.type === 'boss.tick' ? { tabId: 12, documentId: 'doc-1', ...(message.wakeGeneration === undefined ? {} : { generation: message.wakeGeneration }) } : undefined)
+          return response
+        } } as unknown as Pick<typeof chrome.runtime, 'id' | 'sendMessage'>,
+      })
+      await scheduler.start()
+      await content.resume() // Native active-document proof; no test-side synthetic scheduler heartbeat.
+      const heartbeats = () => h.calls.filter(call => call.path.endsWith('/heartbeat'))
+      expect(heartbeats()).toHaveLength(1)
+      expect(alarms).toContainEqual([RECOVERY_ALARM, { delayInMinutes: 1, periodInMinutes: 1 }])
+      h.advance(2000)
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(heartbeats()).toHaveLength(2)
+      expect(heartbeats()[1].body.visibility).toBe('hidden')
+      expect(wakes[0].options).toEqual({ documentId: 'doc-1' })
+
+      await content.freeze()
+      h.advance(60_000)
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(heartbeats()).toHaveLength(2)
+      await scheduler.recover()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(heartbeats()).toHaveLength(2)
+      expect(wakes.at(-1)?.options).toEqual({ frameId: 0 })
+      expect((await runtime.schedulerTarget()).documentId).toBeNull()
+
+      await content.resume()
+      expect(heartbeats()).toHaveLength(3)
+      held = true
+      h.advance(2000)
+      await vi.advanceTimersByTimeAsync(2000)
+      const oldGeneration = wakes.at(-1)!.generation
+      const wakeCount = wakes.length
+      await vi.advanceTimersByTimeAsync(5000)
+      await scheduler.recover()
+      await scheduler.recover()
+      expect(wakes).toHaveLength(wakeCount) // A frozen sendMessage cannot accumulate one pending message per alarm.
+      expect(heartbeats()).toHaveLength(3)
+
+      await runtime.handle({ type: 'boss.disable' }, popup)
+      await scheduler.refresh()
+      pendingWake.resolve({ runnable: true, generation: oldGeneration })
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(wakes).toHaveLength(wakeCount)
+      await runtime.handle({ type: 'boss.enable', tabId: 12 }, popup)
+      await scheduler.refresh()
+      await content.wake({ type: 'boss.wake', generation: oldGeneration }, { id: 'extension-id' })
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(heartbeats()).toHaveLength(3)
+      expect(wakes).toHaveLength(wakeCount)
+
+      held = false
+      await content.resume()
+      h.advance(2000)
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(heartbeats()).toHaveLength(5)
+      expect(wakes.at(-1)?.generation).not.toBe(oldGeneration)
+
+      // MAIN may remain suspended after freeze. Its old Promise must not hold logout in the command queue.
+      const frozen = harness()
+      const mainStarted = deferred<void>()
+      const mainResult = deferred<unknown>()
+      frozen.request(async path => path.endsWith('/heartbeat') ? heartbeat([command()]) : { stored: true })
+      frozen.page(async () => { mainStarted.resolve(); return mainResult.promise })
+      const frozenRuntime = frozen.create()
+      const frozenContent = new BossContentHeartbeat({ visibility: () => 'hidden', runtime: {
+        id: 'extension-id', sendMessage: (message: unknown) => frozenRuntime.handle(message, page),
+      } as unknown as Pick<typeof chrome.runtime, 'id' | 'sendMessage'> })
+      const running = frozenContent.resume()
+      await mainStarted.promise
+      const beforeFreeze = await frozenRuntime.schedulerTarget()
+      await frozenContent.freeze()
+      await running // Resolves through the production interrupt race while mainResult is still pending.
+      expect((await frozenRuntime.schedulerTarget()).generation).not.toBe(beforeFreeze.generation)
+      expect(await frozenRuntime.handle({ type: 'boss.tick', lifecycleVersion: 0 }, page)).toMatchObject({ phase: 'page_frozen' })
+      await frozenRuntime.handle({ type: 'boss.logout' }, popup)
+      expect(frozen.disk().config).toBeNull()
+      expect(frozen.cancellations[0]?.[1]).toMatch(/^boss:[0-9a-f]{64}$/)
+      expect(frozen.disk().accounts[ACCOUNT].receipts['db-outbox-v2:8'].result?.error).toBe('reconciliation_required')
+      mainResult.resolve({ result: { ok: true, data: { delivery: 'delivered' } } })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(frozen.calls.filter(call => call.path.endsWith('/tools/result'))).toHaveLength(0)
+
+      // A late alarm create is serialized before disable.clear, and a failed create is retryable in the same state.
+      const alarmTarget = { enabled: true, tabId: 12, documentId: 'doc-1', generation: 'alarm-enable' }
+      const createStarted = deferred<void>()
+      const createFinished = deferred<void>()
+      const alarmOrder: string[] = []
+      const serialized = new BossHeartbeatScheduler({ target: async () => alarmTarget, chrome: {
+        tabs: { sendMessage: async () => ({ runnable: false }) },
+        alarms: {
+          get: async () => undefined,
+          create: async () => { alarmOrder.push('create'); createStarted.resolve(); await createFinished.promise; alarmOrder.push('created') },
+          clear: async () => { alarmOrder.push('clear'); return true }, onAlarm: { addListener: () => undefined },
+        },
+      } as unknown as Pick<typeof chrome, 'tabs' | 'alarms'> })
+      const starting = serialized.start()
+      await createStarted.promise
+      alarmTarget.enabled = false
+      alarmTarget.generation = 'alarm-disable'
+      const disabling = serialized.refresh()
+      createFinished.resolve()
+      await Promise.all([starting, disabling])
+      expect(alarmOrder).toEqual(['create', 'created', 'clear'])
+      let creates = 0
+      const retrying = new BossHeartbeatScheduler({ target: async () => ({ ...alarmTarget, enabled: true }), chrome: {
+        tabs: { sendMessage: async () => ({ runnable: false }) },
+        alarms: { get: async () => undefined, create: async () => { creates += 1; if (creates === 1) throw new Error('alarm-unavailable') }, clear: async () => true, onAlarm: { addListener: () => undefined } },
+      } as unknown as Pick<typeof chrome, 'tabs' | 'alarms'> })
+      await expect(retrying.refresh()).rejects.toThrow('alarm-unavailable')
+      await retrying.refresh()
+      expect(creates).toBe(2)
+    } finally { vi.useRealTimers() }
+  })
+
 })

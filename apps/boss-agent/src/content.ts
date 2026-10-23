@@ -1,17 +1,16 @@
-// The isolated-world content script has no API, credentials, or page action dispatcher.
-let pending = false
-async function tick(): Promise<void> {
-  if (pending) return
-  pending = true
-  try {
-    await chrome.runtime.sendMessage({ type: 'boss.tick', visibility: document.visibilityState })
-  } catch { /* Reloading or updating the extension invalidates this content-script context. */ }
-  finally { pending = false }
-}
-setInterval(() => { void tick() }, 1000)
-document.addEventListener('visibilitychange', () => { void tick() })
-document.addEventListener('resume', () => { void tick() })
-window.addEventListener('pageshow', () => { void tick() })
-window.addEventListener('focus', () => { void tick() })
-void tick()
-export {}
+import { BossContentHeartbeat } from './runtime-content'
+
+const heartbeat = new BossContentHeartbeat({ runtime: chrome.runtime, visibility: () => document.visibilityState })
+chrome.runtime.onMessage.addListener((message: unknown, sender, reply) => {
+  if (!message || typeof message !== 'object' || (message as { type?: unknown }).type !== 'boss.wake') return false
+  void heartbeat.wake(message, sender).then(reply, () => reply({ runnable: false }))
+  return true
+})
+// Native ticks restore the connection after navigation. Hidden-page cadence is provided by real background wake messages.
+setInterval(() => { void heartbeat.tick() }, 10_000)
+document.addEventListener('visibilitychange', () => { void heartbeat.tick() })
+document.addEventListener('freeze', () => { void heartbeat.freeze() })
+document.addEventListener('resume', () => { void heartbeat.resume() })
+window.addEventListener('pageshow', () => { void heartbeat.resume() })
+window.addEventListener('focus', () => { void heartbeat.tick() })
+void heartbeat.tick()

@@ -4,7 +4,7 @@
   "version": "0.7.0",
   "description": "把 BOSS 直聘页面的岗位、投递和会话能力提供给求职 Agent。",
   "minimum_chrome_version": "114",
-  "permissions": ["storage", "scripting"],
+  "permissions": ["storage", "scripting", "alarms"],
   "host_permissions": ["https://www.zhipin.com/*", "https://gudaya.chat/*"],
   "optional_host_permissions": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"],
   "background": { "service_worker": "background.js", "type": "module" },
