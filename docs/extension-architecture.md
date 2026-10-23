@@ -27,13 +27,15 @@ MAIN 模块复用 BOSS 真实页面函数以读取未混淆薪资、虚拟会话
 ## 生命周期与副作用
 
 - 一个选定 BOSS 标签页/文档执行命令，其他标签页只能报告连接状态；停用、退出和切账号会撤销旧执行 lease。
-- 页面内容脚本只发送生命周期/tick，后台按需执行短请求；不假定 MV3 service worker 永久存活。
+- 页面内容脚本只发送生命周期/tick。后台在已验证的执行文档上以约2秒间隔请求一次真实心跳，完成后才安排下一次，不制造空消息保活；内容脚本10秒原生tick兜底，1分钟alarm在worker恢复时重新核对执行页。页面超时/冻结停止短循环，不把定时器目标当作实际响应保证。实现遵循 [Chrome service worker 生命周期](https://developer.chrome.com/docs/extensions/develop/concepts/service-workers/lifecycle)。
 - 执行前持久化 started 收据，执行后先保存结果及效果 outbox。服务端结果回传、投递记账与页面动作分开；网络失败重传回报，不重复点击。
 - worker 重启遇到 started 收据时返回 reconciliation_required。页面操作与落盘之间无法构成原子事务，不承诺 exactly-once；投递/消息/删除等未知终态必须只读核查。
 - 导航/刷新是持久化结果之后的效果；跨页会话目标由后台保存，新文档恢复打开目标会话。
 - 页面冻结时不能执行 DOM；页面恢复后重新确认文档和命令状态，不把轮询超时当作平台失败。
 
 现有后端队列按 user 隔离，尚不提供旧油猴与新 BOSS 扩展的自动 owner 交接。启用新客户端前必须停旧客户端并刷新旧页面；两个独立产品并存是 BOSS 扩展与网申扩展，不是两个 BOSS 执行端双跑。
+
+迁移前先让旧客户端停止原编排任务并确认停止命令的 ACK。遗留 `orchestrator.*` 命令不会被新扩展执行或越过 ACK；`unsupported_command` 需要回到旧客户端完成停止交接，不能用手工删待确认行或伪造 ACK 解除。
 
 ## Function call 和后端兼容
 

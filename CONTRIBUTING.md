@@ -32,7 +32,7 @@ npm run dev:serve      # 后台常驻：源码改动自动重建，并给已安�
 4. 页面结构不确定时先用 `probe_dom` / `probe_overlays` / `probe_row` 读真实结构，再改选择器，不要猜。
 
 dev-serve 没开时，已安装的本地构建 1.5 秒内自动退回自身版本，照常可用。
-生产构建（`npm run build`）不含这段自动更新逻辑。本地调试时关闭该脚本在 Tampermonkey 里的远程自动更新，
+油猴生产构建（`npm run build:userscript`）不含这段自动更新逻辑。本地调试时关闭该脚本在 Tampermonkey 里的远程自动更新，
 避免 Release 版本覆盖本地构建。
 
 ## 提交
@@ -59,7 +59,7 @@ BOSS MV3 使用 `boss-vX.Y.Z`，网申使用 `autofill-vX.Y.Z`；CI 分别验证
 git tag v0.6.56 && git push origin v0.6.56
 ```
 
-- 生产构建用 `npm run build`（默认后端 `gudaya.chat`）；`build:local` 产物只装在开发浏览器里。
+- 油猴生产构建用 `npm run build:userscript`（默认后端 `gudaya.chat`）；`build:local` 产物只装在开发浏览器里。
 - 用户的 Tampermonkey 按 `@updateURL` + `@version` 自动更新，发布前确认 Release 里有 `.user.js`。
 - 插件与后端协议有兼容变化时，在主仓 roadmap（`docs/tampermonkey-plugin-roadmap.md`）记录插件版本窗口。
 
