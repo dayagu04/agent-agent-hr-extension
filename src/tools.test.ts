@@ -36,6 +36,7 @@ import { TOOL_CATALOG, validateToolArgs } from '../apps/boss-agent/src/tools-con
 import { clickDirect } from './dom-events'
 import { installToolExecutionGuard } from './tool-execution-guard'
 import { PAGE_RUNTIME_KEY } from '../apps/boss-agent/src/contracts'
+import type { InstalledPageTools } from '../apps/boss-agent/src/page'
 
 describe('agent tools', () => {
   it('publishes a catalog that marks irreversible actions', () => {
@@ -226,7 +227,7 @@ describe('MV3 page boundary', () => {
     vi.mocked(BossPlatform).mockImplementation(function () { return { code: 'zhipin', applyJob, scanJobs } as never })
     try {
       await import('../apps/boss-agent/src/page')
-      const page = (globalThis as unknown as Record<typeof PAGE_RUNTIME_KEY, ReturnType<typeof createPageTools>>)[PAGE_RUNTIME_KEY]
+      const page = (globalThis as unknown as Record<typeof PAGE_RUNTIME_KEY, InstalledPageTools>)[PAGE_RUNTIME_KEY]
       const invocation = { commandKey: 'boss:123', name: 'apply_job', args: { jobId: 'j1' }, context: { greeting: '你好' } }
       expect(await page.prepare(invocation)).toMatchObject({ ok: true, data: { job: { platformJobId: 'j1', salary: '10-20K', city: '上海' } } })
       const result = await page.run(invocation)
@@ -246,8 +247,12 @@ describe('MV3 page boundary', () => {
       expect(await page.run({ commandKey: 'delete', name: 'delete_thread', args: { company: 'A' } })).toMatchObject({
         effects: [{ kind: 'conversation_deleted', payload: { company: 'A', job_title: '开发', encrypt_job_id: 'actual-job-id' } }],
       })
+      const epoch = page.lifecycleEpoch()
       vi.mocked(sendMessageText).mockImplementationOnce(async () => { document.dispatchEvent(new Event('freeze')); return true })
       expect(await page.run({ commandKey: 'cancelled', name: 'send_message', args: { text: '你好' } })).toEqual({ result: { ok: false, error: 'reconciliation_required' } })
+      expect(page.lifecycleEpoch()).toBe(epoch + 1)
+      document.dispatchEvent(new Event('freeze')) // A queued run must also be fenced when no lease has started yet.
+      expect(page.lifecycleEpoch()).toBe(epoch + 2)
     } finally { vi.unstubAllGlobals() }
   })
 })
