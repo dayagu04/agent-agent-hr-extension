@@ -1,6 +1,6 @@
-# AGENTS.md — 工具层规范（唯一来源）
+# AGENTS.md — 双扩展边界与 BOSS 工具规范
 
-本仓库的目的是**把 BOSS 直聘页面能力封装成标准工具供上游 agent 调用**（产品形态见 [README](./README.md)）。
+本仓库管理两个独立扩展：`apps/boss-agent/` 把 BOSS 页面能力封装成标准工具供上游 Agent 调用，`apps/application-autofill/` 保留独立网申填写产品（详见 [README](./README.md)）。两个扩展分别维护 manifest、权限、登录、存储、版本、安装包和发布，不共享运行态。网申专属规则见其目录 AGENTS.md；原 `src/` userscript 保留兼容。
 本文件定义：工具是什么、怎么调、怎么新增、返回值怎么判、BOSS 页面的真实标记。
 新增任何面向 agent 的页面能力都按这里做，不另起一套。分支与发布见 [CONTRIBUTING.md](./CONTRIBUTING.md)。
 
@@ -9,6 +9,7 @@
 插件在 BOSS 页面里保持启用即可，开发者和 agent 都**不需要**在页面上点任何东西。
 
 ```bash
+npm run tool -- functions                               # 在线扩展的 function-call 参数定义（配套后端）
 npm run tool -- list                                    # 插件当前上报的工具清单
 npm run tool -- read_thread_header '{"company":"某公司"}'
 ```
@@ -47,7 +48,7 @@ agent（服务端决策）
 
 ## 2. 工具定义（唯一模板）
 
-在 `src/tools.ts` 的 `TOOLS` 数组里新增一项，字段固定如下：
+页面执行定义统一维护在 `src/tool-definitions.ts`，原 `src/tools.ts` 与 MV3 的 page-tools 通过不同运行环境适配。function-call 参数目录在 `apps/boss-agent/src/tools-contract.ts`。新增工具同步执行定义、参数 schema 与本文件，不维护两份分叉实现。字段示例：
 
 ```ts
 {
@@ -96,7 +97,7 @@ tool name=delete_thread status=error ms=120 error=not-found
 ## 5. 新增工具的做法（照抄即可）
 
 1. 页面动作写到 `src/platforms/<平台>.ts` 或专题模块（如 `search-filters.ts`），导出纯函数；
-2. 在 `src/tools.ts` 的 `TOOLS` 加一项，按第 2 节模板填全字段；
+2. 在共享工具工厂及 MV3 参数目录加一项，按第 2 节模板填全字段；
 3. 在 `src/tools.test.ts` 补两条：目录里出现、关键失败分支返回正确原因码；
 4. `npm run typecheck && npm test`；`npm run dev:serve` 自动重建，`npm run tool -- reload_page` 让页面换上新版本；
 5. `npm run tool -- <新工具> '<args>'` 在真实页面跑通，再在 §7/§8 补上验证记录，才算完成。
