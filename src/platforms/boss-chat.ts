@@ -420,6 +420,7 @@ async function deleteThreadImpl(
   company: string,
   jobTitle = '',
   identity?: { bossId?: string; encryptJobId?: string },
+  onTarget?: (target: DeletedThreadTarget) => void,
 ): Promise<'ok' | 'not-found' | 'failed'> {
   const norm = (s: string) => s.replace(/\s+/g, '').toLowerCase()
   const target = norm(company)
@@ -431,6 +432,16 @@ async function deleteThreadImpl(
   if (!hit) {
     diag('CHAT', 'deleteThread 未找到会话（含滚动查找）')
     return 'not-found'
+  }
+  if (onTarget) {
+    // Capture the actual row before BOSS removes it; the background can then reconcile the exact job.
+    const info = readRowJobInfo(hit.el)
+    onTarget({
+      company: info.brandName || company || hit.company,
+      jobTitle: info.title || hit.jobTitle || jobTitle,
+      bossId: identity?.bossId || hit.bossId || '',
+      encryptJobId: identity?.encryptJobId || info.jobId || '',
+    })
   }
 
   // 删除结果校验按「身份是否还在列表里」判断：虚拟列表节点数恒定，
@@ -646,15 +657,23 @@ async function locateRowByIndex(index: number): Promise<ChatThread | null> {
  * @param identity bossId（DOM 原生标识）/ encryptJobId（后端 Job.platform_job_id），
  *                 用于精确删除定位与后端对账，避免同公司多会话误删/误标。
  */
+export interface DeletedThreadTarget {
+  company: string
+  jobTitle: string
+  bossId?: string
+  encryptJobId?: string
+}
+
 export async function deleteThread(
   company: string,
   jobTitle = '',
   identity?: { bossId?: string; encryptJobId?: string },
-  afterDeleted?: () => Promise<void>,
+  afterDeleted?: (target: DeletedThreadTarget) => Promise<void>,
 ): Promise<'ok' | 'not-found' | 'failed'> {
-  const r = await deleteThreadImpl(company, jobTitle, identity)
+  let target: DeletedThreadTarget = { company, jobTitle, ...identity }
+  const r = await deleteThreadImpl(company, jobTitle, identity, afterDeleted ? (actual) => { target = actual } : undefined)
   if (r === 'ok') {
-    if (afterDeleted) await afterDeleted()
+    if (afterDeleted) await afterDeleted(target)
     else await afterConversationDeleted(company, jobTitle, 'manual', identity)
   }
   return r

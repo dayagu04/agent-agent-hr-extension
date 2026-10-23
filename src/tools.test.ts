@@ -223,6 +223,14 @@ describe('MV3 page boundary', () => {
       expect(navigation.effects).toEqual([{ kind: 'navigate', url: 'https://www.zhipin.com/web/geek/jobs?query=%E5%AE%A2%E6%9C%8D&page=2' }])
       expect(location.assign).not.toHaveBeenCalled()
       expect(location.reload).not.toHaveBeenCalled()
+      const { deleteThread } = await import('./platforms/boss-chat')
+      vi.mocked(deleteThread).mockImplementationOnce(async (_company, _jobTitle, _identity, afterDeleted) => {
+        await afterDeleted?.({ company: 'A', jobTitle: '开发', encryptJobId: 'actual-job-id', bossId: 'actual-boss-id' })
+        return 'ok'
+      })
+      expect(await page.run({ commandKey: 'delete', name: 'delete_thread', args: { company: 'A' } })).toMatchObject({
+        effects: [{ kind: 'conversation_deleted', payload: { company: 'A', job_title: '开发', encrypt_job_id: 'actual-job-id' } }],
+      })
       vi.mocked(sendMessageText).mockImplementationOnce(async () => { page.cancel('cancelled'); return true })
       expect(await page.run({ commandKey: 'cancelled', name: 'send_message', args: { text: '你好' } })).toEqual({ result: { ok: false, error: 'reconciliation_required' } })
     } finally { vi.unstubAllGlobals() }
