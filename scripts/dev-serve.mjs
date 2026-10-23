@@ -29,12 +29,36 @@ const env = {
   VITE_DEV_UPDATE_URL: updateUrl,
 }
 
-// vite build --watch：每次源码改动后重新产出 dist/*.user.js
-const child = spawn(process.execPath, [viteCli, 'build', '--watch'], { cwd: root, env, stdio: 'inherit' })
-child.on('exit', (code) => {
-  console.error(`[dev-serve] vite 退出（code=${code}）`)
-  process.exit(code ?? 1)
-})
+// vite build --watch：每次源码改动后重新产出 dist/*.user.js。
+// 但 watch 不会重新读 vite.config.ts —— 脚本头 @version 来自那里读的 package.json，
+// 改版本号后头部不变（实测 0.6.62 时头部仍是 0.6.61）。所以这两个文件变动时重启构建。
+let child = null
+let restarting = false
+function startVite() {
+  child = spawn(process.execPath, [viteCli, 'build', '--watch'], { cwd: root, env, stdio: 'inherit' })
+  child.on('exit', (code) => {
+    if (restarting) return
+    console.error(`[dev-serve] vite 退出（code=${code}）`)
+    process.exit(code ?? 1)
+  })
+}
+startVite()
+
+let restartTimer = null
+for (const f of ['package.json', 'vite.config.ts']) {
+  fs.watch(path.join(root, f), () => {
+    clearTimeout(restartTimer)
+    restartTimer = setTimeout(() => {
+      console.log(`[dev-serve] ${f} 变化，重启构建`)
+      restarting = true
+      child?.once('exit', () => {
+        restarting = false
+        startVite()
+      })
+      child?.kill()
+    }, 300)
+  })
+}
 
 function versionOf(text) {
   return /@version\s+(\S+)/.exec(text)?.[1] || ''
