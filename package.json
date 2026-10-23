@@ -1,17 +1,29 @@
 {
-  "name": "agent-agent-hr-tampermonkey",
+  "name": "agent-agent-hr-extension",
   "version": "0.6.64",
-  "description": "社招四平台自动投递油猴插件（BOSS/智联/猎聘/51前程无忧）",
+  "description": "BOSS agent 工具扩展与网申填写扩展的独立源码仓库",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "node scripts/build-extensions.mjs",
     "build:local": "node scripts/build-local.mjs",
     "preview": "vite preview",
-    "typecheck": "vue-tsc --noEmit --project tsconfig.check.json",
+    "typecheck": "npm run typecheck:userscript && npm run typecheck:boss && npm run typecheck:autofill",
     "test": "vitest run",
     "tool": "node scripts/tool.mjs",
-    "dev:serve": "node scripts/dev-serve.mjs"
+    "dev:serve": "node scripts/dev-serve.mjs",
+    "build:boss": "node scripts/build-extensions.mjs boss-agent",
+    "build:autofill": "node scripts/build-extensions.mjs application-autofill",
+    "build:userscript": "vite build",
+    "typecheck:userscript": "vue-tsc --noEmit --project tsconfig.check.json",
+    "typecheck:boss": "tsc --noEmit --project apps/boss-agent/tsconfig.json",
+    "typecheck:autofill": "npm --prefix apps/application-autofill run typecheck",
+    "test:userscript": "vitest run",
+    "test:autofill": "npm --prefix apps/application-autofill test",
+    "check:artifacts": "node scripts/check-extension-artifacts.mjs",
+    "package": "node scripts/package-extensions.mjs",
+    "package:boss": "node scripts/package-extensions.mjs boss-agent",
+    "package:autofill": "node scripts/package-extensions.mjs application-autofill"
   },
   "dependencies": {
     "vue": "^3.4.21"
@@ -23,6 +35,10 @@
     "vite": "^5.2.0",
     "vite-plugin-monkey": "^4.0.0",
     "vitest": "^4.1.10",
-    "vue-tsc": "^2.0.0"
+    "vue-tsc": "^2.0.0",
+    "@types/chrome": "^0.1.33"
+  },
+  "engines": {
+    "node": ">=22.15.0"
   }
 }
