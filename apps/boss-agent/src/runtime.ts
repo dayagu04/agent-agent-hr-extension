@@ -1,5 +1,5 @@
 import { PAGE_RUNTIME_KEY, type PageEffect, type PageExecution, type PageInvocation, type ToolResult } from './contracts'
-import { TOOL_CATALOG } from './tools-contract'
+import { TOOL_CATALOG, validateToolArgs } from './tools-contract'
 
 export const STORAGE_KEY = 'boss-agent.runtime.v1'
 export const DEFAULT_API_BASE = 'https://gudaya.chat'
@@ -8,6 +8,7 @@ const BOSS_ORIGIN = 'https://www.zhipin.com'
 const MAX_PENDING = 20
 const MAX_RESULT_BYTES = 200_000
 const MAX_STATE_BYTES = 7_000_000
+const DIAGNOSTIC_TOOLS = new Set(['get_page_state', 'scan_jobs', 'read_job_detail', 'read_filters', 'list_threads', 'read_messages', 'list_pending_cards', 'read_thread_header', 'probe_overlays', 'probe_dom', 'probe_row', 'list_tools'])
 
 interface Config {
   apiBase: string
@@ -37,6 +38,7 @@ interface AccountState {
   receipts: Record<string, Receipt>
   pendingThread?: { company: string; jobTitle: string; fromDocumentId: string }
   navigation?: { tabId: number; fromDocumentId: string; startedAt: number }
+  diagnosticOnly?: boolean
 }
 interface State { config: Config | null; accounts: Record<string, AccountState> }
 export interface RuntimeDependencies {
@@ -59,8 +61,8 @@ export function normalizeApiBase(value: unknown): string {
   if (typeof value !== 'string') throw new Error('invalid_api_origin')
   let url: URL
   try { url = new URL(value.trim()) } catch { throw new Error('invalid_api_origin') }
-  const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)
-  if (url.username || url.password || url.search || url.hash || (url.pathname !== '/' && url.pathname !== '') ||
+  const loopback = ['localhost', '127.0.0.1'].includes(url.hostname)
+  if (url.hostname === '[::1]' || url.username || url.password || url.search || url.hash || (url.pathname !== '/' && url.pathname !== '') ||
       (url.protocol !== 'https:' && !(url.protocol === 'http:' && loopback))) throw new Error('invalid_api_origin')
   return url.origin
 }
@@ -78,6 +80,75 @@ function bossUrl(value: unknown): boolean {
 }
 function accountKey(config: Config): string { return `${config.apiBase}|${config.userId}` }
 function receiptKey(epoch: string, commandId: number): string { return `${epoch}:${commandId}` }
+
+function strictObject(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) throw new Error('invalid_page_effect')
+  return value as Record<string, unknown>
+}
+function keysOnly(value: Record<string, unknown>, allowed: string[]): void {
+  if (Object.keys(value).some(key => !allowed.includes(key))) throw new Error('invalid_page_effect')
+}
+function field(value: unknown, maxLength: number, required = false): string {
+  if (value === undefined && !required) return ''
+  if (typeof value !== 'string' || value.length > maxLength || (required && !value.trim())) throw new Error('invalid_page_effect')
+  return value
+}
+/** MAIN-world output is untrusted. Only the requested tool can emit its own narrowly typed effect. */
+function pageEffects(tool: string, raw: unknown, resumeId: number | null, persisted = false): PageEffect[] {
+  if (raw === undefined) return []
+  if (!Array.isArray(raw) || raw.length > 1) throw new Error('invalid_page_effect')
+  return raw.map(value => {
+    const effect = strictObject(value)
+    if (tool === 'apply_job' && effect.kind === 'application') {
+      keysOnly(effect, ['kind', 'payload'])
+      const payload = strictObject(effect.payload)
+      keysOnly(payload, ['platform', 'platform_job_id', 'title', 'company', 'city', 'url', 'salary', 'match_score', 'outcome', 'error', 'greeting_sent', 'run_id', 'keyword', ...(persisted ? ['resume_id'] : [])])
+      if (payload.platform !== 'zhipin' || typeof payload.outcome !== 'string' || !['applied', 'unknown', 'failed'].includes(payload.outcome) ||
+          (payload.greeting_sent !== undefined && typeof payload.greeting_sent !== 'boolean') ||
+          (payload.match_score !== undefined && (typeof payload.match_score !== 'number' || !Number.isFinite(payload.match_score) || payload.match_score < 0 || payload.match_score > 100)) ||
+          (payload.run_id !== undefined && payload.run_id !== null)) throw new Error('invalid_page_effect')
+      const id = persisted ? number(payload.resume_id) : number(resumeId)
+      if (!id) throw new Error('invalid_page_effect')
+      const url = field(payload.url, 2048)
+      if (url && !bossUrl(url)) throw new Error('invalid_page_effect')
+      return { kind: 'application', payload: {
+        platform: 'zhipin', platform_job_id: field(payload.platform_job_id, 512, true), title: field(payload.title, 255, true),
+        company: field(payload.company, 255), city: field(payload.city, 255), url, salary: field(payload.salary, 128),
+        match_score: payload.match_score ?? 0, outcome: payload.outcome, error: field(payload.error, 1000),
+        greeting_sent: payload.greeting_sent ?? false, run_id: null, keyword: field(payload.keyword, 512), resume_id: id,
+      } }
+    }
+    if (tool === 'delete_thread' && effect.kind === 'conversation_deleted') {
+      keysOnly(effect, ['kind', 'payload'])
+      const payload = strictObject(effect.payload)
+      keysOnly(payload, ['platform', 'company', 'job_title', 'reason', 'encrypt_job_id'])
+      if (payload.platform !== 'zhipin') throw new Error('invalid_page_effect')
+      return { kind: 'conversation_deleted', payload: {
+        platform: 'zhipin', company: field(payload.company, 255, true), job_title: field(payload.job_title, 255),
+        reason: field(payload.reason, 64) || 'manual', encrypt_job_id: field(payload.encrypt_job_id, 512),
+      } }
+    }
+    if ((tool === 'open_search' || tool === 'open_thread') && effect.kind === 'navigate') {
+      keysOnly(effect, ['kind', 'url', ...(tool === 'open_thread' ? ['pendingThread'] : [])])
+      const url = field(effect.url, 4096, true)
+      if (!bossUrl(url)) throw new Error('invalid_page_effect')
+      const parsed = new URL(url)
+      if (parsed.hash || parsed.pathname !== (tool === 'open_search' ? '/web/geek/jobs' : '/web/geek/chat') || (tool === 'open_thread' && parsed.search)) throw new Error('invalid_page_effect')
+      if (tool === 'open_thread') {
+        const thread = strictObject(effect.pendingThread)
+        keysOnly(thread, ['company', 'jobTitle'])
+        return { kind: 'navigate', url, pendingThread: { company: field(thread.company, 255, true), jobTitle: field(thread.jobTitle, 255) } }
+      }
+      return { kind: 'navigate', url }
+    }
+    if (tool === 'reload_page' && effect.kind === 'reload') {
+      keysOnly(effect, ['kind'])
+      return { kind: 'reload' }
+    }
+    throw new Error('invalid_page_effect')
+  })
+}
+
 
 /** Production message dispatcher. All state writes and remote commands share one queue. */
 export class BossRuntime {
@@ -292,6 +363,8 @@ export class BossRuntime {
     const tab = await this.api.tabs.get(id)
     if (!bossUrl(tab.url)) throw new Error('boss_tab_required')
     config.enabled = true
+    const account = this.state.accounts[accountKey(config)]
+    if (account) account.diagnosticOnly = false
     config.tabId = id
     this.connection = null
     this.pageReady = ''
@@ -328,10 +401,15 @@ export class BossRuntime {
     const account = this.account(session)
     try {
       if (account.navigation) {
-        if (account.navigation.tabId === next.tabId && account.navigation.fromDocumentId === next.documentId) {
+        const sameDocument = account.navigation.tabId === next.tabId && account.navigation.fromDocumentId === next.documentId
+        if (sameDocument && now - account.navigation.startedAt <= 30_000) {
           this.phase = 'awaiting_navigation'
-          if (now - account.navigation.startedAt > 30_000) this.lastError = 'navigation_not_confirmed'
           return { ok: false, phase: this.phase }
+        }
+        if (sameDocument) {
+          this.lastError = 'navigation_not_confirmed'
+          account.diagnosticOnly = true
+          account.pendingThread = undefined
         }
         account.navigation = undefined
         await this.save()
@@ -343,7 +421,7 @@ export class BossRuntime {
       const heartbeat = await this.request(session.config, '/api/plugin/heartbeat', {
         platform: 'zhipin', version: this.api.runtime.getManifest().version,
         protocol_version: 2, capabilities: ['command_ack_v2', 'tools_v1'], tools: TOOL_CATALOG,
-        phase: 'tool_ready', running: false, visibility: next.visibility,
+        phase: account.diagnosticOnly ? 'diagnostic_only' : 'tool_ready', running: false, visibility: next.visibility,
         ack_command_id: account.ack, ack_command_epoch: account.epoch || null,
         last_error: this.lastError || null,
       }, session)
@@ -355,7 +433,7 @@ export class BossRuntime {
       const epoch = heartbeat.command_epoch
       if (account.epoch !== epoch) { account.epoch = epoch; account.ack = 0; await this.save() }
       if (!Array.isArray(heartbeat.commands)) { this.phase = 'invalid_commands'; return { ok: false, phase: this.phase } }
-      this.phase = 'tool_ready'
+      this.phase = account.diagnosticOnly ? 'diagnostic_only' : 'tool_ready'
       for (const raw of heartbeat.commands) {
         this.assertActive(session)
         const command = object(raw) as unknown as RemoteCommand
@@ -366,6 +444,7 @@ export class BossRuntime {
         const tool = String(object(command.payload).name || '')
         const declaration = TOOL_CATALOG.find(item => item.name === tool)
         if (!declaration) { this.lastError = 'unknown_tool'; break }
+        if (account.diagnosticOnly && !DIAGNOSTIC_TOOLS.has(tool)) { this.phase = 'diagnostic_only'; this.lastError = 'navigation_reenable_required'; break }
         const key = receiptKey(epoch, command.id)
         let receipt = account.receipts[key]
         if (!receipt) {
@@ -375,7 +454,8 @@ export class BossRuntime {
           receipt = { commandId: command.id, epoch, tool, state: 'started', irreversible: declaration.irreversible, uploaded: false, effects: [], document: { tabId: next.tabId, documentId: next.documentId } }
           account.receipts[key] = receipt
           await this.save() // The started receipt always reaches disk before any page action.
-          await this.execute(session, account, receipt, object(object(command.payload).args), next)
+          await this.execute(session, account, receipt, object(command.payload).args, next)
+          this.phase = account.diagnosticOnly ? 'diagnostic_only' : 'tool_ready'
         }
         if (receipt.state !== 'done') { receipt.state = 'done'; receipt.result = this.reconciliation(tool); await this.save() }
         account.ack = command.id
@@ -417,8 +497,11 @@ export class BossRuntime {
     if (!result || typeof result !== 'object') throw new Error('page_result_missing')
     return result
   }
-  private async execute(session: Session, _account: AccountState, receipt: Receipt, args: Record<string, unknown>, connection: PageConnection): Promise<void> {
+  private async execute(session: Session, _account: AccountState, receipt: Receipt, rawArgs: unknown, connection: PageConnection): Promise<void> {
     try {
+      const validation = validateToolArgs(receipt.tool, rawArgs)
+      if (!validation.ok) { receipt.result = validation; receipt.state = 'done'; await this.save(); return }
+      const args = rawArgs as Record<string, unknown>
       this.phase = 'executing'
       const invocation: PageInvocation = { commandKey: await pageCommandKey(`${session.accountKey}|${receiptKey(receipt.epoch, receipt.commandId)}`), name: receipt.tool, args, context: { defaultResumeName: session.config.defaultResumeName } }
       if (receipt.tool === 'apply_job') {
@@ -442,12 +525,14 @@ export class BossRuntime {
       if (new TextEncoder().encode(JSON.stringify(receipt.result)).length > MAX_RESULT_BYTES) {
         receipt.result = { ok: receipt.result.ok, error: receipt.result.error, data: { truncated: true, reason: 'result_exceeds_extension_budget', retrySafe: !receipt.irreversible } }
       }
-      receipt.effects = (execution.effects || []).map(effect => ({ effect: effect.kind === 'application' ? { ...effect, payload: { ...effect.payload, resume_id: session.config.resumeId } } : effect, done: false }))
+      receipt.effects = pageEffects(receipt.tool, execution.effects, session.config.resumeId).map(effect => ({ effect, done: false }))
       receipt.state = 'done'
       await this.save()
-    } catch {
+    } catch (error) {
       receipt.state = 'done'
+      receipt.effects = []
       receipt.result = this.reconciliation(receipt.tool)
+      if (error instanceof Error && error.message === 'invalid_page_effect') receipt.result.data = { ...object(receipt.result.data), reason: 'invalid_page_effect' }
       await this.save()
     }
   }
@@ -456,6 +541,16 @@ export class BossRuntime {
     for (const receipt of Object.values(account.receipts)) {
       if (receipt.state !== 'done') continue
       this.assertActive(session)
+      try {
+        const effects = pageEffects(receipt.tool, receipt.effects.map(item => item.effect), null, true)
+        receipt.effects = effects.map((effect, index) => ({ ...receipt.effects[index], effect }))
+      } catch {
+        receipt.effects = []
+        receipt.result = this.reconciliation(receipt.tool)
+        receipt.result.data = { ...object(receipt.result.data), reason: 'invalid_page_effect' }
+        receipt.uploaded = false
+        await this.save()
+      }
       for (const effect of receipt.effects) {
         if (effect.done) continue
         this.assertActive(session)
