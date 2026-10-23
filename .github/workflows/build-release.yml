@@ -2,7 +2,7 @@ name: Extension checks and releases
 
 on:
   push:
-    branches: [main, 'codex/**']
+    branches: [main]
     tags: ['boss-v*', 'autofill-v*', 'v*']
   pull_request:
     branches: [main]
