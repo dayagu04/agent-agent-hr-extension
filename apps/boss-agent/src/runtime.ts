@@ -526,6 +526,7 @@ export class BossRuntime {
   private async page(session: Session, connection: PageConnection, method: 'run' | 'prepare', invocation: PageInvocation): Promise<PageExecution | ToolResult> {
     const call = { connection, key: invocation.commandKey, controller: new AbortController() }
     this.activePageCall = call
+    const expiresAt = Date.now() + PAGE_TIMEOUT_MS
     const deadline = setTimeout(() => {
       void this.cancelPage(connection, invocation.commandKey)
       call.controller.abort()
@@ -543,13 +544,25 @@ export class BossRuntime {
     const execution = (async () => {
       await this.ensurePage(session, connection, assertCall)
       assertCall()
+      const epochs = await this.api.scripting.executeScript({
+        target: { tabId: connection.tabId, documentIds: [connection.documentId] }, world: 'MAIN',
+        func: (key: string) => {
+          const runtime = (globalThis as unknown as Record<string, { lifecycleEpoch?: () => number }>)[key]
+          if (typeof runtime?.lifecycleEpoch !== 'function') throw new Error('page_runtime_unavailable')
+          return runtime.lifecycleEpoch()
+        }, args: [PAGE_RUNTIME_KEY],
+      })
+      assertCall()
+      const expectedEpoch = epochs[0]?.result
+      if (typeof expectedEpoch !== 'number' || !Number.isSafeInteger(expectedEpoch) || expectedEpoch < 0) throw new Error('page_lifecycle_changed')
       const results = await this.api.scripting.executeScript({
         target: { tabId: connection.tabId, documentIds: [connection.documentId] }, world: 'MAIN',
-        func: async (key: string, mode: 'run' | 'prepare', request: PageInvocation) => {
-          const runtime = (globalThis as unknown as Record<string, { run: (value: PageInvocation) => Promise<PageExecution>; prepare: (value: PageInvocation) => Promise<ToolResult> }>)[key]
+        func: async (key: string, mode: 'run' | 'prepare', request: PageInvocation, expected: number, expires: number) => {
+          const runtime = (globalThis as unknown as Record<string, { lifecycleEpoch?: () => number; run: (value: PageInvocation) => Promise<PageExecution>; prepare: (value: PageInvocation) => Promise<ToolResult> }>)[key]
           if (!runtime) throw new Error('page_runtime_unavailable')
+          if (typeof runtime.lifecycleEpoch !== 'function' || runtime.lifecycleEpoch() !== expected || Date.now() >= expires) throw new Error('page_lifecycle_changed')
           return runtime[mode](request)
-        }, args: [PAGE_RUNTIME_KEY, method, invocation],
+        }, args: [PAGE_RUNTIME_KEY, method, invocation, expectedEpoch, expiresAt],
       })
       const result = results[0]?.result
       if (!result || typeof result !== 'object') throw new Error('page_result_missing')

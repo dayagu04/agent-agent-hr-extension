@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { BossHeartbeatScheduler, RECOVERY_ALARM } from '../src/background-scheduler'
 import { BossContentHeartbeat } from '../src/runtime-content'
 import { BossRuntime, STORAGE_KEY } from '../src/runtime'
-import type { PageExecution, PageInvocation } from '../src/contracts'
+import { PAGE_RUNTIME_KEY, type PageExecution, type PageInvocation } from '../src/contracts'
 
 const API = 'https://gudaya.chat'
 const ACCOUNT = `${API}|1`
@@ -28,6 +28,8 @@ function harness(accounts: Record<string, unknown> = {}) {
   const pageCalls: PageInvocation[] = []
   const navigations: unknown[] = []
   const cancellations: unknown[][] = []
+  let epoch = 0
+  let beforeInvocation: () => Promise<void> = async () => undefined
   let onPage: (invocation: PageInvocation, method: string) => Promise<unknown> = async () => ({ result: { ok: true, data: { delivery: 'delivered' } } })
   let onRequest: (path: string, body: Record<string, unknown>) => Promise<unknown> = async path => path.endsWith('/heartbeat') ? heartbeat([]) : { stored: true }
   const chromeMock = {
@@ -39,13 +41,22 @@ function harness(accounts: Record<string, unknown> = {}) {
     } },
     permissions: { contains: async () => permission },
     tabs: { get: async (id: number) => ({ id, url: 'https://www.zhipin.com/web/geek/chat' }), update: async (...args: unknown[]) => { navigations.push(args) }, reload: async (...args: unknown[]) => { navigations.push(args) } },
-    scripting: { executeScript: async (details: { files?: string[]; args?: unknown[]; target: { tabId: number; documentIds: string[] } }) => {
+    scripting: { executeScript: async (details: { files?: string[]; args?: unknown[]; func?: (...args: unknown[]) => unknown; target: { tabId: number; documentIds: string[] } }) => {
       expect(details.target).toEqual({ tabId: 12, documentIds: ['doc-1'] })
       if (details.files) return []
-      if ((details.args?.length ?? 0) <= 2) { cancellations.push(details.args || []); return [] }
-      const invocation = details.args![2] as PageInvocation
-      pageCalls.push(structuredClone(invocation))
-      return [{ result: await onPage(invocation, String(details.args![1])) }]
+      if (details.args?.length === 2) { cancellations.push(details.args); return [] }
+      if ((details.args?.length ?? 0) > 2) await beforeInvocation()
+      const invoke = async (invocation: PageInvocation, method: string) => {
+        pageCalls.push(structuredClone(invocation))
+        return onPage(invocation, method)
+      }
+      const globals = globalThis as unknown as Record<string, unknown>
+      const previous = globals[PAGE_RUNTIME_KEY]
+      globals[PAGE_RUNTIME_KEY] = { lifecycleEpoch: () => epoch, run: (invocation: PageInvocation) => invoke(invocation, 'run'), prepare: (invocation: PageInvocation) => invoke(invocation, 'prepare') }
+      let result: unknown
+      try { result = details.func!(...(details.args || [])) }
+      finally { if (previous === undefined) delete globals[PAGE_RUNTIME_KEY]; else globals[PAGE_RUNTIME_KEY] = previous }
+      return [{ result: await result }]
     } },
   } as unknown as typeof chrome
   const fetchMock = (async (url: string | URL | Request, options: RequestInit) => {
@@ -61,6 +72,7 @@ function harness(accounts: Record<string, unknown> = {}) {
     disk: () => disk[STORAGE_KEY] as { config: unknown; accounts: Record<string, { ack: number; receipts: Record<string, { state: string; result?: { error?: string }; uploaded: boolean }> }> },
     accesses, calls, pageCalls, navigations, cancellations,
     advance: (milliseconds = 1000) => { time += milliseconds }, denyPermission: () => { permission = false },
+    changeEpoch: () => { epoch += 1 }, beforeInvocation: (handler: typeof beforeInvocation) => { beforeInvocation = handler },
     request: (handler: typeof onRequest) => { onRequest = handler }, page: (handler: typeof onPage) => { onPage = handler },
   }
 }
@@ -310,6 +322,30 @@ describe('MV3 production message dispatcher persistence and trust', () => {
       tabLookup.resolve({ id: 12, url: page.url } as chrome.tabs.Tab)
       await vi.advanceTimersByTimeAsync(0)
       expect(late.pageCalls).toHaveLength(0)
+
+      // Execute the actual serialized MAIN gate after Chrome queues it: epoch changes and expiry must reject late starts.
+      for (const interruption of ['freeze-and-logout', 'deadline']) {
+        const queued = harness()
+        const invocationQueued = deferred<void>()
+        const dispatch = deferred<void>()
+        queued.beforeInvocation(async () => { invocationQueued.resolve(); await dispatch.promise })
+        queued.request(async path => path.endsWith('/heartbeat') ? heartbeat([command()]) : { stored: true })
+        const queuedRuntime = queued.create()
+        const queuedTick = queuedRuntime.handle({ type: 'boss.tick', lifecycleVersion: 0 }, page)
+        await invocationQueued.promise // Preflight already read the epoch; the real run function has not started.
+        if (interruption === 'freeze-and-logout') {
+          queued.changeEpoch() // MAIN's native freeze listener increments its epoch before cancelling leases.
+          await queuedRuntime.handle({ type: 'boss.lifecycle', state: 'frozen', lifecycleVersion: 1 }, page)
+          await queuedTick
+          await queuedRuntime.handle({ type: 'boss.logout' }, popup)
+        } else {
+          await vi.advanceTimersByTimeAsync(180_000)
+          await queuedTick
+        }
+        dispatch.resolve()
+        await vi.advanceTimersByTimeAsync(0)
+        expect(queued.pageCalls).toHaveLength(0)
+      }
 
       // A late alarm create is serialized before disable.clear, and a failed create is retryable in the same state.
       const alarmTarget = { enabled: true, tabId: 12, documentId: 'doc-1', generation: 'alarm-enable' }
