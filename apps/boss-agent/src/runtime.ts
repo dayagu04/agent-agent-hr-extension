@@ -509,14 +509,17 @@ export class BossRuntime {
       return { ok: false, phase: this.phase, error: this.lastError }
     }
   }
-  private async ensurePage(session: Session, connection: PageConnection): Promise<void> {
+  private async ensurePage(session: Session, connection: PageConnection, assertCall: () => void): Promise<void> {
     this.assertActive(session)
+    assertCall()
     const tab = await this.api.tabs.get(connection.tabId)
+    assertCall()
     if (!bossUrl(tab.url) || this.connection?.documentId !== connection.documentId || this.state.config?.tabId !== connection.tabId) throw new Error('page_changed')
     const key = `${connection.tabId}:${connection.documentId}`
     if (this.pageReady !== key) {
       await this.api.scripting.executeScript({ target: { tabId: connection.tabId, documentIds: [connection.documentId] }, world: 'MAIN', files: ['page.js'] })
       this.assertActive(session)
+      assertCall()
       this.pageReady = key
     }
   }
@@ -533,9 +536,13 @@ export class BossRuntime {
       call.controller.signal.addEventListener('abort', abort, { once: true })
       removeAbort = () => call.controller.signal.removeEventListener('abort', abort)
     })
-    const execution = (async () => {
-      await this.ensurePage(session, connection)
+    const assertCall = () => {
       this.assertActive(session)
+      if (call.controller.signal.aborted) throw new Error('page_execution_cancelled')
+    }
+    const execution = (async () => {
+      await this.ensurePage(session, connection, assertCall)
+      assertCall()
       const results = await this.api.scripting.executeScript({
         target: { tabId: connection.tabId, documentIds: [connection.documentId] }, world: 'MAIN',
         func: async (key: string, mode: 'run' | 'prepare', request: PageInvocation) => {

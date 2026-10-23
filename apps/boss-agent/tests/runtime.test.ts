@@ -296,6 +296,21 @@ describe('MV3 production message dispatcher persistence and trust', () => {
       await vi.advanceTimersByTimeAsync(0)
       expect(frozen.calls.filter(call => call.path.endsWith('/tools/result'))).toHaveLength(0)
 
+      // The invocation deadline also fences a preparation that returns late, before any MAIN run existed to cancel.
+      const late = harness()
+      const lookupStarted = deferred<void>()
+      const tabLookup = deferred<chrome.tabs.Tab>()
+      late.chrome.tabs.get = (() => { lookupStarted.resolve(); return tabLookup.promise }) as typeof chrome.tabs.get
+      late.request(async path => path.endsWith('/heartbeat') ? heartbeat([command()]) : { stored: true })
+      const lateTick = late.create().handle({ type: 'boss.tick' }, page)
+      await lookupStarted.promise
+      await vi.advanceTimersByTimeAsync(180_000)
+      await lateTick
+      expect(late.calls.find(call => call.path.endsWith('/tools/result'))?.body).toMatchObject({ error: 'reconciliation_required' })
+      tabLookup.resolve({ id: 12, url: page.url } as chrome.tabs.Tab)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(late.pageCalls).toHaveLength(0)
+
       // A late alarm create is serialized before disable.clear, and a failed create is retryable in the same state.
       const alarmTarget = { enabled: true, tabId: 12, documentId: 'doc-1', generation: 'alarm-enable' }
       const createStarted = deferred<void>()
