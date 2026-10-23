@@ -76,7 +76,7 @@ BOSS MV3 的运行时测试由其专用配置执行，CI 与共享页面契约�
 
 ## 油猴兼容入口
 
-原 `src/`、Vue 面板、编排器与 userscript 仍用于兼容现有安装和回滚。BOSS MV3 的本阶段交付重点是 Agent 原子工具；旧面板批量编排不被伪装成已在新扩展完成迁移。新扩展遇到不支持的编排命令拒绝执行且不越过 ACK。
+原 `src/`、Vue 面板、编排器与 userscript 仍用于兼容现有安装和回滚。用户已明确 BOSS 产品只保留 Agent 原子工具；旧批量投递和会话托管面板退役，不进入新扩展，业务编排由上游 Agent 完成。旧源码/产物仅作为迁移兼容与临时回滚保留，不是新扩展后续开发目标。新扩展遇到不支持的编排命令拒绝执行且不越过 ACK。
 
 ```bash
 npm run build:userscript      # dist/agent-agent-hr-tampermonkey.user.js

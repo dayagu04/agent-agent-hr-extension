@@ -3,3 +3,6 @@ dist/
 *.local
 .DS_Store
 *.tsbuildinfo
+
+# Local diagnostics and task records are never source artifacts.
+.local/
