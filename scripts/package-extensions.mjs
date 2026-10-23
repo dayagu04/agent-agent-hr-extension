@@ -7,7 +7,7 @@ import { artifactFiles, checkFiles, products } from './check-extension-artifacts
 
 const root = fileURLToPath(new URL('..', import.meta.url))
 const selected = process.argv.slice(2)
-if (selected.some(name => !products[name])) throw new Error(`Unknown extension: ${selected.join(', ')}`)
+if (selected.some(name => !Object.hasOwn(products, name))) throw new Error(`Unknown extension: ${selected.join(', ')}`)
 
 // STORE archives are understood by Chrome, Edge, GitHub and standard unzip.
 // No release-time dependency download or platform-specific ZIP executable.

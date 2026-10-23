@@ -26,8 +26,8 @@ export function artifactFiles(directory) {
 }
 
 export function checkFiles(name, files) {
+  assert.ok(Object.hasOwn(products, name), `Unknown extension: ${name}`)
   const product = products[name]
-  assert.ok(product, `Unknown extension: ${name}`)
   const pkg = JSON.parse(readFileSync(resolve(root, product.app, 'package.json'), 'utf8'))
   assert.ok(files.has('manifest.json'), `${name}: missing manifest`)
   const manifest = JSON.parse(files.get('manifest.json').toString())
@@ -87,6 +87,8 @@ export function checkFiles(name, files) {
 }
 
 export function checkExtension(name, directory = resolve(root, 'dist', name)) {
+  // Reject before reading a caller-selected directory, including prototype keys.
+  assert.ok(Object.hasOwn(products, name), `Unknown extension: ${name}`)
   const result = checkFiles(name, artifactFiles(directory))
   console.log(`Verified ${result.name} v${result.version}: ${result.files} bundled files`)
   return result

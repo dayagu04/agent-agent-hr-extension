@@ -13,16 +13,21 @@
 
 ## 本地安装与更新
 
-Node.js 22+：
+以下命令从 `agent-agent-hr-extension` 仓库根目录执行，使用 Node.js 22.15 或以上：
 
 ```bash
-npm ci
-npm run check
+npm --prefix apps/application-autofill ci
+npm run typecheck:autofill
+npm run build:autofill
+npm run test:autofill
+npm run package:autofill
 ```
 
-在 Edge/Chrome 扩展管理页开启开发者模式，加载本仓库 `dist/`。更新时重建同一路径，点击“重新加载”并刷新招聘标签，无需重新导入。构建产物不提交 Git。
+在 Edge/Chrome 扩展管理页开启开发者模式，加载根目录下的 `dist/application-autofill/`，该目录直接包含 `manifest.json`；不要加载公共 `dist/` 或 `dist/packages/`。独立 ZIP 是 `dist/packages/application-autofill-0.3.11.zip`，解压后同样加载其中包含 manifest 的目录。更新时覆盖同一安装目录，点击“重新加载”并刷新招聘标签，无需重新导入。构建产物不提交 Git。
 
-CI 对分支和 PR 执行类型检查、构建及契约测试；当前没有浏览器商店或自动 Release 工作流。主应用发布与本地扩展重新加载是两件事。
+从原独立仓的 `browser-extension/dist/` 迁移时，先停用原网申扩展并刷新 ATS 页面，再加载新目录。新路径会产生新的扩展 ID，旧登录和资料缓存不会跨 ID 自动迁移，首次需要重新登录；本页临时修改也不会搬迁。不要同时启用新旧两个网申扩展。保留原安装目录；需回滚时先停用新版、刷新 ATS 页面，再启用旧扩展并检查登录与资料。已填写的网页内容由用户核对，不自动撤销。BOSS 扩展不参与网申升级或回滚。
+
+CI 按改动路径对 PR 和主线执行类型检查、构建及契约测试；`autofill-vX.Y.Z` 标签仅发布网申 ZIP，不占用旧油猴 latest 通道。目前没有浏览器商店或自动安装更新；主应用发布、扩展 Release 和用户本地扩展重新加载是三件事。
 
 ## 0.3.11 改动
 

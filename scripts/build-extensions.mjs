@@ -6,7 +6,7 @@ import { checkExtension, products } from './check-extension-artifacts.mjs'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
 const selected = process.argv.slice(2)
-if (selected.some(name => !products[name])) throw new Error(`Unknown extension: ${selected.join(', ')}`)
+if (selected.some(name => !Object.hasOwn(products, name))) throw new Error(`Unknown extension: ${selected.join(', ')}`)
 
 function run(cli, args, cwd = root) {
   if (!existsSync(cli)) throw new Error(`Missing dependencies at ${cli}; run npm ci in ${cwd}`)
