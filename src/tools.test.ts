@@ -10,12 +10,15 @@ vi.mock('./platforms/boss-chat', () => ({
   openThread: vi.fn(() => 'ok'),
   clickCard: vi.fn(async () => true),
   listPendingCardKinds: vi.fn(() => [{ kind: 'resume_request', questionLength: 10 }]),
+  listPendingCardsStable: vi.fn(async () => [{ kind: 'resume_request', questionLength: 10 }]),
   sendMessageText: vi.fn(async () => true),
+  lastDeliveryState: vi.fn(() => 'delivered'),
   sendResume: vi.fn(async () => true),
   sendResumeDetailed: vi.fn(async () => ({ ok: true })),
   deleteThread: vi.fn(async () => 'ok'),
 }))
 vi.mock('./platforms/factory', () => ({ detectPlatform: vi.fn(() => null) }))
+vi.mock('./platforms/boss', () => ({ BossPlatform: vi.fn() }))
 vi.mock('./config', () => ({ loadConfig: vi.fn(() => ({})) }))
 vi.mock('./orchestrator', () => ({ getOrchestrator: vi.fn(() => ({ isRunning: () => true })) }))
 vi.mock('./api', () => ({ fetchGreeting: vi.fn(async () => ''), recordApplication: vi.fn(async () => ({})) }))
@@ -25,6 +28,9 @@ import { callTool, toolCatalog } from './tools'
 import { sendMessageText } from './platforms/boss-chat'
 import { detectPlatform } from './platforms/factory'
 import { recordApplication } from './api'
+import { BossPlatform } from './platforms/boss'
+import { createPageTools } from '../apps/boss-agent/src/page-tools'
+import { TOOL_CATALOG, validateToolArgs } from '../apps/boss-agent/src/tools-contract'
 
 describe('agent tools', () => {
   it('publishes a catalog that marks irreversible actions', () => {
@@ -160,5 +166,57 @@ describe('send_message preconditions', () => {
 describe('reload_page', () => {
   it('refuses while auto-apply is running unless forced', async () => {
     expect(await callTool('reload_page', {})).toEqual({ ok: false, error: 'orchestrator_running' })
+  })
+})
+
+describe('MV3 page boundary', () => {
+  it('publishes function schemas and rejects malformed arguments before accessing page tools', async () => {
+    expect(TOOL_CATALOG.map((tool) => tool.name).sort()).toEqual(toolCatalog().map((tool) => tool.name).sort())
+    expect(TOOL_CATALOG.every((tool) => tool.parameters.type === 'object' && tool.parameters.additionalProperties === false)).toBe(true)
+    for (const [name, args, error] of [
+      ['unknown', {}, 'unknown_tool'],
+      ['send_message', [], 'invalid_arguments'],
+      ['send_message', { text: true }, 'invalid_arguments'],
+      ['send_message', { text: '  ' }, 'text_required'],
+      ['click_card', { kind: 'resume_request' }, 'invalid_arguments'],
+      ['click_card', { kind: 'unknown', accept: true }, 'invalid_arguments'],
+      ['select_filters', { filters: [{ group: '经验' }] }, 'invalid_arguments'],
+      ['send_resume', { resumeIndex: -1 }, 'invalid_arguments'],
+      ['open_search', { keyword: '开发', page: 1.1 }, 'invalid_arguments'],
+      ['reload_page', { force: 'false' }, 'invalid_arguments'],
+    ] as const) {
+      expect(validateToolArgs(name, args)).toEqual({ ok: false, error })
+    }
+    const location = { protocol: 'https:', hostname: 'www.zhipin.com' }
+    vi.stubGlobal('location', location)
+    vi.mocked(sendMessageText).mockClear()
+    try {
+      expect(await createPageTools().run({ commandKey: 'invalid', name: 'send_message', args: { text: false } })).toEqual({ result: { ok: false, error: 'invalid_arguments' } })
+      expect(sendMessageText).not.toHaveBeenCalled()
+    } finally { vi.unstubAllGlobals() }
+  })
+
+  it('returns durable effects, deduplicates document commands and preserves cancellation uncertainty', async () => {
+    const location = { protocol: 'https:', hostname: 'www.zhipin.com', href: 'https://www.zhipin.com/web/geek/jobs', pathname: '/web/geek/jobs', search: '?query=开发', assign: vi.fn(), reload: vi.fn() }
+    vi.stubGlobal('location', location)
+    const applyJob = vi.fn(async () => ({ outcome: 'applied', greetingSent: true }))
+    const scanJobs = vi.fn(async () => [{ platformJobId: 'j1', title: '开发', company: 'A', salary: '10-20K', city: '上海', description: '职责' }])
+    vi.mocked(BossPlatform).mockImplementation(function () { return { code: 'zhipin', applyJob, scanJobs } as never })
+    try {
+      const page = createPageTools()
+      const invocation = { commandKey: 'boss:123', name: 'apply_job', args: { jobId: 'j1' }, context: { greeting: '你好' } }
+      expect(await page.prepare(invocation)).toMatchObject({ ok: true, data: { job: { platformJobId: 'j1', salary: '10-20K', city: '上海' } } })
+      const result = await page.run(invocation)
+      expect(result).toMatchObject({ result: { ok: true }, effects: [{ kind: 'application', payload: { platform: 'zhipin', platform_job_id: 'j1', outcome: 'applied', greeting_sent: true } }] })
+      expect(await page.run(invocation)).toEqual(result)
+      expect(applyJob).toHaveBeenCalledTimes(1)
+      expect(await page.run({ ...invocation, args: { jobId: 'other' } })).toEqual({ result: { ok: false, error: 'command_key_conflict' } })
+      const navigation = await page.run({ commandKey: 'navigate', name: 'open_search', args: { keyword: '客服', page: 2 } })
+      expect(navigation.effects).toEqual([{ kind: 'navigate', url: 'https://www.zhipin.com/web/geek/jobs?query=%E5%AE%A2%E6%9C%8D&page=2' }])
+      expect(location.assign).not.toHaveBeenCalled()
+      expect(location.reload).not.toHaveBeenCalled()
+      vi.mocked(sendMessageText).mockImplementationOnce(async () => { page.cancel('cancelled'); return true })
+      expect(await page.run({ commandKey: 'cancelled', name: 'send_message', args: { text: '你好' } })).toEqual({ result: { ok: false, error: 'reconciliation_required' } })
+    } finally { vi.unstubAllGlobals() }
   })
 })

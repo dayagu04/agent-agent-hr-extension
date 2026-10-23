@@ -6,6 +6,7 @@
 // 红线：只在用户显式启动「会话托管」后运行。发给 HR 的消息不可撤回，
 // 全过程由后端 conversation_* 三表留痕（意图/回复/发送结果）供事后评判。
 import { diag } from '../logger'
+import { assertToolExecutionActive } from '../tool-execution-guard'
 import type { AgentPolicy, ContactChannel, PluginConfig } from '../types'
 import {
   markChatSent,
@@ -104,8 +105,11 @@ function allMatch(selectors: string[], root: ParentNode = document): HTMLElement
 }
 
 const text = (el: Element | null | undefined) => (el?.textContent || '').trim()
-const delay = (min: number, max: number) =>
-  new Promise((r) => setTimeout(r, min + Math.random() * (max - min)))
+const delay = async (min: number, max: number) => {
+  assertToolExecutionActive()
+  await new Promise((r) => setTimeout(r, min + Math.random() * (max - min)))
+  assertToolExecutionActive()
+}
 
 /** 从会话行 DOM 提取 BOSS 原生唯一标识（threadKey 与删除定位共用同一来源）。 */
 function readBossId(el: HTMLElement): string {
@@ -154,6 +158,7 @@ export function onChatPage(): boolean {
  * @returns 是否成功触发切换
  */
 function switchThreadViaVue(el: HTMLElement): boolean {
+  assertToolExecutionActive()
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const vm = (el as any).__vue__
   if (!vm) return false
@@ -461,6 +466,7 @@ async function deleteThreadImpl(
     // 首选：直接调用该行组件自己的 deleteBoss()。
     // 它就是「删除」菜单项最终调用的方法，跳过全部 DOM 交互，
     // 且作用对象就是这一行，不存在删错会话的可能。
+    assertToolExecutionActive()
     if (deleteViaRowVue(hit.el)) {
       if (await confirmAndVerify('deleteViaRowVue')) return 'ok'
       diag('CHAT', 'deleteViaRowVue 调用成功但会话仍在列表，继续尝试点击路径')
@@ -644,10 +650,12 @@ export async function deleteThread(
   company: string,
   jobTitle = '',
   identity?: { bossId?: string; encryptJobId?: string },
+  afterDeleted?: () => Promise<void>,
 ): Promise<'ok' | 'not-found' | 'failed'> {
   const r = await deleteThreadImpl(company, jobTitle, identity)
   if (r === 'ok') {
-    await afterConversationDeleted(company, jobTitle, 'manual', identity)
+    if (afterDeleted) await afterDeleted()
+    else await afterConversationDeleted(company, jobTitle, 'manual', identity)
   }
   return r
 }
@@ -1217,6 +1225,7 @@ async function sendText(content: string, expectThread?: string): Promise<boolean
     const baseline = countMyBubbles()
 
     // 发送：Enter 键盘事件（keydown+keyup，补 keyCode/which 兼容旧 handler）
+    assertToolExecutionActive()
     for (const type of ['keydown', 'keyup'] as const) {
       input.dispatchEvent(new KeyboardEvent(type, {
         key: 'Enter',
@@ -1236,6 +1245,7 @@ async function sendText(content: string, expectThread?: string): Promise<boolean
       // 兜底：找「发送」按钮（文本/aria/title/图标型，限定输入框附近，避免误点）
       const sendBtn = findSendButton(input)
       if (sendBtn) {
+        assertToolExecutionActive()
         sendBtn.click()
         await delay(300, 600)
         if (countMyBubbles() > baseline) via = 'button'

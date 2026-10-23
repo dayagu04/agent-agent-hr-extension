@@ -1,5 +1,6 @@
 // 点击事件工具 —— BOSS 等平台用 Vue 事件委托监听完整鼠标/指针事件序列，
 // 裸 el.click() 不产生这些事件，合成点击需按真实序列派发。
+import { assertToolExecutionActive } from './tool-execution-guard'
 
 interface EventPoint {
   clientX: number
@@ -43,6 +44,7 @@ function centerOf(el: HTMLElement): EventPoint {
  * 用于元素被其它节点遮挡或尺寸为 0（elementFromPoint 会命中别的节点）的场景。
  */
 export function clickDirect(el: HTMLElement): void {
+  assertToolExecutionActive()
   const pos = centerOf(el)
   pointerEvent(el, 'pointerover', pos, 1)
   pointerEvent(el, 'pointerenter', pos, 1)
@@ -66,6 +68,7 @@ export function clickDirect(el: HTMLElement): void {
  * 因此用 elementFromPoint 找到实际可见节点再派发。
  */
 export function realClick(el: HTMLElement): 'hit' | 'occluded' {
+  assertToolExecutionActive()
   // 脱敏 DOM fixture / 旧 WebView 可能没有 scrollIntoView；点击本身仍可执行。
   el.scrollIntoView?.({ block: 'center' })
   const pos = centerOf(el)
