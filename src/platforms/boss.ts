@@ -189,11 +189,19 @@ export class BossPlatform extends BasePlatform {
    *
    * 列表页只有标签摘要；JD 正文在右侧 `.job-detail-box`（左列表右详情联动）。
    * 这里只读不点「立即沟通」——点卡片只是切换详情，不会投递。
+   *
+   * 只取职位描述本身（2026-10-23 probe_dom 实测结构）：
+   *   .job-detail-box > .job-detail-body > h3.title「职位描述」+ p.desc
+   * 同一面板里还有 .job-boss-info（HR 名片、「去App与BOSS随时沟通」）、
+   * .job-address（地址/地图），页面底部还有 SEO 链接墙（「合肥保洁招聘…BOSS直聘招聘」）。
+   * 整块取 textContent 会把这些都混进 JD。找不到 p.desc 时才退回整块。
    */
   private readDetailJd(): string {
-    const box =
+    const panel =
       document.querySelector('.job-detail-box, .job-detail, [class*="job-detail"]') ||
       document.querySelector('.job-detail-container, [class*="detail-content"]')
+    const box =
+      panel?.querySelector('.job-detail-body p.desc, .job-sec-text, p.desc') || panel
     if (!box) return ''
     // 反爬水印（2026-10-21 probe_dom 实测）：JD 段落里夹着随机 class 的 <span>，
     // 文本是「kanzhun」「BOSS直聘」「直聘」，渲染尺寸为 0（width=0 或 0x0）——

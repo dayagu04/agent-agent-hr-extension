@@ -184,6 +184,7 @@ tool name=delete_thread status=error ms=120 error=not-found
 | 工具栏发简历不可用 | `.toolbar-btn.tooltip.unable`（BOSS 未允许时），此时必须走 HR 卡片的「同意」 |
 | 离屏副本 | BOSS 保留一份视口外的 `.choose-resume-dialog`，宽高正常、位置在外，必须用 `inViewport` 过滤 |
 | JD 反爬水印 | `p.desc` 里夹着随机 class 的 `<span>`，文本「kanzhun」「boss」「来自BOSS直聘」「直聘」，用 `width:0.1px`/0 宽等隐藏（**不等于 0**，不能用 `=== 0` 判断）；在活 DOM 上按「宽或高 <1px / display / visibility / opacity / font-size:0」剔除（克隆后没有布局） |
+| JD 正文范围 | `.job-detail-box > .job-detail-body > h3.title「职位描述」+ p.desc`；同面板还有 `.job-boss-info`（HR 名片）、`.job-address`（地址），页面底部有 SEO 链接墙，**只取 `p.desc`** |
 | 标题里的薪资残渣 | 薪资数字被字体混淆成私有区字符，标题末尾只剩「-K」「-K·薪」，需剥掉 |
 
 判定卡片状态一律看按钮禁用态；判定发送成功一律看上述系统痕迹，并与发送前基线比较。

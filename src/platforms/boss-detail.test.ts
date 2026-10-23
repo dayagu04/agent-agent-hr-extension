@@ -61,3 +61,27 @@ describe('reading a job JD from the detail pane', () => {
     expect(jd).toBe('小白首选带薪培训')
   })
 })
+
+describe('JD scope', () => {
+  it('reads only p.desc, not the HR card, address or SEO links in the same panel', async () => {
+    // 2026-10-23 probe_dom 实测：.job-detail-body 下 h3.title + p.desc + .job-boss-info + .job-address
+    document.body.innerHTML = `
+      <div class="job-detail-box">
+        <div class="job-detail-header"><div class="job-header-info">纯客服 5-8K</div></div>
+        <div class="job-detail-body">
+          <h3 class="title">职位描述</h3>
+          <p class="desc">小白首选，带薪培训</p>
+          <div class="job-boss-info">曹女士 刚刚活跃 去App与BOSS随时沟通</div>
+          <div class="job-address">工作地址 合肥蜀山区</div>
+        </div>
+        <div class="seo">合肥保洁招聘合肥BOSS直聘招聘</div>
+      </div>`
+    for (const el of Array.from(document.querySelectorAll('*'))) {
+      vi.spyOn(el, 'getBoundingClientRect').mockReturnValue(rect(300))
+    }
+    const platform = new BossPlatform()
+    const jd = await (platform as unknown as { readDetailJd(): string }).readDetailJd()
+
+    expect(jd).toBe('小白首选，带薪培训')
+  })
+})
