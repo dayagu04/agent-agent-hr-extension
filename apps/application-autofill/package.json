@@ -1,0 +1,22 @@
+{
+  "name": "agent-agent-hr-browser-extension",
+  "version": "0.3.11",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build && vite build --config vite.content.config.ts && vite build --config vite.auth-sync.config.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "check": "npm run typecheck && npm run build && npm test"
+  },
+  "dependencies": {
+    "mammoth": "^1.12.3",
+    "pdfjs-dist": "^6.3.289"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.1.33",
+    "@types/node": "^24.10.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.1"
+  }
+}

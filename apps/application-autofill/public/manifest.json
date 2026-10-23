@@ -1,0 +1,52 @@
+{
+  "manifest_version": 3,
+  "name": "谷谷网申助手",
+  "short_name": "谷谷网申",
+  "version": "0.3.11",
+  "description": "登录后会话缓存网申资料，点击后在招聘页面逐项扫描并填写；不会自动提交。",
+  "minimum_chrome_version": "114",
+  "permissions": ["activeTab", "scripting", "storage"],
+  "host_permissions": ["https://gudaya.chat/*", "https://www.gudaya.chat/*"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "action": {
+    "default_title": "打开谷谷网申助手",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png"
+    },
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.mokahr.com/*",
+        "https://*.zhiye.com/*",
+        "https://we.zyt.com/*",
+        "https://jobs.bytedance.com/*",
+        "https://*.jobs.bytedance.com/*",
+        "https://joinbytedance.com/*",
+        "https://*.joinbytedance.com/*",
+        "https://join.qq.com/*",
+        "https://campus.tencent.com/*",
+        "https://talent.alibaba.com/*",
+        "https://campus.alibaba.com/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://gudaya.chat/*", "https://www.gudaya.chat/*"],
+      "js": ["auth-sync.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
