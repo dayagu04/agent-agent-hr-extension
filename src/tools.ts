@@ -16,20 +16,26 @@ import { getOrchestrator } from './orchestrator'
 import { fetchGreeting, recordApplication } from './api'
 import { setPendingOpen } from './chat-store'
 import { createToolDefinitions, type ToolResult } from './tool-definitions'
+import type { PluginConfig } from './types'
 export type { ToolResult, ToolSpec } from './tool-definitions'
 
-const TOOLS = createToolDefinitions({
-  detectPlatform,
-  getGreeting: (platform, job) => fetchGreeting(loadConfig(), platform, job),
-  recordApplication: (...args) => recordApplication(loadConfig(), ...args),
-  async navigate(url, pendingThread) {
-    if (pendingThread) await setPendingOpen(pendingThread.company, pendingThread.jobTitle)
-    setTimeout(() => location.assign(url), 800)
-  },
-  reload: () => { setTimeout(() => location.reload(), 800) },
-  isRunning: () => getOrchestrator(loadConfig()).isRunning(),
-  catalog: () => toolCatalog(),
-})
+function legacyTools(config: () => PluginConfig) {
+  return createToolDefinitions({
+    detectPlatform,
+    getGreeting: (platform, job) => fetchGreeting(config(), platform, job),
+    recordApplication: (...args) => recordApplication(config(), ...args),
+    async navigate(url, pendingThread) {
+      if (pendingThread) await setPendingOpen(pendingThread.company, pendingThread.jobTitle)
+      setTimeout(() => location.assign(url), 800)
+    },
+    reload: () => { setTimeout(() => location.reload(), 800) },
+    isRunning: () => getOrchestrator(config()).isRunning(),
+    catalog: () => toolCatalog(),
+  })
+}
+
+// Metadata discovery must not read stored credentials at module initialization.
+const TOOLS = legacyTools(loadConfig)
 
 export function toolCatalog(): Array<{ name: string; description: string; irreversible: boolean }> {
   return TOOLS.map((t) => ({ name: t.name, description: t.description, irreversible: !!t.irreversible }))
@@ -52,13 +58,16 @@ export function toolSpecs(): Array<{
 
 /** 执行一个工具。未知工具直接报错，不猜。 */
 export async function callTool(name: string, args: Record<string, unknown> = {}): Promise<ToolResult> {
-  const tool = TOOLS.find((t) => t.name === name)
-  if (!tool) {
+  if (!TOOLS.some((t) => t.name === name)) {
     diag('TOOL', `tool name=${name} status=error error=unknown_tool`)
     return { ok: false, error: 'unknown_tool' }
   }
   const started = Date.now()
   try {
+    // An awaited page action may outlive an account/resume change in the panel.
+    // Bind every phase to this invocation's account; never charge the new account.
+    const cfg = loadConfig()
+    const tool = legacyTools(() => cfg).find((t) => t.name === name)!
     const result = await tool.run(args)
     const detail = result.ok ? summarize(result.data) : `error=${result.error || 'unknown'}`
     diag('TOOL', `tool name=${name} status=${result.ok ? 'ok' : 'error'} ms=${Date.now() - started} ${detail}`)

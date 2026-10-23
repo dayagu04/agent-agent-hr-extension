@@ -27,7 +27,9 @@ import { diag } from './logger'
 import { callTool, toolCatalog } from './tools'
 import { sendMessageText } from './platforms/boss-chat'
 import { detectPlatform } from './platforms/factory'
-import { recordApplication } from './api'
+import { fetchGreeting, recordApplication } from './api'
+import { loadConfig } from './config'
+import type { ApplyContext } from './platforms/base'
 import { BossPlatform } from './platforms/boss'
 import { createPageTools } from '../apps/boss-agent/src/page-tools'
 import { TOOL_CATALOG, validateToolArgs } from '../apps/boss-agent/src/tools-contract'
@@ -97,21 +99,32 @@ describe('apply_job', () => {
   const card = { platformJobId: 'j1', title: 'C++', company: 'A', cardElement: null }
 
   it('applies the requested job and records it like the engine does', async () => {
-    const applyJob = vi.fn(async () => ({
-      outcome: 'applied', message: '', greetingSent: true, alreadyApplied: false,
-    }))
+    const originalConfig = { apiBase: 'https://api.example.test', token: 'account-a', resumeId: 1 }
+    const newConfig = { ...originalConfig, token: 'account-b', resumeId: 2 }
+    vi.mocked(loadConfig).mockReturnValue(originalConfig as never)
+    vi.mocked(fetchGreeting).mockClear()
+    vi.mocked(recordApplication).mockClear()
+    const applyJob = vi.fn(async (_card: unknown, context?: ApplyContext) => {
+      // Account changes while the browser is awaiting BOSS must not reattribute this call.
+      vi.mocked(loadConfig).mockReturnValue(newConfig as never)
+      await context?.getGreeting?.()
+      return { outcome: 'applied', message: '', greetingSent: true, alreadyApplied: false }
+    })
     vi.mocked(detectPlatform).mockReturnValue({
       code: 'zhipin',
       scanJobs: async () => [card],
       applyJob,
     } as never)
 
-    const r = await callTool('apply_job', { jobId: 'j1' })
-
-    expect(r.ok).toBe(true)
-    expect(applyJob).toHaveBeenCalledTimes(1)
-    expect(vi.mocked(recordApplication)).toHaveBeenCalledTimes(1)
-    expect(vi.mocked(recordApplication).mock.calls[0][4]).toBe('applied')
+    try {
+      const r = await callTool('apply_job', { jobId: 'j1' })
+      expect(r.ok).toBe(true)
+      expect(applyJob).toHaveBeenCalledTimes(1)
+      expect(vi.mocked(fetchGreeting)).toHaveBeenCalledWith(originalConfig, 'zhipin', card)
+      expect(vi.mocked(recordApplication)).toHaveBeenCalledTimes(1)
+      expect(vi.mocked(recordApplication).mock.calls[0][0]).toBe(originalConfig)
+      expect(vi.mocked(recordApplication).mock.calls[0][4]).toBe('applied')
+    } finally { vi.mocked(loadConfig).mockReturnValue({} as never) }
   })
 
   it('stops before clicking when the job id is not on this page', async () => {
