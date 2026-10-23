@@ -388,7 +388,24 @@ export function startRemoteLoop(intervalMs = 1000): void {
   const onPageExit = (): void => {
     void flushLogs({ force: true }).catch(() => undefined)
   }
+  // Page Lifecycle：后台标签页可能被浏览器整页冻结（Worker 一起停，不是节流）。
+  // 2026-10-23 实测：页面 16 分钟内一行日志都没有（连每分钟的 HR 拉取都没有），
+  // 期间下发的工具一直 queued。冻结前后各记一条，agent/开发者能直接看到「插件在睡」。
+  let frozenAt = 0
+  const onFreeze = (): void => {
+    frozenAt = Date.now()
+    diag('REMOTE', 'page_lifecycle status=frozen')
+    void flushLogs({ force: true }).catch(() => undefined)
+  }
+  const onResume = (): void => {
+    const sec = frozenAt ? Math.round((Date.now() - frozenAt) / 1000) : -1
+    frozenAt = 0
+    diag('REMOTE', `page_lifecycle status=resumed frozen_s=${sec}`)
+    void reportHeartbeatAndPoll()
+  }
   document.addEventListener('visibilitychange', onVisibilityChange)
+  document.addEventListener('freeze', onFreeze)
+  document.addEventListener('resume', onResume)
   window.addEventListener('focus', onWake)
   window.addEventListener('pageshow', onWake)
   window.addEventListener('pagehide', onPageExit)

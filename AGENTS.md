@@ -24,8 +24,12 @@ GET  /api/plugin/tools/result/{command_id}   → 200 结果 / 202 阶段（见 �
 - 结果保留 10 分钟、上限 200 条、超过 200KB 截断；`logs/plugin/YYYY-MM-DD.log` 只有摘要。
 - **读页面结构也用工具，不开 DevTools**（BOSS 检测到 F12 会关页）：
   `get_page_state` `read_filters` `scan_jobs` `list_threads` `read_messages` `probe_dom` `probe_overlays` `probe_row`。
-- **时延**：插件约 1 秒一次心跳。标签页在后台时，0.6.56 起由 Worker 驱动心跳避开 Chrome 节流；
-  更早版本后台挂久了会退化成约 1 分钟才取一条命令（命令不会丢，只是慢）。
+- **时延**：插件约 1 秒一次心跳。标签页在后台时，0.6.56 起由 Worker 驱动心跳避开 Chrome 的定时器节流。
+- **冻结（整页暂停）**：Chrome 的「节省内存」等机制可能把后台标签页整页冻结，Worker 一起停，
+  命令会一直 `queued`，页面恢复后照常执行（不丢、不重复）。插件在冻结/恢复时写
+  `[REMOTE] page_lifecycle status=frozen|resumed frozen_s=N`。要长期挂后台跑 agent，
+  在 `chrome://settings/performance` 把 `www.zhipin.com` 加入「始终保持这些网站的活动状态」。
+  agent 侧判断：心跳 `last_seen` 停止更新 = 插件不在线或被冻结，不要把超时当成工具失败。
 
 ## 1. 什么是工具
 
