@@ -44,4 +44,20 @@ describe('reading a job JD from the detail pane', () => {
     // 活 DOM 上的临时标记必须清掉，不能污染页面
     expect(document.querySelector('[data-aah-hidden]')).toBeNull()
   })
+
+  it('also removes 0.1px-wide watermark spans (rounds to 0 but is not 0)', async () => {
+    // 2026-10-23 实测：反爬 CSS 用 width:0.1px，旧判断 width === 0 漏掉
+    document.body.innerHTML = `
+      <div class="job-detail-box">
+        <p class="desc">小白<span class="pBYPaWST">kanzhun</span>首选<span class="BTiFBHrXDAe">来自BOSS直聘</span>带薪培训</p>
+      </div>`
+    for (const el of Array.from(document.querySelectorAll('*'))) {
+      const w = el.tagName === 'SPAN' ? 0.1 : 300
+      vi.spyOn(el, 'getBoundingClientRect').mockReturnValue({ ...rect(w), height: el.tagName === 'SPAN' ? 0.1 : 20 })
+    }
+    const platform = new BossPlatform()
+    const jd = await (platform as unknown as { readDetailJd(): string }).readDetailJd()
+
+    expect(jd).toBe('小白首选带薪培训')
+  })
 })

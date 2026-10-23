@@ -199,11 +199,19 @@ export class BossPlatform extends BasePlatform {
     // 文本是「kanzhun」「BOSS直聘」「直聘」，渲染尺寸为 0（width=0 或 0x0）——
     // 页面上看不见，但 textContent 会把它们拼进正文。只能在活 DOM 上按渲染尺寸判断
     // （克隆后脱离文档，没有布局），先打标记，再在克隆里删掉。
-    const marked: HTMLElement[] = []
-    for (const el of Array.from(box.querySelectorAll('span, i, em, b')) as HTMLElement[]) {
-      if (el.children.length) continue
+    // 注意不能用 width === 0：反爬 CSS 里有 width:0.1px / height:0.1px（四舍五入看是 0，
+    // 实际不等于 0，2026-10-23 实测漏掉）；也有 font-size:0、visibility:hidden 的写法。
+    const isHiddenText = (el: HTMLElement): boolean => {
       const r = el.getBoundingClientRect()
-      if (r.width === 0 && (el.textContent || '').trim()) {
+      if (r.width < 1 || r.height < 1) return true
+      const cs = getComputedStyle(el)
+      return cs.display === 'none' || cs.visibility === 'hidden' ||
+        cs.opacity === '0' || parseFloat(cs.fontSize) === 0
+    }
+    const marked: HTMLElement[] = []
+    for (const el of Array.from(box.querySelectorAll('span, i, em, b, font')) as HTMLElement[]) {
+      if (el.children.length || !(el.textContent || '').trim()) continue
+      if (isHiddenText(el)) {
         el.setAttribute('data-aah-hidden', '1')
         marked.push(el)
       }
@@ -218,7 +226,12 @@ export class BossPlatform extends BasePlatform {
       const t = (el.textContent || '').replace(/\s/g, '')
       if (/立即沟通|继续沟通|收藏|分享|举报|投诉|查看更多|展开/.test(t)) el.remove()
     })
-    return (clone.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 4000)
+    // 薪资数字被字体混淆成私有区字符，读出来是乱码，去掉（标题同理）
+    return (clone.textContent || '')
+      .replace(/[\uE000-\uF8FF]+/g, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 4000)
   }
 
   /**
