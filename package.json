@@ -23,7 +23,8 @@
     "check:artifacts": "node scripts/check-extension-artifacts.mjs",
     "package": "node scripts/package-extensions.mjs",
     "package:boss": "node scripts/package-extensions.mjs boss-agent",
-    "package:autofill": "node scripts/package-extensions.mjs application-autofill"
+    "package:autofill": "node scripts/package-extensions.mjs application-autofill",
+    "test:boss": "vitest run --config apps/boss-agent/vitest.config.ts"
   },
   "dependencies": {
     "vue": "^3.4.21"

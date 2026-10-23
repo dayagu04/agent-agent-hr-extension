@@ -57,6 +57,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck:boss
+      - run: npm run test:boss
       - run: npm run build:boss
       - run: npm run package:boss
       - run: unzip -t dist/packages/boss-agent-*.zip

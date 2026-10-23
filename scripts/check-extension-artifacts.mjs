@@ -81,7 +81,7 @@ export function checkFiles(name, files) {
     const page = files.get('page.js')?.toString()
     assert.ok(page, 'BOSS MAIN-world bundle missing')
     assert.doesNotThrow(() => new Script(page, { filename: 'page.js' }))
-    assert.ok(!/GM_|XMLHttpRequest|\bfetch\s*\(|VITE_DEV_UPDATE_URL|chrome\.storage|chrome\.runtime/.test(page), 'BOSS MAIN bundle contains privileged/network runtime')
+    assert.ok(!/GM_|XMLHttpRequest|\bfetch\s*\(|VITE_DEV_UPDATE_URL|chrome\.storage|chrome\.runtime|\bBearer\b|\bAuthorization\b|\/api\/plugin|network\.request/.test(page), 'BOSS MAIN bundle contains privileged/network runtime')
   }
   return { name, version: manifest.version, files: files.size }
 }
