@@ -31,6 +31,8 @@ import { recordApplication } from './api'
 import { BossPlatform } from './platforms/boss'
 import { createPageTools } from '../apps/boss-agent/src/page-tools'
 import { TOOL_CATALOG, validateToolArgs } from '../apps/boss-agent/src/tools-contract'
+import { clickDirect } from './dom-events'
+import { installToolExecutionGuard } from './tool-execution-guard'
 
 describe('agent tools', () => {
   it('publishes a catalog that marks irreversible actions', () => {
@@ -193,7 +195,13 @@ describe('MV3 page boundary', () => {
     try {
       expect(await createPageTools().run({ commandKey: 'invalid', name: 'send_message', args: { text: false } })).toEqual({ result: { ok: false, error: 'invalid_arguments' } })
       expect(sendMessageText).not.toHaveBeenCalled()
-    } finally { vi.unstubAllGlobals() }
+      const button = document.createElement('button')
+      const click = vi.fn()
+      button.addEventListener('click', click)
+      installToolExecutionGuard(() => { throw new Error('page_execution_cancelled') })
+      expect(() => clickDirect(button)).toThrow('page_execution_cancelled')
+      expect(click).not.toHaveBeenCalled()
+    } finally { installToolExecutionGuard(null); vi.unstubAllGlobals() }
   })
 
   it('returns durable effects, deduplicates document commands and preserves cancellation uncertainty', async () => {
