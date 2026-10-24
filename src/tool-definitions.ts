@@ -3,7 +3,7 @@
 import { diag } from './logger'
 import {
   clickCard, currentThreadInfo, deleteThread, listPendingCardsStable, listThreads,
-  onChatPage, openThread, readMessages, probeRowObject, readRowJobInfo,
+  onChatPage, openThreadConfirmed, readMessages, probeRowObject, readRowJobInfo,
   sendMessageText, lastDeliveryState, sendResumeDetailed, type ChatCardKind, type DeletedThreadTarget,
 } from './platforms/boss-chat'
 import { readSearchFilters, selectSearchFilter } from './search-filters'
@@ -117,7 +117,7 @@ export function createToolDefinitions(runtime: ToolRuntime): ToolSpec[] {
           await runtime.navigate('https://www.zhipin.com/web/geek/chat', { company, jobTitle })
           return { ok: true, data: 'navigating' }
         }
-        const r = openThread(company, jobTitle)
+        const r = await openThreadConfirmed(company, jobTitle)
         return { ok: r === 'ok', data: r, error: r === 'ok' ? undefined : r }
       },
     },
@@ -460,15 +460,8 @@ export function createToolDefinitions(runtime: ToolRuntime): ToolSpec[] {
         const company = toolString(args, 'company')
         if (!company) return { ok: false, error: 'company_required' }
         const jobTitle = toolString(args, 'jobTitle') || toolString(args, 'job_title')
-        const current = currentThreadInfo()
-        const norm = (value: string) => value.replace(/\s+/g, '').toLowerCase()
-        const alreadyOpen = !!current.company && norm(current.company).includes(norm(company)) &&
-          (!jobTitle || norm(current.jobTitle).includes(norm(jobTitle)))
-        if (!alreadyOpen) {
-          const r = openThread(company, jobTitle)
-          if (r !== 'ok') return { ok: false, error: r }
-          await new Promise((res) => setTimeout(res, 900))
-        }
+        const r = await openThreadConfirmed(company, jobTitle)
+        if (r !== 'ok') return { ok: false, error: r }
         const info = currentThreadInfo()
         return { ok: !!info.company || !!info.jobTitle, data: info, error: info.jobTitle ? undefined : 'header_incomplete' }
       },

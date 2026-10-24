@@ -808,7 +808,7 @@ async function findThreadByScrolling(
  *
  * @returns 'ok' 已触发切换 | 'not-found' 无匹配 | 'ambiguous' 多条匹配 | 'failed' 切换失败
  */
-export function openThread(company: string, jobTitle = ''): 'ok' | 'not-found' | 'ambiguous' | 'failed' {
+function findThreadToOpen(company: string, jobTitle: string): ChatThread | 'not-found' | 'ambiguous' {
   const threads = listThreads()
   const matches = threads.filter((thread) => {
     if (threadRowMatchesText(thread, company, jobTitle)) return true
@@ -823,8 +823,10 @@ export function openThread(company: string, jobTitle = ''): 'ok' | 'not-found' |
     diag('CHAT', 'openThread 目标不唯一', { matches: matches.length })
     return 'ambiguous'
   }
-  const hit = matches[0]
+  return matches[0]
+}
 
+function activateThread(hit: ChatThread): 'ok' | 'failed' {
   try {
     if (!switchThreadViaVue(hit.el)) realClick(hit.el)
     diag('CHAT', 'openThread 已切换')
@@ -833,6 +835,42 @@ export function openThread(company: string, jobTitle = ''): 'ok' | 'not-found' |
     diag('CHAT', 'openThread 切换异常', { errorType: (e as Error).name || 'Error' })
     return 'failed'
   }
+}
+
+export function openThread(company: string, jobTitle = ''): 'ok' | 'not-found' | 'ambiguous' | 'failed' {
+  const target = findThreadToOpen(company, jobTitle)
+  return typeof target === 'string' ? target : activateThread(target)
+}
+
+/** Tool calls must observe the intended header before a subsequent send is allowed. */
+export async function openThreadConfirmed(company: string, jobTitle = ''): Promise<'ok' | 'not-found' | 'ambiguous' | 'failed' | 'thread_not_confirmed'> {
+  assertToolExecutionActive()
+  // Resolve uniqueness even when a matching header is already open: company alone cannot identify an HR.
+  const target = findThreadToOpen(company, jobTitle)
+  if (typeof target === 'string') return target
+  const row = readRowJobInfo(target.el)
+  const norm = (value: string) => value.replace(/\s+/g, '').toLowerCase()
+  const expected = {
+    company: norm(row.brandName || company),
+    hrName: norm(row.hrName || target.name),
+    jobTitle: norm(row.title || target.jobTitle || jobTitle),
+  }
+  // Missing identity is not evidence that the current conversation is the requested one.
+  if (!expected.company || !expected.hrName || !expected.jobTitle) return 'thread_not_confirmed'
+  const confirmed = () => {
+    const header = currentThreadInfo()
+    return norm(header.company) === expected.company && norm(header.hrName) === expected.hrName && norm(header.jobTitle) === expected.jobTitle
+  }
+  if (confirmed()) return 'ok'
+  const activated = activateThread(target)
+  assertToolExecutionActive()
+  if (activated !== 'ok') return activated
+  for (let attempt = 0; attempt <= 15; attempt++) {
+    assertToolExecutionActive()
+    if (confirmed()) return 'ok'
+    if (attempt < 15) await delay(200, 200)
+  }
+  return 'thread_not_confirmed'
 }
 
 /** 读当前打开会话的消息（区分 hr / me）。会先滚动到底部确保全部加载。 */

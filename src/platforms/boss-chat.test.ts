@@ -1,4 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+
+// Page contracts do not exercise the legacy network logger or its unauthenticated retry queue.
+vi.mock('../logger', () => ({ diag: vi.fn() }))
+
 import {
   classifyCard,
   clickCard,
@@ -11,6 +15,7 @@ import {
   listPendingCardKinds,
   listResumeOptions,
   openThread,
+  openThreadConfirmed,
   readMessages,
   selectResumeRowByIndex,
   resumeDialogKind,
@@ -18,6 +23,7 @@ import {
   threadRowMatchesText,
 } from './boss-chat'
 import { normalizeAgentPolicy } from '../contact-policy'
+import { installToolExecutionGuard } from '../tool-execution-guard'
 
 describe('BOSS interaction card classification', () => {
   it('does not classify phone interview cards as contact exchange', () => {
@@ -771,7 +777,7 @@ describe('resume dialog false positives', () => {
 })
 
 describe('thread matching', () => {
-  it('opens the unique requested job from row text or component data', () => {
+  it('opens a unique row and confirms its HR, company and job after the header changes', async () => {
     const row = { company: '江苏迈泉科技人事专员', jobTitle: '', name: '周女士' }
     expect(threadRowMatchesText(row, '江苏迈泉科技', '人事专员')).toBe(true)
     expect(threadRowMatchesText(row, '江苏迈泉科技')).toBe(true)
@@ -788,13 +794,32 @@ describe('thread matching', () => {
     expect(target).toHaveBeenCalledTimes(1)
     expect(wrong).not.toHaveBeenCalled()
     rows[1].querySelector('.name-box')!.textContent = '江苏迈泉科技'
-    Object.assign(rows[1], { __vue__: { handleClick: target, boss: { securityId: 'target', brandName: '江苏迈泉科技', positionName: '人事专员' } } })
+    Object.assign(rows[1], { __vue__: { handleClick: target, boss: { securityId: 'target', name: '周女士', brandName: '江苏迈泉科技', positionName: '人事专员' } } })
     expect(openThread('江苏迈泉科技', '人事专员')).toBe('ok')
     expect(target).toHaveBeenCalledTimes(2)
     expect(wrong).not.toHaveBeenCalled()
+    document.body.insertAdjacentHTML('beforeend', '<section id="header"><span class="name-text">吴先生</span><span class="company">江苏迈泉科技</span><span class="position-name">纯客服</span></section>')
+    vi.spyOn(document.querySelector('#header .company')!, 'getBoundingClientRect').mockReturnValue({
+      x: 100, y: 0, top: 0, left: 100, right: 300, bottom: 40, width: 200, height: 40, toJSON: () => ({}),
+    })
+    vi.useFakeTimers()
+    try {
+      target.mockImplementationOnce(() => { setTimeout(() => {
+        document.querySelector('#header .name-text')!.textContent = '周女士'
+        document.querySelector('#header .position-name')!.textContent = '人事专员'
+      }, 400) })
+      let finished = false
+      const result = openThreadConfirmed('江苏迈泉科技', '人事专员').then(value => { finished = true; return value })
+      await vi.advanceTimersByTimeAsync(200)
+      expect(finished).toBe(false)
+      await vi.advanceTimersByTimeAsync(200)
+      expect(await result).toBe('ok')
+      expect(target).toHaveBeenCalledTimes(3)
+      expect(wrong).not.toHaveBeenCalled()
+    } finally { vi.useRealTimers() }
   })
 
-  it('never opens a different job or the first of multiple matching threads', () => {
+  it('refuses ambiguity, missing identities, stale headers and cancelled confirmation', async () => {
     const row = { company: '江苏迈泉科技纯客服', jobTitle: '', name: '周女士' }
     expect(threadRowMatchesText(row, '江苏迈泉科技', '人事专员')).toBe(false)
     document.body.innerHTML = `<ul class="user-list">
@@ -806,6 +831,31 @@ describe('thread matching', () => {
     expect(openThread('江苏迈泉科技', '人事专员')).toBe('not-found')
     expect(openThread('江苏迈泉科技')).toBe('ambiguous')
     expect(openThread('江苏迈泉科技', '纯客服')).toBe('ambiguous')
+    expect(await openThreadConfirmed('江苏迈泉科技', '纯客服')).toBe('ambiguous')
     expect(select).not.toHaveBeenCalled()
+    document.querySelectorAll('li')[1].remove()
+    document.body.insertAdjacentHTML('beforeend', '<section id="header"><span class="name-text">周女士</span><span class="company">江苏迈泉科技</span><span class="position-name">纯客服</span></section>')
+    vi.spyOn(document.querySelector('#header .company')!, 'getBoundingClientRect').mockReturnValue({
+      x: 100, y: 0, top: 0, left: 100, right: 300, bottom: 40, width: 200, height: 40, toJSON: () => ({}),
+    })
+    vi.useFakeTimers()
+    try {
+      const stale = openThreadConfirmed('江苏迈泉科技', '纯客服')
+      await vi.runAllTimersAsync()
+      expect(await stale).toBe('thread_not_confirmed')
+      expect(select).toHaveBeenCalledTimes(1)
+      document.querySelector('.name-text')!.textContent = ''
+      expect(await openThreadConfirmed('江苏迈泉科技', '纯客服')).toBe('thread_not_confirmed')
+      expect(select).toHaveBeenCalledTimes(1)
+      document.querySelector('.name-text')!.textContent = '吴先生'
+      let cancelled = false
+      installToolExecutionGuard(() => { if (cancelled) throw new Error('page_execution_cancelled') })
+      const pending = openThreadConfirmed('江苏迈泉科技', '纯客服')
+      cancelled = true
+      const rejection = expect(pending).rejects.toThrow('page_execution_cancelled')
+      await vi.runAllTimersAsync()
+      await rejection
+      expect(select).toHaveBeenCalledTimes(2)
+    } finally { installToolExecutionGuard(null); vi.useRealTimers() }
   })
 })

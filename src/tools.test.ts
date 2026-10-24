@@ -7,7 +7,7 @@ vi.mock('./platforms/boss-chat', () => ({
   readMessages: vi.fn(async () => [{ sender: 'hr', content: 'hi' }]),
   currentThreadInfo: vi.fn(() => ({ company: 'A', jobTitle: 'B', salary: '', city: '' })),
   onChatPage: vi.fn(() => true),
-  openThread: vi.fn(() => 'ok'),
+  openThreadConfirmed: vi.fn(async () => 'ok'),
   clickCard: vi.fn(async () => true),
   listPendingCardKinds: vi.fn(() => [{ kind: 'resume_request', questionLength: 10 }]),
   listPendingCardsStable: vi.fn(async () => [{ kind: 'resume_request', questionLength: 10 }]),
@@ -25,7 +25,7 @@ vi.mock('./api', () => ({ fetchGreeting: vi.fn(async () => ''), recordApplicatio
 
 import { diag } from './logger'
 import { callTool, toolCatalog } from './tools'
-import { currentThreadInfo, openThread, sendMessageText } from './platforms/boss-chat'
+import { openThreadConfirmed, sendMessageText } from './platforms/boss-chat'
 import { detectPlatform } from './platforms/factory'
 import { fetchGreeting, recordApplication } from './api'
 import { loadConfig } from './config'
@@ -75,25 +75,26 @@ describe('agent tools', () => {
 })
 
 describe('chain tools', () => {
-  it('reports page state and only reuses the requested thread header', async () => {
+  it('reports page state and waits for target confirmation before returning either thread tool', async () => {
     const r = await callTool('get_page_state', {})
     expect(r.ok).toBe(true)
     expect(r.data).toMatchObject({ chat: true, thread: { company: 'A', jobTitle: 'B' } })
-    vi.mocked(openThread).mockClear()
-    expect(await callTool('read_thread_header', { company: 'A', jobTitle: 'B' })).toMatchObject({ ok: true, data: { jobTitle: 'B' } })
-    expect(openThread).not.toHaveBeenCalled()
-    vi.useFakeTimers()
-    try {
-      vi.mocked(currentThreadInfo)
-        .mockReturnValueOnce({ company: 'A', jobTitle: 'B' } as never)
-        .mockReturnValueOnce({ company: 'A', jobTitle: 'C' } as never)
-      const header = callTool('read_thread_header', { company: 'A', jobTitle: 'C' })
-      await vi.runAllTimersAsync()
-      expect(await header).toMatchObject({ ok: true, data: { jobTitle: 'C' } })
-      expect(openThread).toHaveBeenLastCalledWith('A', 'C')
-      vi.mocked(openThread).mockReturnValueOnce('ambiguous')
-      expect(await callTool('read_thread_header', { company: 'A', jobTitle: 'C' })).toEqual({ ok: false, error: 'ambiguous' })
-    } finally { vi.useRealTimers() }
+    for (const name of ['open_thread', 'read_thread_header']) {
+      let release!: () => void
+      const confirmed = new Promise<void>(resolve => { release = resolve })
+      vi.mocked(openThreadConfirmed).mockImplementationOnce(async () => { await confirmed; return 'ok' })
+      let finished = false
+      const result = callTool(name, { company: 'A', jobTitle: 'B' }).then(value => { finished = true; return value })
+      await Promise.resolve()
+      expect(finished).toBe(false)
+      expect(openThreadConfirmed).toHaveBeenLastCalledWith('A', 'B')
+      release()
+      expect((await result).ok).toBe(true)
+    }
+    vi.mocked(openThreadConfirmed).mockResolvedValueOnce('ambiguous')
+    expect(await callTool('read_thread_header', { company: 'A', jobTitle: 'B' })).toEqual({ ok: false, error: 'ambiguous' })
+    vi.mocked(openThreadConfirmed).mockResolvedValueOnce('thread_not_confirmed')
+    expect(await callTool('open_thread', { company: 'A', jobTitle: 'B' })).toMatchObject({ ok: false, error: 'thread_not_confirmed' })
   })
 
   it('requires a keyword before navigating to search', async () => {
