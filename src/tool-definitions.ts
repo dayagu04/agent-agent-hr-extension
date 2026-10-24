@@ -188,18 +188,41 @@ export function createToolDefinitions(runtime: ToolRuntime): ToolSpec[] {
     },
     {
       name: 'scan_jobs',
-      description: '扫描当前职位列表页的岗位（只读；withDetail=true 时读 JD，较慢）',
+      description: '扫描当前职位列表页的岗位；offset/limit 分批返回，withDetail=true 时默认且最多读取 10 个 JD，用 nextOffset 继续',
       exampleArgs: { withDetail: false },
       async run(args) {
+        if ((args.offset !== undefined && (typeof args.offset !== 'number' || !Number.isSafeInteger(args.offset) || args.offset < 0 || args.offset > 10000)) ||
+            (args.limit !== undefined && (typeof args.limit !== 'number' || !Number.isSafeInteger(args.limit) || args.limit < 1 || args.limit > 100))) {
+          return { ok: false, error: 'invalid_arguments' }
+        }
         const platform = runtime.detectPlatform()
         if (!platform) return { ok: false, error: 'platform_not_supported' }
-        const jobs = await platform.scanJobs({ withDetail: args.withDetail === true })
+        // Discover cards before selecting a batch; never read every JD only to discard most of them.
+        const jobs = await platform.scanJobs()
+        const offset = (args.offset as number | undefined) ?? 0
+        const withDetail = args.withDetail === true
+        // Preserve the legacy full-list response unless callers request pagination or JD detail.
+        const limit = withDetail ? Math.min((args.limit as number | undefined) ?? 10, 10) : (args.limit as number | undefined) ?? jobs.length
+        const selected = jobs.slice(offset, offset + limit)
+        const reader = (platform as BasePlatform & { readJobDetail?: (card: JobCard) => Promise<string> }).readJobDetail
+        if (withDetail && typeof reader === 'function') {
+          for (let index = 0; index < selected.length; index++) {
+            const card = selected[index]
+            selected[index] = { ...card, jd: await reader.call(platform, card) }
+          }
+        }
+        const hasMore = offset + selected.length < jobs.length
         // 返回体可能很大：只给结构化字段，不带 DOM 引用
         return {
           ok: true,
           data: {
-            count: jobs.length,
-            jobs: jobs.map((j) => ({
+            count: selected.length,
+            total: jobs.length,
+            offset,
+            limit,
+            hasMore,
+            nextOffset: hasMore ? offset + selected.length : null,
+            jobs: selected.map((j) => ({
               jobId: j.platformJobId,
               company: j.company,
               title: j.title,

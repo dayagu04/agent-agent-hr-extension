@@ -141,9 +141,9 @@ describe('apply_job', () => {
   })
 })
 
-describe('job id lookup tolerance', () => {
-  it('accepts the short data-jobid when the full encrypted id is known', async () => {
-    const readJobDetail = vi.fn(async () => 'JD 全文')
+describe('job lookup and bounded scans', () => {
+  it('resolves a short job id and reads only the requested detail batch', async () => {
+    const readJobDetail = vi.fn(async (_card: { platformJobId: string }) => 'JD 全文')
     vi.mocked(detectPlatform).mockReturnValue({
       code: 'zhipin',
       scanJobs: async () => [{ platformJobId: '628b8fca4a28278e0nx40ti6EFJX', title: 'x', company: 'y' }],
@@ -153,6 +153,38 @@ describe('job id lookup tolerance', () => {
     const r = await callTool('read_job_detail', { jobId: '628b8fca4a28278e0n' })
     expect(r.ok).toBe(true)
     expect(readJobDetail).toHaveBeenCalledTimes(1)
+
+    const cards = Array.from({ length: 13 }, (_, index) => ({ platformJobId: `j${index}`, title: '开发', company: 'A', cardElement: document.createElement('li') }))
+    const scanJobs = vi.fn(async () => cards)
+    readJobDetail.mockClear().mockImplementation(async () => '职责'.repeat(2000))
+    vi.mocked(detectPlatform).mockReturnValue({ code: 'zhipin', scanJobs, readJobDetail } as never)
+    const full = await callTool('scan_jobs', {})
+    expect(full).toMatchObject({ ok: true, data: { count: 13, total: 13, offset: 0, limit: 13, hasMore: false, nextOffset: null } })
+    expect(readJobDetail).not.toHaveBeenCalled()
+
+    const first = await callTool('scan_jobs', { withDetail: true })
+    expect(first).toMatchObject({ ok: true, data: { count: 10, total: 13, offset: 0, limit: 10, hasMore: true, nextOffset: 10 } })
+    expect(readJobDetail.mock.calls.map(([card]) => card.platformJobId)).toEqual(cards.slice(0, 10).map(card => card.platformJobId))
+    expect(scanJobs).toHaveBeenLastCalledWith()
+    expect(new TextEncoder().encode(JSON.stringify(first)).length).toBeLessThan(200000)
+    expect(JSON.stringify(first)).not.toContain('cardElement')
+
+    readJobDetail.mockClear()
+    expect(await callTool('scan_jobs', { withDetail: true, offset: 10, limit: 2 })).toMatchObject({
+      ok: true, data: { count: 2, total: 13, offset: 10, limit: 2, hasMore: true, nextOffset: 12, jobs: [{ jobId: 'j10', jdLength: 4000 }, { jobId: 'j11', jdLength: 4000 }] },
+    })
+    expect(readJobDetail.mock.calls.map(([card]) => card.platformJobId)).toEqual(['j10', 'j11'])
+    expect(await callTool('scan_jobs', { withDetail: true, offset: 12, limit: 100 })).toMatchObject({
+      ok: true, data: { count: 1, total: 13, offset: 12, limit: 10, hasMore: false, nextOffset: null, jobs: [{ jobId: 'j12' }] },
+    })
+    readJobDetail.mockClear()
+    expect(await callTool('scan_jobs', { withDetail: true, offset: 100 })).toMatchObject({
+      ok: true, data: { count: 0, total: 13, offset: 100, limit: 10, hasMore: false, nextOffset: null, jobs: [] },
+    })
+    expect(readJobDetail).not.toHaveBeenCalled()
+    scanJobs.mockClear()
+    expect(await callTool('scan_jobs', { limit: 0 })).toEqual({ ok: false, error: 'invalid_arguments' })
+    expect(scanJobs).not.toHaveBeenCalled()
   })
 })
 
@@ -200,10 +232,13 @@ describe('MV3 page boundary', () => {
       ['select_filters', { filters: [{ group: '经验' }] }, 'invalid_arguments'],
       ['send_resume', { resumeIndex: -1 }, 'invalid_arguments'],
       ['open_search', { keyword: '开发', page: 1.1 }, 'invalid_arguments'],
+      ['scan_jobs', { offset: -1 }, 'invalid_arguments'],
+      ['scan_jobs', { limit: 0 }, 'invalid_arguments'],
       ['reload_page', { force: 'false' }, 'invalid_arguments'],
     ] as const) {
       expect(validateToolArgs(name, args)).toEqual({ ok: false, error })
     }
+    expect(validateToolArgs('scan_jobs', { withDetail: true, offset: 10, limit: 5 })).toEqual({ ok: true })
     const location = { protocol: 'https:', hostname: 'www.zhipin.com' }
     vi.stubGlobal('location', location)
     vi.mocked(sendMessageText).mockClear()

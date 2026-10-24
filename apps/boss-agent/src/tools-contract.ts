@@ -9,7 +9,7 @@ const thread = { company: string(), jobTitle: string(), job_title: string() }
 const object = (properties: Record<string, Schema> = {}, required: string[] = []): Schema => ({ type: 'object', properties, required, additionalProperties: false })
 const parameterSchemas: Record<string, Schema> = {
   open_search: object({ keyword: string(), cityCode: string(32), page: { type: 'integer', minimum: 1, maximum: 10000 } }, ['keyword']),
-  scan_jobs: object({ withDetail: boolean }),
+  scan_jobs: object({ withDetail: boolean, offset: { type: 'integer', minimum: 0, maximum: 10000 }, limit: { type: 'integer', minimum: 1, maximum: 100 } }),
   read_job_detail: object({ jobId: string() }, ['jobId']),
   apply_job: object({ jobId: string() }, ['jobId']),
   select_filters: object({ filters: { type: 'array', minItems: 1, maxItems: 20, items: object({ group: { ...string(), minLength: 1 }, option: { ...string(), minLength: 1 } }, ['group', 'option']) } }, ['filters']),
@@ -33,7 +33,7 @@ export const TOOL_CATALOG: ToolDeclaration[] = [
   { name: 'send_message', description: '给当前会话发一条文本（不可撤回）', irreversible: true, parameters: parameterSchemas.send_message || object() },
   { name: 'send_resume', description: '给当前会话发附件简历（resumeName 可选；不可撤回）', irreversible: true, parameters: parameterSchemas.send_resume || object() },
   { name: 'delete_thread', description: '删除指定会话（company 必填；不可撤回）', irreversible: true, parameters: parameterSchemas.delete_thread || object() },
-  { name: 'scan_jobs', description: '扫描当前职位列表页的岗位（只读；withDetail=true 时读 JD，较慢）', irreversible: false, parameters: parameterSchemas.scan_jobs || object() },
+  { name: 'scan_jobs', description: '扫描当前职位列表页。offset 从 0 起，limit=1..100；withDetail=true 时默认且最多 10 条，返回有效 limit 和 total/hasMore/nextOffset，用 nextOffset 继续读取。无明细且未传 limit 时保留整页列表。', irreversible: false, parameters: parameterSchemas.scan_jobs || object() },
   { name: 'read_filters', description: '读取搜索页筛选条件（分组 + 可选值 + 当前选中）', irreversible: false, parameters: parameterSchemas.read_filters || object() },
   { name: 'select_filters', description: '按「分组 → 选项」点选筛选项（如 工作经验=3-5年），可传多个', irreversible: true, parameters: parameterSchemas.select_filters || object() },
   { name: 'get_page_state', description: '当前页面状态：网址、是否聊天页、当前打开会话（公司/岗位/薪资/城市）', irreversible: false, parameters: parameterSchemas.get_page_state || object() },
