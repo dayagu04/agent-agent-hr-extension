@@ -52,7 +52,12 @@ async function token() {
 async function result(tok, id, timeout) {
   const response = await http('GET', `/api/plugin/tools/result/${id}`, undefined, tok, timeout)
   if (response.error) return { command_id: id, ...failure(response, 'result') }
-  if (response.status === 200 && typeof response.json?.ok === 'boolean') return { ...response.json, command_id: id }
+  if (response.status === 200 && typeof response.json?.ok === 'boolean') {
+    if (response.json.ok && response.json.tool === 'open_thread' && response.json.data === 'navigating') {
+      return { ...response.json, command_id: id, ok: false, pending: true, result_ready: false, state: 'navigating' }
+    }
+    return { ...response.json, command_id: id }
+  }
   if (response.status === 202 && ['queued', 'delivered', 'acked'].includes(response.json?.state)) {
     return { command_id: id, ok: false, pending: true, state: response.json.state }
   }
@@ -72,7 +77,7 @@ async function wait(tok, id) {
 }
 async function call(tok, name, args) {
   const requestId = process.env.AAH_REQUEST_ID || randomUUID()
-  if (!/^[A-Za-z0-9_.:-]{1,120}$/.test(requestId)) throw new Error('AAH_REQUEST_ID 必须为1至120位字母、数字或 _ . : -')
+  if (!/^[A-Za-z0-9_.:-]{1,128}$/.test(requestId)) throw new Error('AAH_REQUEST_ID 必须为1至128位字母、数字或 _ . : -')
   // A lost POST response must still be recoverable with the same request_id.
   console.error(JSON.stringify({ request_id: requestId, tool: name }))
   const response = await http('POST', '/api/plugin/tools/call', { name, args, request_id: requestId }, tok)

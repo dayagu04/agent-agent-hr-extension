@@ -504,6 +504,9 @@ export class BossRuntime {
             if (tool === 'open_thread' && receipt.result?.ok && receipt.result.data === 'ok' && !receipt.effects.length) {
               account.diagnosticOnly = false
               this.lastError = ''
+            } else if (tool === 'open_thread' && !receipt.result?.ok) {
+              account.diagnosticOnly = true
+              this.lastError = receipt.result?.error || 'thread_not_confirmed'
             }
           }
           this.phase = account.diagnosticOnly ? 'diagnostic_only' : 'tool_ready'
@@ -734,7 +737,7 @@ export class BossRuntime {
       this.finishPendingThread(account, result.result)
       account.diagnosticOnly = false
       this.lastError = ''
-    } else if (pending.attempts >= 5) {
+    } else if (result.result.error === 'ambiguous' || pending.attempts >= 5) {
       const error = result.result.error || 'pending_thread_not_ready'
       this.finishPendingThread(account, { ok: false, error, data: { navigationCompleted: false, verifyWith: ['list_threads', 'get_page_state'], recoverWith: 'open_thread' } })
       account.diagnosticOnly = true

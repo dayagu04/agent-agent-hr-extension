@@ -132,6 +132,13 @@ describe('MV3 production message dispatcher persistence and trust', () => {
     expect(stalled.navigations).toHaveLength(0)
     expect(await stalledRuntime.handle({ type: 'boss.status' }, popup)).toMatchObject({ phase: 'tool_ready', lastError: '' })
 
+    stalled.request(async path => path.endsWith('/heartbeat') ? heartbeat([command(13, 'open_thread', { company: 'missing' }), command(14), command(15, 'get_page_state', {})]) : { stored: true })
+    stalled.page(async invocation => invocation.name === 'open_thread' ? { result: { ok: false, error: 'thread_not_confirmed' } } : { result: { ok: true } })
+    stalled.advance()
+    await stalledRuntime.handle({ type: 'boss.tick' }, page)
+    expect(stalled.pageCalls.slice(-2).map(call => call.name)).toEqual(['open_thread', 'get_page_state'])
+    expect(stalled.calls.find(call => call.path.endsWith('/tools/result') && call.body.command_id === 14)?.body).toMatchObject({ ok: false, error: 'navigation_recovery_required' })
+
     // An old persisted target may not exist after navigation. Bound retries across worker restarts,
     // replace its intermediate result and keep diagnostics usable without sending to the wrong thread.
     const missing = harness({ [ACCOUNT]: { epoch: 'db-outbox-v2', ack: 8,
@@ -152,6 +159,16 @@ describe('MV3 production message dispatcher persistence and trust', () => {
     ])
     expect(missing.disk().accounts[ACCOUNT].ack).toBe(10)
     expect(await missingRuntime.handle({ type: 'boss.status' }, popup)).toMatchObject({ phase: 'diagnostic_only', lastError: 'pending_thread_not-found' })
+
+    const ambiguous = harness({ [ACCOUNT]: { epoch: 'db-outbox-v2', ack: 8, receipts: {}, pendingThread: { company: 'same-company', jobTitle: '', fromDocumentId: 'previous-doc' } } })
+    ambiguous.page(async () => ({ result: { ok: false, error: 'ambiguous' } }))
+    ambiguous.request(async path => path.endsWith('/heartbeat') ? heartbeat([]) : { stored: true })
+    const ambiguousRuntime = ambiguous.create()
+    await ambiguousRuntime.handle({ type: 'boss.tick' }, page)
+    ambiguous.advance()
+    await ambiguousRuntime.handle({ type: 'boss.tick' }, page)
+    expect(ambiguous.pageCalls).toHaveLength(1)
+    expect(await ambiguousRuntime.handle({ type: 'boss.status' }, popup)).toMatchObject({ phase: 'diagnostic_only', lastError: 'pending_thread_ambiguous' })
   })
 
   it('rejects forged page and popup senders and requires explicit host permission before accepting custom service credentials', async () => {

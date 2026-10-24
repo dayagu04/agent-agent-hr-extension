@@ -45,15 +45,25 @@ Agent function call {name, arguments, id}
 配套服务端 `GET /api/plugin/tools` 提供当前在线客户端声明的 function-call JSON Schema；旧客户端未声明参数时不伪造 schema。原有 `list_tools` 也返回扩展自己的参数目录。
 
 ```bash
+npm run tool -- status
 npm run tool -- functions
 npm run tool -- list
 npm run tool -- open_search '{"keyword":"客服","cityCode":"101010100"}'
-npm run tool -- scan_jobs '{"withDetail":true}'
+npm run tool -- scan_jobs '{"withDetail":true,"offset":0,"limit":10}'
 npm run tool -- read_job_detail '{"jobId":"<实际扫描得到的岗位ID>"}'
+# 查询已有调用，command_id 使用入队时输出的实际值：
+npm run tool -- result <command_id>
+npm run tool -- wait <command_id>
 # 投递、发消息、发简历、删会话均有真实副作用；按上游授权调用。
 ```
 
-CLI 默认连接本地 `127.0.0.1:8010`；用 `AAH_API`、`AAH_TOKEN` 或测试账号环境变量指定连接。上游应把同一次 function call 的稳定 ID 传作 `request_id`，HTTP 超时重试复用该 ID。不同调用不要复用 ID。
+CLI 默认连接本地 `127.0.0.1:8010`；用 `AAH_API`、`AAH_TOKEN` 或测试账号环境变量指定连接。远端必须使用 HTTPS 并显式提供凭据，不会发送本地默认账号。CLI 自动为新调用生成 `request_id`，入队前输出该 ID，入队后立即输出 `command_id`；上游可用 `AAH_REQUEST_ID` 传入同一次 function call 的稳定 ID。POST 响应丢失时复用原 ID 和原参数，结果等待超时则用 `result` / `wait` 查询原 command_id，不创建新调用。`AAH_HTTP_TIMEOUT` 控制单次 HTTP 超时（默认15秒），`AAH_WAIT` 控制结果等待（默认90秒）。查询尚未完成的结果退出码为2，失败/超时为1，成功为0。
+
+`status` 和 `functions` 都只读后端状态，不入队；`connected=false` 或目录为空表示没有已确认的执行端，后端登录成功不等于扩展已登录/连接。旧后端没有发现接口时 `functions` 明确返回 HTTP 404。首次安装和扩展登录仍在 popup 完成，之后用 CLI 调用工具，不需要操作 BOSS 页面。
+
+`scan_jobs` 返回 `count/total/offset/limit/hasMore/nextOffset`；`withDetail=true` 默认且最多每批10个岗位，继续使用返回的 `nextOffset`。不带明细且未指定 limit 时保留整页列表。offset 基于本次页面列表顺序，翻页、筛选或列表变化后应重新扫描，不能将它当作稳定快照游标。
+
+`open_thread` 指定岗位未匹配时返回 `not-found`，同公司多条匹配返回 `ambiguous`，不会退回首条；只有页面头部的公司、HR和岗位与目标一致才返回 `ok`。跨页调用首先回报 `navigating`，扩展最多尝试5次定位；完成后在同一个 command_id 上回报实际结果。CLI 的 `wait` 会等待过渡结束，`result` 对过渡状态返回 pending/退出码2。歧义立即终止。定位失败后仍可读状态/会话，发送等动作返回 `navigation_recovery_required`；用明确目标再次 `open_thread` 成功后恢复。旧油猴没有最终定位回报时，等待会超时，需通过 `read_thread_header` 另行确认。
 
 搜索/岗位工具返回岗位 ID、公司、名称、地点、薪资、JD 和来源 URL；详情和会话工具使用页面实际值。`send_message` 保留 `delivered/read/sending/failed/none` 回执；`sending` 已上屏，不能因尚无送达回执而重发。
 
