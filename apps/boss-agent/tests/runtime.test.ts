@@ -121,13 +121,37 @@ describe('MV3 production message dispatcher persistence and trust', () => {
     await stalledRuntime.handle({ type: 'boss.tick' }, page)
     expect(stalled.pageCalls.map(call => call.name)).toEqual(['get_page_state'])
     expect(stalled.navigations).toHaveLength(0)
-    expect(stalled.disk().accounts[ACCOUNT].ack).toBe(9)
-    expect(await stalledRuntime.handle({ type: 'boss.status' }, popup)).toMatchObject({ phase: 'diagnostic_only', lastError: 'navigation_reenable_required' })
-    await stalledRuntime.handle({ type: 'boss.enable', tabId: 12 }, popup)
+    expect(stalled.disk().accounts[ACCOUNT].ack).toBe(10)
+    expect(stalled.calls.find(call => call.path.endsWith('/tools/result') && call.body.command_id === 10)?.body).toMatchObject({ ok: false, error: 'navigation_recovery_required' })
+    expect(await stalledRuntime.handle({ type: 'boss.status' }, popup)).toMatchObject({ phase: 'diagnostic_only', lastError: 'navigation_not_confirmed' })
+    stalled.request(async path => path.endsWith('/heartbeat') ? heartbeat([command(11, 'open_thread', { company: 'company' }), command(12)]) : { stored: true })
+    stalled.page(async invocation => ({ result: { ok: true, data: invocation.name === 'open_thread' ? 'ok' : { delivery: 'delivered' } } }))
     stalled.advance()
     await stalledRuntime.handle({ type: 'boss.tick' }, page)
-    expect(stalled.pageCalls.map(call => call.name)).toEqual(['get_page_state', 'send_message'])
+    expect(stalled.pageCalls.map(call => call.name)).toEqual(['get_page_state', 'open_thread', 'send_message'])
     expect(stalled.navigations).toHaveLength(0)
+    expect(await stalledRuntime.handle({ type: 'boss.status' }, popup)).toMatchObject({ phase: 'tool_ready', lastError: '' })
+
+    // An old persisted target may not exist after navigation. Bound retries across worker restarts,
+    // replace its intermediate result and keep diagnostics usable without sending to the wrong thread.
+    const missing = harness({ [ACCOUNT]: { epoch: 'db-outbox-v2', ack: 8,
+      pendingThread: { company: 'missing', jobTitle: '', fromDocumentId: 'previous-doc' },
+      receipts: { 'db-outbox-v2:8': { commandId: 8, epoch: 'db-outbox-v2', tool: 'open_thread', state: 'done', irreversible: false, uploaded: true, effects: [] } },
+    } })
+    missing.page(async invocation => invocation.name === 'open_thread' ? { result: { ok: false, error: 'not-found' } } : { result: { ok: true } })
+    missing.request(async path => path.endsWith('/heartbeat') ? heartbeat([command(9), command(10, 'get_page_state', {})]) : { stored: true })
+    let missingRuntime = missing.create()
+    for (let attempt = 0; attempt < 5; attempt++) {
+      await missingRuntime.handle({ type: 'boss.tick' }, page)
+      missing.advance()
+      if (attempt === 1) missingRuntime = missing.create()
+    }
+    expect(missing.pageCalls.map(call => call.name)).toEqual([...Array(5).fill('open_thread'), 'get_page_state'])
+    expect(missing.calls.filter(call => call.path.endsWith('/tools/result')).map(call => ({ id: call.body.command_id, error: call.body.error }))).toEqual([
+      { id: 8, error: 'not-found' }, { id: 9, error: 'navigation_recovery_required' }, { id: 10, error: '' },
+    ])
+    expect(missing.disk().accounts[ACCOUNT].ack).toBe(10)
+    expect(await missingRuntime.handle({ type: 'boss.status' }, popup)).toMatchObject({ phase: 'diagnostic_only', lastError: 'pending_thread_not-found' })
   })
 
   it('rejects forged page and popup senders and requires explicit host permission before accepting custom service credentials', async () => {

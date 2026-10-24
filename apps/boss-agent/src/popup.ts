@@ -14,7 +14,7 @@ async function send(type: string, payload: Record<string, unknown> = {}): Promis
   return result as Status
 }
 function message(value: string, error = false): void { const target = element('message'); target.textContent = value; target.classList.toggle('error', error) }
-const phases: Record<string, string> = { page_frozen: 'BOSS 页面已冻结，等待恢复', awaiting_navigation: '等待页面跳转确认', diagnostic_only: '跳转未确认；仅可读取页面，重新启用后恢复执行', disabled: '已停用', signed_out: '未登录', awaiting_boss_page: '等待 BOSS 页面响应', tool_ready: '等待 Agent 工具调用', executing: '正在执行工具', awaiting_retry: '网络或页面异常，等待重试', protocol_unconfirmed: '服务端尚未确认工具协议', session_changed: '账号或执行端已切换' }
+const phases: Record<string, string> = { page_frozen: 'BOSS 页面已冻结，等待恢复', awaiting_navigation: '等待页面跳转确认', diagnostic_only: '目标未确认；可读取页面，通过 open_thread 确认会话后恢复', disabled: '已停用', signed_out: '未登录', awaiting_boss_page: '等待 BOSS 页面响应', tool_ready: '等待 Agent 工具调用', executing: '正在执行工具', awaiting_retry: '网络或页面异常，等待重试', protocol_unconfirmed: '服务端尚未确认工具协议', session_changed: '账号或执行端已切换' }
 function render(next: Status): void {
   status = next
   element('account').textContent = next.authenticated ? `当前账号：${next.username || next.userId}` : '尚未连接账号'

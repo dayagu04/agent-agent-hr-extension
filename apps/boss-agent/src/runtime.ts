@@ -9,7 +9,7 @@ const MAX_PENDING = 20
 const MAX_RESULT_BYTES = 200_000
 const MAX_STATE_BYTES = 7_000_000
 const PAGE_TIMEOUT_MS = 180_000
-const DIAGNOSTIC_TOOLS = new Set(['get_page_state', 'scan_jobs', 'read_job_detail', 'read_filters', 'list_threads', 'read_messages', 'list_pending_cards', 'read_thread_header', 'probe_overlays', 'probe_dom', 'probe_row', 'list_tools'])
+const DIAGNOSTIC_TOOLS = new Set(['open_thread', 'get_page_state', 'scan_jobs', 'read_job_detail', 'read_filters', 'list_threads', 'read_messages', 'list_pending_cards', 'read_thread_header', 'probe_overlays', 'probe_dom', 'probe_row', 'list_tools'])
 
 interface Config {
   apiBase: string
@@ -37,7 +37,7 @@ interface AccountState {
   epoch: string
   ack: number
   receipts: Record<string, Receipt>
-  pendingThread?: { company: string; jobTitle: string; fromDocumentId: string }
+  pendingThread?: { company: string; jobTitle: string; fromDocumentId: string; commandId?: number; epoch?: string; attempts?: number }
   navigation?: { tabId: number; fromDocumentId: string; startedAt: number }
   diagnosticOnly?: boolean
 }
@@ -448,15 +448,17 @@ export class BossRuntime {
         if (sameDocument) {
           this.lastError = 'navigation_not_confirmed'
           account.diagnosticOnly = true
-          account.pendingThread = undefined
+          this.finishPendingThread(account, fail('navigation_not_confirmed'))
         }
         account.navigation = undefined
         await this.save()
       }
       await this.flush(session, account)
       this.assertActive(session)
+      const hadPendingThread = !!account.pendingThread
       await this.resumePendingThread(session, account, next)
       this.assertActive(session)
+      if (hadPendingThread && !account.pendingThread) await this.flush(session, account)
       const heartbeat = await this.request(session.config, '/api/plugin/heartbeat', {
         platform: 'zhipin', version: this.api.runtime.getManifest().version,
         protocol_version: 2, capabilities: ['command_ack_v2', 'tools_v1'], tools: TOOL_CATALOG,
@@ -483,7 +485,6 @@ export class BossRuntime {
         const tool = String(object(command.payload).name || '')
         const declaration = TOOL_CATALOG.find(item => item.name === tool)
         if (!declaration) { this.lastError = 'unknown_tool'; break }
-        if (account.diagnosticOnly && !DIAGNOSTIC_TOOLS.has(tool)) { this.phase = 'diagnostic_only'; this.lastError = 'navigation_reenable_required'; break }
         const key = receiptKey(epoch, command.id)
         let receipt = account.receipts[key]
         if (!receipt) {
@@ -493,7 +494,18 @@ export class BossRuntime {
           receipt = { commandId: command.id, epoch, tool, state: 'started', irreversible: declaration.irreversible, uploaded: false, effects: [], document: { tabId: next.tabId, documentId: next.documentId } }
           account.receipts[key] = receipt
           await this.save() // The started receipt always reaches disk before any page action.
-          await this.execute(session, account, receipt, object(command.payload).args, next)
+          if (account.diagnosticOnly && !DIAGNOSTIC_TOOLS.has(tool)) {
+            // A known but unsafe action gets a terminal refusal, so it cannot block later diagnostics.
+            receipt.result = fail('navigation_recovery_required')
+            receipt.state = 'done'
+            await this.save()
+          } else {
+            await this.execute(session, account, receipt, object(command.payload).args, next)
+            if (tool === 'open_thread' && receipt.result?.ok && receipt.result.data === 'ok' && !receipt.effects.length) {
+              account.diagnosticOnly = false
+              this.lastError = ''
+            }
+          }
           this.phase = account.diagnosticOnly ? 'diagnostic_only' : 'tool_ready'
         }
         if (receipt.state !== 'done') { receipt.state = 'done'; receipt.result = this.reconciliation(tool); await this.save() }
@@ -668,7 +680,7 @@ export class BossRuntime {
         item.started = true
         if (item.effect.kind === 'navigate' && !bossUrl(item.effect.url)) { item.done = true; this.lastError = 'navigation_origin_forbidden'; await this.save(); continue }
         if (item.effect.kind === 'navigate' && item.effect.pendingThread) {
-          account.pendingThread = { ...item.effect.pendingThread, fromDocumentId: this.connection?.documentId || '' }
+          account.pendingThread = { ...item.effect.pendingThread, fromDocumentId: this.connection?.documentId || '', commandId: receipt.commandId, epoch: receipt.epoch, attempts: 0 }
         }
         account.navigation = { tabId: config.tabId, fromDocumentId: this.connection?.documentId || '', startedAt: this.now() }
         await this.save()
@@ -689,16 +701,47 @@ export class BossRuntime {
     if (compacted) await this.save()
     if (effectFailure) throw effectFailure
   }
+  private finishPendingThread(account: AccountState, result: ToolResult): void {
+    const pending = account.pendingThread
+    if (!pending) return
+    const receipt = account.receipts[receiptKey(pending.epoch ?? account.epoch, pending.commandId ?? account.ack)]
+    if (receipt?.tool === 'open_thread') {
+      receipt.result = result
+      receipt.uploaded = false // Replace the intermediate "navigating" result with the actual outcome.
+    }
+    account.pendingThread = undefined
+  }
   private async resumePendingThread(session: Session, account: AccountState, connection: PageConnection): Promise<void> {
     const pending = account.pendingThread
     if (!pending || pending.fromDocumentId === connection.documentId) return
+    if ((pending.attempts ?? 0) >= 5) {
+      this.finishPendingThread(account, fail('pending_thread_interrupted'))
+      account.diagnosticOnly = true
+      this.lastError = 'pending_thread_interrupted'
+      await this.save()
+      return
+    }
+    pending.attempts = (pending.attempts ?? 0) + 1
+    await this.save()
     const result = await this.page(session, connection, 'run', {
-      commandKey: await pageCommandKey(`${session.accountKey}|pending-thread|${account.epoch}|${account.ack}|${this.now()}`), name: 'open_thread',
+      commandKey: await pageCommandKey(`${session.accountKey}|pending-thread|${pending.epoch ?? account.epoch}|${pending.commandId ?? account.ack}|${pending.attempts}`), name: 'open_thread',
       args: { company: pending.company, jobTitle: pending.jobTitle }, context: { defaultResumeName: session.config.defaultResumeName },
     }) as PageExecution
     this.assertActive(session)
-    // Opening a thread is read-only and may safely be retried while BOSS finishes its SPA load.
-    if (result.result.ok) { account.pendingThread = undefined; await this.save() }
-    else throw new Error(result.result.error || 'pending_thread_not_ready')
+    // A navigation response is not evidence that the target conversation opened.
+    const opened = result.result.ok && result.result.data === 'ok' && !result.effects?.length
+    if (opened) {
+      this.finishPendingThread(account, result.result)
+      account.diagnosticOnly = false
+      this.lastError = ''
+    } else if (pending.attempts >= 5) {
+      const error = result.result.error || 'pending_thread_not_ready'
+      this.finishPendingThread(account, { ok: false, error, data: { navigationCompleted: false, verifyWith: ['list_threads', 'get_page_state'], recoverWith: 'open_thread' } })
+      account.diagnosticOnly = true
+      this.lastError = `pending_thread_${error}`
+    } else {
+      throw new Error(result.result.error || 'pending_thread_not_ready')
+    }
+    await this.save()
   }
 }
