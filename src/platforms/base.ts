@@ -1,5 +1,6 @@
 // 平台抽象基类 —— 所有平台适配器继承此类
 import type { ApplyOutcome, JobCard, PlatformCode } from '../types'
+import { assertToolExecutionActive } from '../tool-execution-guard'
 
 /** 投递结果：区分平台已确认 / 无法确认 / 明确失败 */
 export interface ApplyResult {
@@ -58,9 +59,11 @@ export abstract class BasePlatform {
   // ---------- 通用工具 ----------
 
   /** 拟人随机延迟（防风控） */
-  protected delay(min: number, max: number): Promise<void> {
+  protected async delay(min: number, max: number): Promise<void> {
+    assertToolExecutionActive()
     const ms = min + Math.random() * (max - min)
-    return new Promise((r) => setTimeout(r, ms))
+    await new Promise((r) => setTimeout(r, ms))
+    assertToolExecutionActive()
   }
 
   /** 等待元素出现（轮询，超时返回 null） */
@@ -69,11 +72,19 @@ export abstract class BasePlatform {
     root: ParentNode = document,
     timeout = 8000,
   ): Promise<HTMLElement | null> {
-    return new Promise((resolve) => {
+    assertToolExecutionActive()
+    return new Promise((resolve, reject) => {
       const existing = root.querySelector(selector) as HTMLElement | null
       if (existing) return resolve(existing)
       const start = Date.now()
       const timer = setInterval(() => {
+        try {
+          assertToolExecutionActive()
+        } catch (error) {
+          clearInterval(timer)
+          reject(error)
+          return
+        }
         const el = root.querySelector(selector) as HTMLElement | null
         if (el) {
           clearInterval(timer)

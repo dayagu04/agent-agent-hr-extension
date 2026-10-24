@@ -9,7 +9,13 @@
 - 开发分支：从最新 `main` 拉 `codex/YYYY-MM-DD-任务短名`（日期 = 创建当日北京时间，之后不改）。
 - 不直接在 `main` 上开发，不从别的 `codex/*` 分支拉新分支（除非依赖其未合并改动）。
 
-## 开发闭环（全程不需要人工操作浏览器）
+## 两个独立扩展的开发
+
+先安装 `npm ci` 和 `npm --prefix apps/application-autofill ci`。`npm run build` 生成两个独立目录，`npm run package` 生成分别可安装的 ZIP；版本源、权限、账号和运行状态不得合并。路径改动只验证受影响产品，公共构建/依赖改动验证两者。
+
+BOSS MV3 通过已有 API 提供原子工具，function-call 参数和未知终态处理见 README/AGENTS。首次安装需要扩展管理页加载目录；更新 background/content/manifest 后重载扩展与页面。不能使用旧 userscript 的 new Function/CDN 开发加载方式。
+
+## 油猴兼容开发闭环
 
 ```bash
 npm ci
@@ -26,13 +32,13 @@ npm run dev:serve      # 后台常驻：源码改动自动重建，并给已安�
 4. 页面结构不确定时先用 `probe_dom` / `probe_overlays` / `probe_row` 读真实结构，再改选择器，不要猜。
 
 dev-serve 没开时，已安装的本地构建 1.5 秒内自动退回自身版本，照常可用。
-生产构建（`npm run build`）不含这段自动更新逻辑。本地调试时关闭该脚本在 Tampermonkey 里的远程自动更新，
+油猴生产构建（`npm run build:userscript`）不含这段自动更新逻辑。本地调试时关闭该脚本在 Tampermonkey 里的远程自动更新，
 避免 Release 版本覆盖本地构建。
 
 ## 提交
 
 - 一次提交只做一件事，信息写清「改了什么 / 为什么」，修 bug 时写上触发它的实测现象。
-- 涉及页面行为的改动，提交前 `package.json` 版本号 +1（`@version` 由构建从这里取）。
+- 开发 checkpoint 不自动 bump。按产品验收后由协调者更新相应应用版本；BOSS MV3 与网申分别使用各自 apps/package 和 manifest，根 package 保留旧油猴版本，不改主仓应用版本。
 - 不提交 `dist/`、`node_modules/`。
 
 ## 测试
@@ -44,6 +50,8 @@ dev-serve 没开时，已安装的本地构建 1.5 秒内自动退回自身版�
 
 ## 版本与发布
 
+BOSS MV3 使用 `boss-vX.Y.Z`，网申使用 `autofill-vX.Y.Z`；CI 分别验证和发布 ZIP，新产品 Release 不占用 legacy latest。下面 `v*`/userscript 命令仅属于旧油猴兼容通道。
+
 - 版本号 `0.MINOR.PATCH`：修复 / 小改进 PATCH+1，新增工具 / 协议变化 MINOR+1。
 - 发布：合并到 `main` → 打 tag → GitHub Actions（`.github/workflows/build-release.yml`）执行 typecheck、test、生产构建并发布 Release。
 
@@ -51,7 +59,7 @@ dev-serve 没开时，已安装的本地构建 1.5 秒内自动退回自身版�
 git tag v0.6.56 && git push origin v0.6.56
 ```
 
-- 生产构建用 `npm run build`（默认后端 `gudaya.chat`）；`build:local` 产物只装在开发浏览器里。
+- 油猴生产构建用 `npm run build:userscript`（默认后端 `gudaya.chat`）；`build:local` 产物只装在开发浏览器里。
 - 用户的 Tampermonkey 按 `@updateURL` + `@version` 自动更新，发布前确认 Release 里有 `.user.js`。
 - 插件与后端协议有兼容变化时，在主仓 roadmap（`docs/tampermonkey-plugin-roadmap.md`）记录插件版本窗口。
 

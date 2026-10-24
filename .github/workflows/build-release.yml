@@ -1,18 +1,39 @@
-name: Build & Release
+name: Extension checks and releases
 
 on:
   push:
     branches: [main]
-    tags: ['v*']
+    tags: ['boss-v*', 'autofill-v*', 'v*']
   pull_request:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
-  build:
+  select:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    outputs:
+      boss: ${{ steps.paths.outputs.boss }}
+      autofill: ${{ steps.paths.outputs.autofill }}
+      legacy: ${{ steps.paths.outputs.legacy }}
+      release: ${{ steps.paths.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - id: paths
+        run: node scripts/check-extension-paths.mjs
+
+  legacy-contracts:
+    needs: select
+    if: needs.select.outputs.boss == 'true' || needs.select.outputs.legacy == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -20,18 +41,100 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npm run typecheck
-      - run: npm test
-      - run: npm run build
+      - run: npm run typecheck:userscript
+      - run: npm run test:userscript
+
+  boss:
+    needs: select
+    if: needs.select.outputs.boss == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck:boss
+      - run: npm run test:boss
+      - run: npm run build:boss
+      - run: npm run package:boss
+      - run: unzip -t dist/packages/boss-agent-*.zip
       - uses: actions/upload-artifact@v4
         with:
-          name: userscript
-          path: dist/*.user.js
-      - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
+          name: boss-extension
+          path: dist/packages/boss-agent-*.zip
+          if-no-files-found: error
+
+  autofill:
+    needs: select
+    if: needs.select.outputs.autofill == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/application-autofill/package-lock.json
+      - run: npm --prefix apps/application-autofill ci
+      - run: npm run typecheck:autofill
+      - run: npm run build:autofill
+      - run: npm run test:autofill
+      - run: npm run package:autofill
+      - run: unzip -t dist/packages/application-autofill-*.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: autofill-extension
+          path: dist/packages/application-autofill-*.zip
+          if-no-files-found: error
+
+  legacy:
+    needs: select
+    if: needs.select.outputs.legacy == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build:userscript
+      - uses: actions/upload-artifact@v4
+        with:
+          name: legacy-userscript
+          path: dist/agent-agent-hr-tampermonkey.user.js
+          if-no-files-found: error
+
+  release:
+    needs: [select, legacy-contracts, boss, autofill, legacy]
+    if: >-
+      always() && startsWith(github.ref, 'refs/tags/') &&
+      needs.select.result == 'success' &&
+      !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.select.outputs.release == 'boss' && 'boss-extension' || needs.select.outputs.release == 'autofill' && 'autofill-extension' || 'legacy-userscript' }}
+          path: release
+      - name: Publish the tagged product only
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PRODUCT: ${{ needs.select.outputs.release }}
+        shell: bash
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/*.user.js \
-            --title "$GITHUB_REF_NAME" \
-            --notes-from-tag
+          if [ "$PRODUCT" = legacy ]; then
+            gh release create "$GITHUB_REF_NAME" release/*.user.js --title "$GITHUB_REF_NAME" --notes-from-tag --verify-tag --latest
+          else
+            # Existing userscripts use /releases/latest/download/*.user.js.
+            # Extension releases must never take over their update channel.
+            gh release create "$GITHUB_REF_NAME" release/*.zip --title "$GITHUB_REF_NAME" --notes-from-tag --verify-tag --latest=false
+          fi

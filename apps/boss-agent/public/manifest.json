@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "谷谷 BOSS 求职 Agent",
+  "version": "0.7.0",
+  "description": "把 BOSS 直聘页面的岗位、投递和会话能力提供给求职 Agent。",
+  "minimum_chrome_version": "114",
+  "permissions": ["storage", "scripting", "alarms"],
+  "host_permissions": ["https://www.zhipin.com/*", "https://gudaya.chat/*"],
+  "optional_host_permissions": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "content_scripts": [{ "matches": ["https://www.zhipin.com/*"], "js": ["content.js"], "run_at": "document_idle", "all_frames": false }],
+  "action": { "default_title": "谷谷 BOSS 求职 Agent", "default_popup": "popup.html" },
+  "content_security_policy": { "extension_pages": "script-src 'self'; object-src 'self'" }
+}

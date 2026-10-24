@@ -1,0 +1,47 @@
+:host { all: initial; }
+* { box-sizing: border-box; }
+.gugu-root { color: #252834; font: 14px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+button { font: inherit; cursor: pointer; }
+button:focus-visible { outline: 2px solid #6366f1; outline-offset: 2px; }
+.gugu-hidden { display: none !important; }
+.gugu-bubble { position: fixed; right: 24px; bottom: 24px; z-index: 2147483646; width: 52px; height: 52px; border: 0; border-radius: 18px; color: white; background: #5857db; box-shadow: 0 6px 20px #24244333; font-size: 23px; font-weight: 700; }
+.gugu-panel { position: fixed; right: 20px; bottom: 24px; width: min(360px, calc(100vw - 32px)); height: min(680px, calc(100vh - 48px)); display: flex; flex-direction: column; z-index: 2147483647; overflow: hidden; background: #fff; border: 1px solid #e5e5ed; border-radius: 18px; box-shadow: 0 14px 55px #1e20312e; }
+.gugu-panel.gugu-compact { width: min(280px, calc(100vw - 32px)); height: auto; }
+.gugu-compact .gugu-resume, .gugu-compact footer small { display: none; }
+.gugu-compact footer p:not(.error) { display: none; }
+header { display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; border-bottom: 1px solid #eeeef3; }
+header strong { display: flex; align-items: center; gap: 8px; font-size: 15px; }
+.gugu-logo { display: grid; place-items: center; width: 27px; height: 27px; color: #5857db; background: #f0efff; border-radius: 8px; }
+.gugu-header-actions { display: flex; gap: 4px; }
+.gugu-header-actions button { width: 28px; height: 28px; padding: 0; border: 0; background: transparent; color: #75788a; font-size: 21px; border-radius: 6px; }
+.gugu-header-actions button:hover { background: #f4f4f8; }
+.gugu-menu { position: absolute; top: 52px; right: 14px; z-index: 1; padding: 6px; min-width: 160px; background: white; border: 1px solid #e8e8f0; border-radius: 10px; box-shadow: 0 8px 22px #20223620; }
+.gugu-menu button { display: block; width: 100%; padding: 8px 12px; text-align: left; border: 0; background: transparent; color: #454858; border-radius: 5px; font-size: 13px; }
+.gugu-menu button:hover { background: #f4f3fc; }
+.gugu-resume { flex: 1; overflow-y: auto; overscroll-behavior: contain; padding: 6px 20px 20px; scrollbar-width: thin; scrollbar-color: #d7d6e8 transparent; }
+.gugu-resume section { padding: 15px 0 2px; }
+.gugu-resume h2 { font-size: 13px; margin: 0 0 10px; color: #5857a2; font-weight: 700; }
+.gugu-record + .gugu-record { border-top: 1px solid #efeff4; margin-top: 14px; padding-top: 14px; }
+.gugu-fact { display: flex; gap: 12px; margin: 5px 0; align-items: baseline; }
+.gugu-fact > span { flex: 0 0 66px; color: #9293a0; font-size: 12px; }
+.gugu-fact textarea { flex: 1; min-width: 0; width: 100%; margin: 0; padding: 3px 6px; border: 1px solid transparent; border-radius: 5px; background: #fafafd; color: #252834; resize: vertical; font-family: inherit; line-height: 1.75; font-size: 13px; }
+.gugu-fact textarea:hover { border-color: #e1e0ec; }
+.gugu-fact textarea:focus { outline: 2px solid #b9b6fa; background: #fff; }
+.gugu-fact textarea:disabled { opacity: .7; resize: none; }
+.gugu-draft-hint { font-size: 11px; color: #7a7c8c; margin: 12px 0 0; }
+.gugu-paragraph { display: block; margin-top: 9px; }
+.gugu-paragraph > span { display: block; margin-bottom: 4px; }
+.gugu-empty { padding: 45px 2px; color: #8a8c98; }
+.gugu-empty h2 { font-size: 19px; color: #353746; }
+.gugu-empty p { font-size: 13px; }
+.gugu-empty button { background: transparent; color: #5857db; border: 0; padding: 8px 0; font-size: 12px; }
+footer { padding: 12px 18px 13px; background: #fafafd; border-top: 1px solid #eeeef3; }
+footer p { margin: 0 0 9px; color: #7a7c8c; font-size: 12px; overflow-wrap: anywhere; }
+footer .error { color: #b04444; }
+.gugu-start { width: 100%; padding: 11px 16px; color: #fff; background: #5857db; border: 0; border-radius: 10px; font-size: 14px; font-weight: 600; }
+.gugu-start:hover { background: #4c4ac5; }
+.gugu-start:disabled { opacity: .55; cursor: wait; }
+footer small { display: block; text-align: center; margin-top: 7px; font-size: 10px; color: #aaaab6; }
+.gugu-debug { flex: none; max-height: 230px; overflow: auto; border-top: 1px solid #eaeaf0; padding: 10px 16px; font-size: 11px; color: #777989; }
+.gugu-debug pre { max-height: 120px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 10px/1.5 Consolas, monospace; }
+.gugu-debug button { font-size: 11px; padding: 5px 8px; border: 1px solid #e3e3eb; border-radius: 5px; background: white; color: #5857a2; margin-right: 6px; }

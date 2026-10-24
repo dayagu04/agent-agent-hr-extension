@@ -6,6 +6,7 @@
 // 红线：只在用户显式启动「会话托管」后运行。发给 HR 的消息不可撤回，
 // 全过程由后端 conversation_* 三表留痕（意图/回复/发送结果）供事后评判。
 import { diag } from '../logger'
+import { assertToolExecutionActive } from '../tool-execution-guard'
 import type { AgentPolicy, ContactChannel, PluginConfig } from '../types'
 import {
   markChatSent,
@@ -104,8 +105,11 @@ function allMatch(selectors: string[], root: ParentNode = document): HTMLElement
 }
 
 const text = (el: Element | null | undefined) => (el?.textContent || '').trim()
-const delay = (min: number, max: number) =>
-  new Promise((r) => setTimeout(r, min + Math.random() * (max - min)))
+const delay = async (min: number, max: number) => {
+  assertToolExecutionActive()
+  await new Promise((r) => setTimeout(r, min + Math.random() * (max - min)))
+  assertToolExecutionActive()
+}
 
 /** 从会话行 DOM 提取 BOSS 原生唯一标识（threadKey 与删除定位共用同一来源）。 */
 function readBossId(el: HTMLElement): string {
@@ -154,6 +158,7 @@ export function onChatPage(): boolean {
  * @returns 是否成功触发切换
  */
 function switchThreadViaVue(el: HTMLElement): boolean {
+  assertToolExecutionActive()
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const vm = (el as any).__vue__
   if (!vm) return false
@@ -415,6 +420,7 @@ async function deleteThreadImpl(
   company: string,
   jobTitle = '',
   identity?: { bossId?: string; encryptJobId?: string },
+  onTarget?: (target: DeletedThreadTarget) => void,
 ): Promise<'ok' | 'not-found' | 'failed'> {
   const norm = (s: string) => s.replace(/\s+/g, '').toLowerCase()
   const target = norm(company)
@@ -426,6 +432,16 @@ async function deleteThreadImpl(
   if (!hit) {
     diag('CHAT', 'deleteThread 未找到会话（含滚动查找）')
     return 'not-found'
+  }
+  if (onTarget) {
+    // Capture the actual row before BOSS removes it; the background can then reconcile the exact job.
+    const info = readRowJobInfo(hit.el)
+    onTarget({
+      company: info.brandName || company || hit.company,
+      jobTitle: info.title || hit.jobTitle || jobTitle,
+      bossId: identity?.bossId || hit.bossId || '',
+      encryptJobId: identity?.encryptJobId || info.jobId || '',
+    })
   }
 
   // 删除结果校验按「身份是否还在列表里」判断：虚拟列表节点数恒定，
@@ -461,6 +477,7 @@ async function deleteThreadImpl(
     // 首选：直接调用该行组件自己的 deleteBoss()。
     // 它就是「删除」菜单项最终调用的方法，跳过全部 DOM 交互，
     // 且作用对象就是这一行，不存在删错会话的可能。
+    assertToolExecutionActive()
     if (deleteViaRowVue(hit.el)) {
       if (await confirmAndVerify('deleteViaRowVue')) return 'ok'
       diag('CHAT', 'deleteViaRowVue 调用成功但会话仍在列表，继续尝试点击路径')
@@ -640,14 +657,24 @@ async function locateRowByIndex(index: number): Promise<ChatThread | null> {
  * @param identity bossId（DOM 原生标识）/ encryptJobId（后端 Job.platform_job_id），
  *                 用于精确删除定位与后端对账，避免同公司多会话误删/误标。
  */
+export interface DeletedThreadTarget {
+  company: string
+  jobTitle: string
+  bossId?: string
+  encryptJobId?: string
+}
+
 export async function deleteThread(
   company: string,
   jobTitle = '',
   identity?: { bossId?: string; encryptJobId?: string },
+  afterDeleted?: (target: DeletedThreadTarget) => Promise<void>,
 ): Promise<'ok' | 'not-found' | 'failed'> {
-  const r = await deleteThreadImpl(company, jobTitle, identity)
+  let target: DeletedThreadTarget = { company, jobTitle, ...identity }
+  const r = await deleteThreadImpl(company, jobTitle, identity, afterDeleted ? (actual) => { target = actual } : undefined)
   if (r === 'ok') {
-    await afterConversationDeleted(company, jobTitle, 'manual', identity)
+    if (afterDeleted) await afterDeleted(target)
+    else await afterConversationDeleted(company, jobTitle, 'manual', identity)
   }
   return r
 }
@@ -776,30 +803,30 @@ async function findThreadByScrolling(
 /**
  * 在会话列表里定位并打开指定会话（供面板点 HR 卡片跳转用）。
  *
- * 匹配依据只能是公司名子串：列表项把「姓名+公司+职务」拼成一串且通常不含
- * 独立岗位名，无法按 company+jobTitle 精确匹配；同公司多岗位会命中第一个，
- * 这是 BOSS DOM 的信息量限制。
+ * 岗位名可能拼在整行文本中，也可能只存在行组件数据中。
+ * 显式岗位不能退回公司首条；匹配多条时拒绝切换，由调用方进一步限定目标。
  *
- * @returns 'ok' 已触发切换 | 'not-found' 列表里没有匹配项 | 'failed' 找到但切换失败
+ * @returns 'ok' 已触发切换 | 'not-found' 无匹配 | 'ambiguous' 多条匹配 | 'failed' 切换失败
  */
-export function openThread(company: string, jobTitle = ''): 'ok' | 'not-found' | 'failed' {
-  const norm = (s: string) => s.replace(/\s+/g, '').toLowerCase()
-  const target = norm(company)
-  if (!target) return 'not-found'
-
+function findThreadToOpen(company: string, jobTitle: string): ChatThread | 'not-found' | 'ambiguous' {
   const threads = listThreads()
-  // 先试「公司+岗位都能对上」，退回「仅公司对上」；列表项通常没有岗位名
-  const wanted = norm(jobTitle)
-  let hit = wanted
-    ? threads.find((t) => norm(t.company).includes(target) && norm(t.jobTitle).includes(wanted))
-    : undefined
-  if (!hit) hit = threads.find((t) => norm(t.company).includes(target))
-
-  if (!hit) {
+  const matches = threads.filter((thread) => {
+    if (threadRowMatchesText(thread, company, jobTitle)) return true
+    const info = readRowJobInfo(thread.el)
+    return threadRowMatchesText({ ...thread, company: info.brandName || thread.company, jobTitle: info.title || thread.jobTitle }, company, jobTitle)
+  })
+  if (!matches.length) {
     diag('CHAT', 'openThread 未找到会话', { candidateCount: Math.min(threads.length, 8) })
     return 'not-found'
   }
+  if (matches.length > 1) {
+    diag('CHAT', 'openThread 目标不唯一', { matches: matches.length })
+    return 'ambiguous'
+  }
+  return matches[0]
+}
 
+function activateThread(hit: ChatThread): 'ok' | 'failed' {
   try {
     if (!switchThreadViaVue(hit.el)) realClick(hit.el)
     diag('CHAT', 'openThread 已切换')
@@ -808,6 +835,42 @@ export function openThread(company: string, jobTitle = ''): 'ok' | 'not-found' |
     diag('CHAT', 'openThread 切换异常', { errorType: (e as Error).name || 'Error' })
     return 'failed'
   }
+}
+
+export function openThread(company: string, jobTitle = ''): 'ok' | 'not-found' | 'ambiguous' | 'failed' {
+  const target = findThreadToOpen(company, jobTitle)
+  return typeof target === 'string' ? target : activateThread(target)
+}
+
+/** Tool calls must observe the intended header before a subsequent send is allowed. */
+export async function openThreadConfirmed(company: string, jobTitle = ''): Promise<'ok' | 'not-found' | 'ambiguous' | 'failed' | 'thread_not_confirmed'> {
+  assertToolExecutionActive()
+  // Resolve uniqueness even when a matching header is already open: company alone cannot identify an HR.
+  const target = findThreadToOpen(company, jobTitle)
+  if (typeof target === 'string') return target
+  const row = readRowJobInfo(target.el)
+  const norm = (value: string) => value.replace(/\s+/g, '').toLowerCase()
+  const expected = {
+    company: norm(row.brandName || company),
+    hrName: norm(row.hrName || target.name),
+    jobTitle: norm(row.title || target.jobTitle || jobTitle),
+  }
+  // Missing identity is not evidence that the current conversation is the requested one.
+  if (!expected.company || !expected.hrName || !expected.jobTitle) return 'thread_not_confirmed'
+  const confirmed = () => {
+    const header = currentThreadInfo()
+    return norm(header.company) === expected.company && norm(header.hrName) === expected.hrName && norm(header.jobTitle) === expected.jobTitle
+  }
+  if (confirmed()) return 'ok'
+  const activated = activateThread(target)
+  assertToolExecutionActive()
+  if (activated !== 'ok') return activated
+  for (let attempt = 0; attempt <= 15; attempt++) {
+    assertToolExecutionActive()
+    if (confirmed()) return 'ok'
+    if (attempt < 15) await delay(200, 200)
+  }
+  return 'thread_not_confirmed'
 }
 
 /** 读当前打开会话的消息（区分 hr / me）。会先滚动到底部确保全部加载。 */
@@ -1027,7 +1090,7 @@ export async function readMessages(
  * 定位会话头部容器。
  *
  * 以 span.position-name（岗位名）为锚点向上找：.name-text 在列表项里也有，
- * 直接 querySelector 会命中列表第一项而不是头部；position-name 只存在于头部。
+ * 直接 querySelector 会命中列表第一项而不是头部；岗位锚点也必须排除列表行。
  */
 /** 该元素是否位于左侧会话列表项内部 */
 function insideThreadList(el: HTMLElement): boolean {
@@ -1035,6 +1098,16 @@ function insideThreadList(el: HTMLElement): boolean {
     if (el.closest(sel)) return true
   }
   return false
+}
+
+/** Reuse the measured position selectors without accepting a list row as the active header. */
+function headerPositionIn(root: ParentNode = document): HTMLElement | null {
+  for (const selector of SEL.headerPosition) {
+    for (const element of Array.from(root.querySelectorAll<HTMLElement>(selector))) {
+      if (!insideThreadList(element)) return element
+    }
+  }
+  return null
 }
 
 /**
@@ -1052,7 +1125,7 @@ function insideThreadList(el: HTMLElement): boolean {
  * 且容器不得包含任何列表项，越界即停在上一层。
  */
 function findChatHeader(): HTMLElement | null {
-  const pos = firstMatch(SEL.headerPosition)
+  const pos = headerPositionIn()
   if (!pos) return null
   let cur: HTMLElement | null = pos.parentElement
   for (let i = 0; i < 6 && cur; i++) {
@@ -1076,7 +1149,7 @@ export function currentThreadId(): string {
   // 必须排掉列表项里的 .name-text，否则拿到的恒是列表第一项的姓名，
   // 会话指纹就永远不变 —— 切换检测（sendText 的 expectThread 核对）随之失效
   const name = text(header ? headerNameIn(header) : null)
-  const pos = text(firstMatch(SEL.headerPosition))
+  const pos = text(header ? headerPositionIn(header) : null)
   return `${name}|${pos}`
 }
 
@@ -1093,7 +1166,8 @@ export function currentThreadInfo(): {
   salary: string
   city: string
 } {
-  const jobTitle = text(firstMatch(SEL.headerPosition))
+  const header = findChatHeader()
+  const jobTitle = text(header ? headerPositionIn(header) : null)
   // 薪资/城市取头部的，且排掉列表项里的同名 class（否则按文档顺序会
   // 拿到列表第一项的值）
   const pickHeaderField = (sels: string[]): string => {
@@ -1109,7 +1183,6 @@ export function currentThreadInfo(): {
   const salary = pickHeaderField(SEL.headerSalary)
   const city = pickHeaderField(SEL.headerCity)
 
-  const header = findChatHeader()
   if (!header) return { company: '', hrName: '', jobTitle, salary, city }
 
   const nameEl = headerNameIn(header)
@@ -1217,6 +1290,7 @@ async function sendText(content: string, expectThread?: string): Promise<boolean
     const baseline = countMyBubbles()
 
     // 发送：Enter 键盘事件（keydown+keyup，补 keyCode/which 兼容旧 handler）
+    assertToolExecutionActive()
     for (const type of ['keydown', 'keyup'] as const) {
       input.dispatchEvent(new KeyboardEvent(type, {
         key: 'Enter',
@@ -1236,6 +1310,7 @@ async function sendText(content: string, expectThread?: string): Promise<boolean
       // 兜底：找「发送」按钮（文本/aria/title/图标型，限定输入框附近，避免误点）
       const sendBtn = findSendButton(input)
       if (sendBtn) {
+        assertToolExecutionActive()
         sendBtn.click()
         await delay(300, 600)
         if (countMyBubbles() > baseline) via = 'button'

@@ -1,6 +1,6 @@
-# AGENTS.md — 工具层规范（唯一来源）
+# AGENTS.md — 双扩展边界与 BOSS 工具规范
 
-本仓库的目的是**把 BOSS 直聘页面能力封装成标准工具供上游 agent 调用**（产品形态见 [README](./README.md)）。
+本仓库管理两个独立扩展：`apps/boss-agent/` 把 BOSS 页面能力封装成标准工具供上游 Agent 调用，`apps/application-autofill/` 保留独立网申填写产品（详见 [README](./README.md)）。两个扩展分别维护 manifest、权限、登录、存储、版本、安装包和发布，不共享运行态。网申专属规则见其目录 AGENTS.md；原 `src/` userscript 保留兼容。
 本文件定义：工具是什么、怎么调、怎么新增、返回值怎么判、BOSS 页面的真实标记。
 新增任何面向 agent 的页面能力都按这里做，不另起一套。分支与发布见 [CONTRIBUTING.md](./CONTRIBUTING.md)。
 
@@ -9,8 +9,12 @@
 插件在 BOSS 页面里保持启用即可，开发者和 agent 都**不需要**在页面上点任何东西。
 
 ```bash
+npm run tool -- status                                  # 连接/版本/协议，只读不入队
+npm run tool -- functions                               # 在线扩展的 function-call 参数定义（配套后端）
 npm run tool -- list                                    # 插件当前上报的工具清单
 npm run tool -- read_thread_header '{"company":"某公司"}'
+npm run tool -- result <command_id>                     # 查询已入队命令，不重发
+npm run tool -- wait <command_id>                       # 继续等待原命令，不重发
 ```
 
 `scripts/tool.mjs` 走的就是 agent 用的两个接口：
@@ -47,7 +51,7 @@ agent（服务端决策）
 
 ## 2. 工具定义（唯一模板）
 
-在 `src/tools.ts` 的 `TOOLS` 数组里新增一项，字段固定如下：
+页面执行定义统一维护在 `src/tool-definitions.ts`，原 `src/tools.ts` 与 MV3 的 page-tools 通过不同运行环境适配。function-call 参数目录在 `apps/boss-agent/src/tools-contract.ts`。新增工具同步执行定义、参数 schema 与本文件，不维护两份分叉实现。字段示例：
 
 ```ts
 {
@@ -96,12 +100,14 @@ tool name=delete_thread status=error ms=120 error=not-found
 ## 5. 新增工具的做法（照抄即可）
 
 1. 页面动作写到 `src/platforms/<平台>.ts` 或专题模块（如 `search-filters.ts`），导出纯函数；
-2. 在 `src/tools.ts` 的 `TOOLS` 加一项，按第 2 节模板填全字段；
-3. 在 `src/tools.test.ts` 补两条：目录里出现、关键失败分支返回正确原因码；
-4. `npm run typecheck && npm test`；`npm run dev:serve` 自动重建，`npm run tool -- reload_page` 让页面换上新版本；
+2. 在共享工具工厂及 MV3 参数目录加一项，按第 2 节模板填全字段；
+3. 先检索既有契约，默认测试净增0；将独立失败模式并入最低稳定层级，不按工具数量添加测试；
+4. 只跑修改模块的既有契约及命中类型检查；MV3 用 `npm run build:boss` 并重载扩展和页面，旧油猴的 `dev:serve` 不用于 MV3；
 5. `npm run tool -- <新工具> '<args>'` 在真实页面跑通，再在 §7/§8 补上验证记录，才算完成。
 
-## 6. 面板内调试区（辅助）
+## 6. 旧油猴面板内调试区（仅兼容历史安装）
+
+MV3 只保留连接 popup，工具调试统一使用第0节 CLI。以下面板不进入新扩展，也不是本轮迁移的恢复目标。
 
 - 入口：投递面板标题栏的 🧪 按钮（`src/TestTools.vue`，在面板内展开，不另开窗口）。
 - 打开后面板主体只显示测试工具，业务步骤暂时隐藏；点「关闭测试」回到正常投递流程。
@@ -116,7 +122,7 @@ tool name=delete_thread status=error ms=120 error=not-found
 |---|---|---|---|
 | `get_page_state` | — | | 当前网址、是否聊天页、当前打开会话 |
 | `open_search` | `keyword`, `cityCode?`, `page?` | | 打开职位搜索页（保留当前筛选） |
-| `scan_jobs` | `withDetail?` | | 扫描岗位；`withDetail=true` 连 JD 一起读 |
+| `scan_jobs` | `withDetail?`, `offset?`, `limit?` | | 扫描岗位；JD每批最多10条，按 `nextOffset` 继续 |
 | `read_job_detail` | `jobId` | | 读指定岗位 JD 全文（只切详情，不投递） |
 | `apply_job` | `jobId` | ✓ | 对指定岗位点「立即沟通」并记账 |
 | `read_filters` | — | | 读筛选分组/选项/当前选中 |
@@ -137,6 +143,8 @@ tool name=delete_thread status=error ms=120 error=not-found
 | `list_tools` | — | | 列出工具清单 |
 
 ## 8. 完整链路的工具覆盖
+
+下表已验证记录来自旧油猴现场，不代表新 MV3 已完成真实页面验收；新扩展的命令、类型和构建验证分别记录在主仓路线文档。
 
 | 链路环节 | 工具 | 状态 |
 |---|---|---|
@@ -166,6 +174,8 @@ tool name=delete_thread status=error ms=120 error=not-found
 | 202 | `delivered` | 插件已取走、正在执行 | **继续等，绝不重发** |
 | 202 | `acked` | 插件执行完但结果没传回 | **不重发**，用 `read_messages` 核实 |
 | 404 | — | 命令不存在（或不属于当前用户） | 重新下发 |
+
+MV3 的 `open_thread` 跨页结果 `data=navigating` 是过渡状态，不能据此认定目标已打开；CLI `wait` 会继续查询原 command_id，`result` 返回 pending。最终只有目标头部确认后才成功，失败保留只读诊断能力。
 
 `send_message` 的 `data.delivery`：
 

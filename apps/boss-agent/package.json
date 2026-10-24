@@ -1,0 +1,10 @@
+{
+  "name": "@agent-agent-hr/boss-agent",
+  "version": "0.7.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node ../../scripts/build-extensions.mjs boss-agent",
+    "typecheck": "tsc --noEmit --project tsconfig.json"
+  }
+}

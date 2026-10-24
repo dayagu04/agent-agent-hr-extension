@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /><title>谷谷 BOSS 求职 Agent</title></head>
+  <body>
+    <main>
+      <header><h1>谷谷 BOSS 求职 Agent</h1><p>岗位、投递与会话工具</p></header>
+      <p class="notice">启用前，请先停用 BOSS 页上的旧油猴脚本。两个执行端同时在线可能重复执行 Agent 指令。</p>
+      <section aria-labelledby="account-title">
+        <h2 id="account-title">连接求职账号</h2>
+        <form id="login-form">
+          <label>服务地址<input id="api-base" type="url" value="https://gudaya.chat" required /></label>
+          <label>登录方式<select id="login-method"><option value="token">网站 Token</option><option value="password">邮箱和密码</option></select></label>
+          <div id="token-fields"><label>网站 Token<input id="token" type="password" autocomplete="off" /></label><p class="hint">从求职网站的插件设置复制 Token。Token 只存于扩展，不交给 BOSS 页面。</p></div>
+          <div id="password-fields" hidden><label>邮箱<input id="email" type="email" autocomplete="username" /></label><label>密码<input id="password" type="password" autocomplete="current-password" /></label></div>
+          <button type="submit" id="login">登录并同步配置</button>
+        </form>
+        <p id="account" role="status"></p><button type="button" id="logout" hidden>退出账号</button>
+      </section>
+      <section id="execution" hidden aria-labelledby="execution-title">
+        <h2 id="execution-title">BOSS 执行端</h2>
+        <label>后端记账简历<select id="resume"><option value="">请选择</option></select></label>
+        <label>BOSS 附件简历名（选填）<input id="resume-name" type="text" maxlength="200" placeholder="与 BOSS 已上传的附件名一致" /></label>
+        <button type="button" id="save-resume">保存简历选择</button>
+        <label>执行标签页<select id="boss-tab"><option value="">请先打开 BOSS 页面</option></select></label>
+        <button type="button" id="refresh">刷新标签页与配置</button>
+        <label class="check"><input id="legacy-disabled" type="checkbox" />我已停用旧油猴脚本，并确认只启用此执行端</label>
+        <div class="actions"><button type="button" id="enable">启用所选标签页</button><button type="button" id="disable" class="secondary">停用执行端</button></div>
+        <p class="hint">启用后，Agent 可以调用工具执行投递、发消息等动作。保持 BOSS 登录，页面冻结时任务会等待恢复。</p>
+      </section>
+      <section aria-labelledby="status-title"><h2 id="status-title">状态</h2><dl id="status"></dl><p id="message" role="status" aria-live="polite"></p></section>
+      <details><summary>Agent 工具接口</summary><p>由后端调用 <code>POST /api/plugin/tools/call</code>，并查询 <code>GET /api/plugin/tools/result/{id}</code>。此面板只管理连接，不自动投递。</p><p>遇到 <code>reconciliation_required</code>，先通过只读工具核实，不重复发送不可撤回动作。</p><ul id="tools"></ul></details>
+    </main>
+    <script type="module" src="/src/popup.ts"></script>
+  </body>
+</html>

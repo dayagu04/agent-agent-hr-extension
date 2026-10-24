@@ -1,0 +1,23 @@
+[
+  {
+    "platform": "moka",
+    "publicEntryEvidence": { "jobList": true, "jobDetail": true, "applyOutcome": "login_wall", "applicationFormVisible": false },
+    "profile": { "experienceEntries": [{ "id": "work-1", "organization": "示例芯片公司", "role": "工程师", "startDate": "2024-01", "endDate": "2025-01", "location": "上海市", "description": "脱敏职责" }] },
+    "field": { "label": "公司名称", "controlType": "text", "required": true, "repeated": { "groupKey": "moka-work-row-1", "groupLabel": "工作 / 实习经历第 1 行", "kind": "experience", "field": "organization" } },
+    "expected": { "action": "manual", "reason": "repeated_group_unbound" }
+  },
+  {
+    "platform": "beisen",
+    "publicEntryEvidence": { "jobList": true, "jobDetail": true, "applyOutcome": "login_wall", "applicationFormVisible": false },
+    "profile": { "location": "上海市" },
+    "field": { "label": "当前城市", "controlType": "combobox", "required": true },
+    "expected": { "action": "manual", "reason": "dynamic_choice_requires_user_action" }
+  },
+  {
+    "platform": "bytedance",
+    "publicEntryEvidence": { "jobList": true, "jobDetail": true, "applyOutcome": "login_wall", "applicationFormVisible": false },
+    "profile": {},
+    "field": { "label": "上传简历", "controlType": "file", "required": true },
+    "expected": { "action": "manual", "reason": "attachment_user_required" }
+  }
+]
