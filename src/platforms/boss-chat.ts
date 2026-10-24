@@ -1090,7 +1090,7 @@ export async function readMessages(
  * 定位会话头部容器。
  *
  * 以 span.position-name（岗位名）为锚点向上找：.name-text 在列表项里也有，
- * 直接 querySelector 会命中列表第一项而不是头部；position-name 只存在于头部。
+ * 直接 querySelector 会命中列表第一项而不是头部；岗位锚点也必须排除列表行。
  */
 /** 该元素是否位于左侧会话列表项内部 */
 function insideThreadList(el: HTMLElement): boolean {
@@ -1098,6 +1098,16 @@ function insideThreadList(el: HTMLElement): boolean {
     if (el.closest(sel)) return true
   }
   return false
+}
+
+/** Reuse the measured position selectors without accepting a list row as the active header. */
+function headerPositionIn(root: ParentNode = document): HTMLElement | null {
+  for (const selector of SEL.headerPosition) {
+    for (const element of Array.from(root.querySelectorAll<HTMLElement>(selector))) {
+      if (!insideThreadList(element)) return element
+    }
+  }
+  return null
 }
 
 /**
@@ -1115,7 +1125,7 @@ function insideThreadList(el: HTMLElement): boolean {
  * 且容器不得包含任何列表项，越界即停在上一层。
  */
 function findChatHeader(): HTMLElement | null {
-  const pos = firstMatch(SEL.headerPosition)
+  const pos = headerPositionIn()
   if (!pos) return null
   let cur: HTMLElement | null = pos.parentElement
   for (let i = 0; i < 6 && cur; i++) {
@@ -1139,7 +1149,7 @@ export function currentThreadId(): string {
   // 必须排掉列表项里的 .name-text，否则拿到的恒是列表第一项的姓名，
   // 会话指纹就永远不变 —— 切换检测（sendText 的 expectThread 核对）随之失效
   const name = text(header ? headerNameIn(header) : null)
-  const pos = text(firstMatch(SEL.headerPosition))
+  const pos = text(header ? headerPositionIn(header) : null)
   return `${name}|${pos}`
 }
 
@@ -1156,7 +1166,8 @@ export function currentThreadInfo(): {
   salary: string
   city: string
 } {
-  const jobTitle = text(firstMatch(SEL.headerPosition))
+  const header = findChatHeader()
+  const jobTitle = text(header ? headerPositionIn(header) : null)
   // 薪资/城市取头部的，且排掉列表项里的同名 class（否则按文档顺序会
   // 拿到列表第一项的值）
   const pickHeaderField = (sels: string[]): string => {
@@ -1172,7 +1183,6 @@ export function currentThreadInfo(): {
   const salary = pickHeaderField(SEL.headerSalary)
   const city = pickHeaderField(SEL.headerCity)
 
-  const header = findChatHeader()
   if (!header) return { company: '', hrName: '', jobTitle, salary, city }
 
   const nameEl = headerNameIn(header)

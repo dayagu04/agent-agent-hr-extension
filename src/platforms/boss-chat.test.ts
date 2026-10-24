@@ -8,6 +8,8 @@ import {
   clickCard,
   completeResumeSend,
   countResumeSentMarks,
+  currentThreadId,
+  currentThreadInfo,
   findDialogButton,
   findResumeDialog,
   isActionCardAllowed,
@@ -798,10 +800,13 @@ describe('thread matching', () => {
     expect(openThread('江苏迈泉科技', '人事专员')).toBe('ok')
     expect(target).toHaveBeenCalledTimes(2)
     expect(wrong).not.toHaveBeenCalled()
-    document.body.insertAdjacentHTML('beforeend', '<section id="header"><span class="name-text">吴先生</span><span class="company">江苏迈泉科技</span><span class="position-name">纯客服</span></section>')
+    rows[1].insertAdjacentHTML('beforeend', '<span class="position-name">人事专员</span>')
+    document.body.insertAdjacentHTML('beforeend', '<section id="header"><span class="name-text">周女士</span><span class="company">江苏迈泉科技</span><span class="position-name">纯客服</span></section>')
     vi.spyOn(document.querySelector('#header .company')!, 'getBoundingClientRect').mockReturnValue({
       x: 100, y: 0, top: 0, left: 100, right: 300, bottom: 40, width: 200, height: 40, toJSON: () => ({}),
     })
+    expect(currentThreadInfo()).toMatchObject({ company: '江苏迈泉科技', hrName: '周女士', jobTitle: '纯客服' })
+    expect(currentThreadId()).toBe('周女士|纯客服')
     vi.useFakeTimers()
     try {
       target.mockImplementationOnce(() => { setTimeout(() => {
@@ -814,6 +819,8 @@ describe('thread matching', () => {
       expect(finished).toBe(false)
       await vi.advanceTimersByTimeAsync(200)
       expect(await result).toBe('ok')
+      expect(currentThreadInfo().jobTitle).toBe('人事专员')
+      expect(currentThreadId()).toBe('周女士|人事专员')
       expect(target).toHaveBeenCalledTimes(3)
       expect(wrong).not.toHaveBeenCalled()
     } finally { vi.useRealTimers() }
