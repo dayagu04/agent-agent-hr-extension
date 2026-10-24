@@ -803,29 +803,27 @@ async function findThreadByScrolling(
 /**
  * 在会话列表里定位并打开指定会话（供面板点 HR 卡片跳转用）。
  *
- * 匹配依据只能是公司名子串：列表项把「姓名+公司+职务」拼成一串且通常不含
- * 独立岗位名，无法按 company+jobTitle 精确匹配；同公司多岗位会命中第一个，
- * 这是 BOSS DOM 的信息量限制。
+ * 岗位名可能拼在整行文本中，也可能只存在行组件数据中。
+ * 显式岗位不能退回公司首条；匹配多条时拒绝切换，由调用方进一步限定目标。
  *
- * @returns 'ok' 已触发切换 | 'not-found' 列表里没有匹配项 | 'failed' 找到但切换失败
+ * @returns 'ok' 已触发切换 | 'not-found' 无匹配 | 'ambiguous' 多条匹配 | 'failed' 切换失败
  */
-export function openThread(company: string, jobTitle = ''): 'ok' | 'not-found' | 'failed' {
-  const norm = (s: string) => s.replace(/\s+/g, '').toLowerCase()
-  const target = norm(company)
-  if (!target) return 'not-found'
-
+export function openThread(company: string, jobTitle = ''): 'ok' | 'not-found' | 'ambiguous' | 'failed' {
   const threads = listThreads()
-  // 先试「公司+岗位都能对上」，退回「仅公司对上」；列表项通常没有岗位名
-  const wanted = norm(jobTitle)
-  let hit = wanted
-    ? threads.find((t) => norm(t.company).includes(target) && norm(t.jobTitle).includes(wanted))
-    : undefined
-  if (!hit) hit = threads.find((t) => norm(t.company).includes(target))
-
-  if (!hit) {
+  const matches = threads.filter((thread) => {
+    if (threadRowMatchesText(thread, company, jobTitle)) return true
+    const info = readRowJobInfo(thread.el)
+    return threadRowMatchesText({ ...thread, company: info.brandName || thread.company, jobTitle: info.title || thread.jobTitle }, company, jobTitle)
+  })
+  if (!matches.length) {
     diag('CHAT', 'openThread 未找到会话', { candidateCount: Math.min(threads.length, 8) })
     return 'not-found'
   }
+  if (matches.length > 1) {
+    diag('CHAT', 'openThread 目标不唯一', { matches: matches.length })
+    return 'ambiguous'
+  }
+  const hit = matches[0]
 
   try {
     if (!switchThreadViaVue(hit.el)) realClick(hit.el)

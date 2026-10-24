@@ -25,7 +25,7 @@ vi.mock('./api', () => ({ fetchGreeting: vi.fn(async () => ''), recordApplicatio
 
 import { diag } from './logger'
 import { callTool, toolCatalog } from './tools'
-import { sendMessageText } from './platforms/boss-chat'
+import { currentThreadInfo, openThread, sendMessageText } from './platforms/boss-chat'
 import { detectPlatform } from './platforms/factory'
 import { fetchGreeting, recordApplication } from './api'
 import { loadConfig } from './config'
@@ -75,10 +75,25 @@ describe('agent tools', () => {
 })
 
 describe('chain tools', () => {
-  it('reports the current page state and open thread', async () => {
+  it('reports page state and only reuses the requested thread header', async () => {
     const r = await callTool('get_page_state', {})
     expect(r.ok).toBe(true)
     expect(r.data).toMatchObject({ chat: true, thread: { company: 'A', jobTitle: 'B' } })
+    vi.mocked(openThread).mockClear()
+    expect(await callTool('read_thread_header', { company: 'A', jobTitle: 'B' })).toMatchObject({ ok: true, data: { jobTitle: 'B' } })
+    expect(openThread).not.toHaveBeenCalled()
+    vi.useFakeTimers()
+    try {
+      vi.mocked(currentThreadInfo)
+        .mockReturnValueOnce({ company: 'A', jobTitle: 'B' } as never)
+        .mockReturnValueOnce({ company: 'A', jobTitle: 'C' } as never)
+      const header = callTool('read_thread_header', { company: 'A', jobTitle: 'C' })
+      await vi.runAllTimersAsync()
+      expect(await header).toMatchObject({ ok: true, data: { jobTitle: 'C' } })
+      expect(openThread).toHaveBeenLastCalledWith('A', 'C')
+      vi.mocked(openThread).mockReturnValueOnce('ambiguous')
+      expect(await callTool('read_thread_header', { company: 'A', jobTitle: 'C' })).toEqual({ ok: false, error: 'ambiguous' })
+    } finally { vi.useRealTimers() }
   })
 
   it('requires a keyword before navigating to search', async () => {

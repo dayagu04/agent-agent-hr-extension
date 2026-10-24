@@ -461,7 +461,9 @@ export function createToolDefinitions(runtime: ToolRuntime): ToolSpec[] {
         if (!company) return { ok: false, error: 'company_required' }
         const jobTitle = toolString(args, 'jobTitle') || toolString(args, 'job_title')
         const current = currentThreadInfo()
-        const alreadyOpen = !!current.company && current.company.includes(company)
+        const norm = (value: string) => value.replace(/\s+/g, '').toLowerCase()
+        const alreadyOpen = !!current.company && norm(current.company).includes(norm(company)) &&
+          (!jobTitle || norm(current.jobTitle).includes(norm(jobTitle)))
         if (!alreadyOpen) {
           const r = openThread(company, jobTitle)
           if (r !== 'ok') return { ok: false, error: r }

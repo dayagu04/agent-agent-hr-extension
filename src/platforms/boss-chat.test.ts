@@ -10,6 +10,7 @@ import {
   isContactCardAllowed,
   listPendingCardKinds,
   listResumeOptions,
+  openThread,
   readMessages,
   selectResumeRowByIndex,
   resumeDialogKind,
@@ -769,15 +770,42 @@ describe('resume dialog false positives', () => {
   })
 })
 
-describe('delete thread matching', () => {
-  it('matches when the job title is glued into the company text', () => {
+describe('thread matching', () => {
+  it('opens the unique requested job from row text or component data', () => {
     const row = { company: '江苏迈泉科技人事专员', jobTitle: '', name: '周女士' }
     expect(threadRowMatchesText(row, '江苏迈泉科技', '人事专员')).toBe(true)
     expect(threadRowMatchesText(row, '江苏迈泉科技')).toBe(true)
+    document.body.innerHTML = `<ul class="user-list">
+      <li><span class="name-box"><span class="name-text">吴先生</span>江苏迈泉科技纯客服</span></li>
+      <li><span class="name-box"><span class="name-text">周女士</span>江苏迈泉科技人事专员</span></li>
+    </ul>`
+    const rows = Array.from(document.querySelectorAll('li'))
+    const wrong = vi.fn()
+    const target = vi.fn()
+    Object.assign(rows[0], { __vue__: { handleClick: wrong } })
+    Object.assign(rows[1], { __vue__: { handleClick: target } })
+    expect(openThread('江苏迈泉科技', '人事专员')).toBe('ok')
+    expect(target).toHaveBeenCalledTimes(1)
+    expect(wrong).not.toHaveBeenCalled()
+    rows[1].querySelector('.name-box')!.textContent = '江苏迈泉科技'
+    Object.assign(rows[1], { __vue__: { handleClick: target, boss: { securityId: 'target', brandName: '江苏迈泉科技', positionName: '人事专员' } } })
+    expect(openThread('江苏迈泉科技', '人事专员')).toBe('ok')
+    expect(target).toHaveBeenCalledTimes(2)
+    expect(wrong).not.toHaveBeenCalled()
   })
 
-  it('does not match a different job at the same company', () => {
+  it('never opens a different job or the first of multiple matching threads', () => {
     const row = { company: '江苏迈泉科技纯客服', jobTitle: '', name: '周女士' }
     expect(threadRowMatchesText(row, '江苏迈泉科技', '人事专员')).toBe(false)
+    document.body.innerHTML = `<ul class="user-list">
+      <li><span class="name-box"><span class="name-text">吴先生</span>江苏迈泉科技纯客服</span></li>
+      <li><span class="name-box"><span class="name-text">周女士</span>江苏迈泉科技纯客服</span></li>
+    </ul>`
+    const select = vi.fn()
+    for (const element of document.querySelectorAll('li')) Object.assign(element, { __vue__: { handleClick: select } })
+    expect(openThread('江苏迈泉科技', '人事专员')).toBe('not-found')
+    expect(openThread('江苏迈泉科技')).toBe('ambiguous')
+    expect(openThread('江苏迈泉科技', '纯客服')).toBe('ambiguous')
+    expect(select).not.toHaveBeenCalled()
   })
 })
